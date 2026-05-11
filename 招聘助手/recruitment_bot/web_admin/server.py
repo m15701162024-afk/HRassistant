@@ -12,8 +12,10 @@
 from __future__ import annotations
 
 import base64
+import csv
 import hashlib
 import hmac
+import io
 import json
 import os
 import sqlite3
@@ -115,6 +117,24 @@ def json_response(handler: SimpleHTTPRequestHandler, payload: Any, status: int =
     handler.wfile.write(body)
 
 
+def text_response(
+    handler: SimpleHTTPRequestHandler,
+    body: str,
+    status: int = 200,
+    content_type: str = "text/plain; charset=utf-8",
+    filename: str | None = None,
+) -> None:
+    data = body.encode("utf-8-sig")
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    if filename:
+        handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
 def read_json(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
     length = int(handler.headers.get("Content-Length", "0") or "0")
     if length <= 0:
@@ -196,19 +216,102 @@ def save_recommendation(candidate: dict[str, Any], report: str = "") -> dict[str
     return {"success": True, "id": rec_id}
 
 
-def list_rows(table: str, limit: int = 200, date_field: str | None = None, date_value: str | None = None) -> list[dict[str, Any]]:
+def list_rows(
+    table: str,
+    limit: int = 200,
+    date_field: str | None = None,
+    date_value: str | None = None,
+    filters: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     allowed = {"candidates", "recommendations", "reports"}
     if table not in allowed:
         raise ValueError("invalid table")
     sql = f"SELECT * FROM {table}"
     params: list[Any] = []
+    where: list[str] = []
     if date_field and date_value:
-        sql += f" WHERE {date_field} LIKE ?"
+        where.append(f"{date_field} LIKE ?")
         params.append(f"{date_value}%")
+    filters = filters or {}
+    q = (filters.get("q") or "").strip()
+    source = (filters.get("source") or "").strip()
+    account = (filters.get("account") or "").strip()
+    if q:
+        searchable = {
+            "candidates": ["name", "role", "education", "experience", "expected_salary", "recommendation", "raw_json"],
+            "recommendations": ["name", "role", "recommendation", "next_step", "raw_json"],
+            "reports": ["name", "role", "report"],
+        }[table]
+        where.append("(" + " OR ".join(f"{field} LIKE ?" for field in searchable) + ")")
+        params.extend([f"%{q}%"] * len(searchable))
+    if source and table in {"candidates", "recommendations"}:
+        where.append("source LIKE ?")
+        params.append(f"%{source}%")
+    if account and table in {"candidates", "recommendations"}:
+        where.append("account_name LIKE ?")
+        params.append(f"%{account}%")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
     with connect() as conn:
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def get_stats() -> dict[str, Any]:
+    today = date_str()
+    yesterday = date_str(-1)
+    with connect() as conn:
+        total_candidates = conn.execute("SELECT COUNT(*) AS count FROM candidates").fetchone()["count"]
+        today_candidates = conn.execute(
+            "SELECT COUNT(*) AS count FROM candidates WHERE received_date = ?",
+            (today,),
+        ).fetchone()["count"]
+        yesterday_candidates = conn.execute(
+            "SELECT COUNT(*) AS count FROM candidates WHERE received_date = ?",
+            (yesterday,),
+        ).fetchone()["count"]
+        recommendation_count = conn.execute("SELECT COUNT(*) AS count FROM recommendations").fetchone()["count"]
+        report_count = conn.execute("SELECT COUNT(*) AS count FROM reports").fetchone()["count"]
+        avg_score = conn.execute("SELECT AVG(score) AS score FROM recommendations").fetchone()["score"] or 0
+        by_source = [
+            dict(row) for row in conn.execute(
+                "SELECT COALESCE(NULLIF(source, ''), '未知来源') AS name, COUNT(*) AS count "
+                "FROM candidates GROUP BY COALESCE(NULLIF(source, ''), '未知来源') ORDER BY count DESC"
+            ).fetchall()
+        ]
+        by_account = [
+            dict(row) for row in conn.execute(
+                "SELECT COALESCE(NULLIF(account_name, ''), '未识别') AS name, COUNT(*) AS count "
+                "FROM candidates GROUP BY COALESCE(NULLIF(account_name, ''), '未识别') ORDER BY count DESC"
+            ).fetchall()
+        ]
+        top_recommendations = [
+            dict(row) for row in conn.execute(
+                "SELECT name, role, score, recommendation, next_step, source, account_name, created_at "
+                "FROM recommendations ORDER BY score DESC, created_at DESC LIMIT 10"
+            ).fetchall()
+        ]
+    return {
+        "totalCandidates": total_candidates,
+        "todayCandidates": today_candidates,
+        "yesterdayCandidates": yesterday_candidates,
+        "recommendationCount": recommendation_count,
+        "reportCount": report_count,
+        "averageScore": round(float(avg_score), 1),
+        "bySource": by_source,
+        "byAccount": by_account,
+        "topRecommendations": top_recommendations,
+    }
+
+
+def rows_to_csv(rows: list[dict[str, Any]], columns: list[tuple[str, str]]) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([title for _, title in columns])
+    for row in rows:
+        writer.writerow([row.get(key, "") for key, _ in columns])
+    return output.getvalue()
 
 
 def get_settings() -> dict[str, Any]:
@@ -435,17 +538,65 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             if parsed.path == "/api/health":
                 json_response(self, {"success": True, "time": now_iso()})
+            elif parsed.path == "/api/stats":
+                json_response(self, get_stats())
             elif parsed.path == "/api/settings":
                 json_response(self, get_settings())
             elif parsed.path == "/api/candidates":
-                json_response(self, {"items": list_rows("candidates", int(query.get("limit", ["200"])[0]))})
+                json_response(self, {"items": list_rows("candidates", int(query.get("limit", ["200"])[0]), filters={
+                    "q": query.get("q", [""])[0],
+                    "source": query.get("source", [""])[0],
+                    "account": query.get("account", [""])[0],
+                })})
             elif parsed.path == "/api/recommendations":
-                json_response(self, {"items": list_rows("recommendations", int(query.get("limit", ["200"])[0]))})
+                json_response(self, {"items": list_rows("recommendations", int(query.get("limit", ["200"])[0]), filters={
+                    "q": query.get("q", [""])[0],
+                    "source": query.get("source", [""])[0],
+                    "account": query.get("account", [""])[0],
+                })})
             elif parsed.path == "/api/reports":
-                json_response(self, {"items": list_rows("reports", int(query.get("limit", ["100"])[0]))})
+                json_response(self, {"items": list_rows("reports", int(query.get("limit", ["100"])[0]), filters={
+                    "q": query.get("q", [""])[0],
+                })})
             elif parsed.path == "/api/summary":
                 scope = query.get("scope", ["all"])[0]
                 json_response(self, {"markdown": build_summary(scope)})
+            elif parsed.path == "/api/export/candidates.csv":
+                rows = list_rows("candidates", 10000, filters={
+                    "q": query.get("q", [""])[0],
+                    "source": query.get("source", [""])[0],
+                    "account": query.get("account", [""])[0],
+                })
+                text_response(self, rows_to_csv(rows, [
+                    ("received_date", "日期"),
+                    ("name", "姓名"),
+                    ("role", "岗位"),
+                    ("education", "学历"),
+                    ("experience", "经验"),
+                    ("expected_salary", "薪资"),
+                    ("score", "匹配度"),
+                    ("recommendation", "推荐意见"),
+                    ("source", "数据来源"),
+                    ("account_name", "账号信息"),
+                    ("source_url", "来源链接"),
+                    ("created_at", "创建时间"),
+                ]), content_type="text/csv; charset=utf-8", filename="candidates.csv")
+            elif parsed.path == "/api/export/recommendations.csv":
+                rows = list_rows("recommendations", 10000, filters={
+                    "q": query.get("q", [""])[0],
+                    "source": query.get("source", [""])[0],
+                    "account": query.get("account", [""])[0],
+                })
+                text_response(self, rows_to_csv(rows, [
+                    ("created_at", "推荐时间"),
+                    ("name", "姓名"),
+                    ("role", "岗位"),
+                    ("score", "匹配度"),
+                    ("recommendation", "推荐意见"),
+                    ("next_step", "下一步"),
+                    ("source", "数据来源"),
+                    ("account_name", "账号信息"),
+                ]), content_type="text/csv; charset=utf-8", filename="recommendations.csv")
             else:
                 super().do_GET()
         except Exception as exc:

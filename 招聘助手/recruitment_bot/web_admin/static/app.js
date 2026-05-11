@@ -1,5 +1,18 @@
 const $ = (id) => document.getElementById(id);
 
+const state = {
+  settings: {},
+  stats: {},
+  candidates: [],
+  recommendations: [],
+  reports: [],
+  filters: {
+    q: '',
+    source: '',
+    account: '',
+  },
+};
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
@@ -12,16 +25,8 @@ async function api(path, options = {}) {
   return data;
 }
 
-function text(value) {
-  return value == null ? '' : String(value);
-}
-
-function row(cells) {
-  return `<tr>${cells.map(cell => `<td>${escapeHtml(text(cell))}</td>`).join('')}</tr>`;
-}
-
 function escapeHtml(value) {
-  return value.replace(/[&<>"']/g, (char) => ({
+  return String(value == null ? '' : value).replace(/[&<>"']/g, (char) => ({
     '&': '&amp;',
     '<': '&lt;',
     '>': '&gt;',
@@ -30,27 +35,69 @@ function escapeHtml(value) {
   }[char]));
 }
 
+function row(cells) {
+  return `<tr>${cells.map(cell => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`;
+}
+
+function toast(message, type = 'success') {
+  const el = $('toast');
+  el.textContent = message;
+  el.className = `toast ${type}`;
+  el.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => {
+    el.hidden = true;
+  }, 2600);
+}
+
+function queryString() {
+  const params = new URLSearchParams();
+  Object.entries(state.filters).forEach(([key, value]) => {
+    if (value) params.set(key, value);
+  });
+  return params.toString();
+}
+
+async function loadHealth() {
+  try {
+    await api('/api/health');
+    $('healthBadge').textContent = '服务正常';
+    $('healthBadge').className = 'badge ok';
+  } catch (err) {
+    $('healthBadge').textContent = '服务异常';
+    $('healthBadge').className = 'badge danger';
+  }
+}
+
 async function loadSettings() {
   const settings = await api('/api/settings');
+  state.settings = settings;
   $('dingtalkWebhook').value = settings.dingtalkWebhook || '';
   $('dingtalkSecret').value = settings.dingtalkSecret || '';
-  $('accountName').value = settings.accountName || '';
+  $('accountName').value = settings.accountName || settings.detectedAccount?.name || '';
+  $('accountPlatform').value = settings.accountPlatform || settings.detectedAccount?.platform || 'BOSS直聘';
   $('scheduledPushTime').value = settings.scheduledPushTime || '10:00';
   $('toggleScheduleBtn').textContent = settings.scheduledPushEnabled ? '关闭定时推送' : '开启定时推送';
+  $('scheduleStatus').textContent = settings.scheduledPushEnabled
+    ? `已开启 ${settings.scheduledPushTime || '10:00'}`
+    : '未开启';
+  $('scheduleStatus').className = settings.scheduledPushEnabled ? 'badge ok' : 'badge';
   $('callbackUrl').textContent = `${location.origin}/api/dingtalk/callback`;
 }
 
-async function saveSettings() {
+async function saveSettings(showToast = true) {
   await api('/api/settings', {
     method: 'POST',
     body: JSON.stringify({
       dingtalkWebhook: $('dingtalkWebhook').value.trim(),
       dingtalkSecret: $('dingtalkSecret').value.trim(),
       accountName: $('accountName').value.trim(),
+      accountPlatform: $('accountPlatform').value.trim() || 'BOSS直聘',
       scheduledPushTime: $('scheduledPushTime').value || '10:00',
     }),
   });
-  alert('配置已保存');
+  await loadSettings();
+  if (showToast) toast('配置已保存');
 }
 
 async function toggleSchedule() {
@@ -61,36 +108,90 @@ async function toggleSchedule() {
       dingtalkWebhook: $('dingtalkWebhook').value.trim(),
       dingtalkSecret: $('dingtalkSecret').value.trim(),
       accountName: $('accountName').value.trim(),
+      accountPlatform: $('accountPlatform').value.trim() || 'BOSS直聘',
       scheduledPushTime: $('scheduledPushTime').value || '10:00',
       scheduledPushEnabled: !settings.scheduledPushEnabled,
     }),
   });
   await loadSettings();
+  toast(settings.scheduledPushEnabled ? '已关闭定时推送' : '已开启定时推送');
 }
 
 async function loadData() {
-  const [candidates, recommendations, reports] = await Promise.all([
-    api('/api/candidates?limit=500'),
-    api('/api/recommendations?limit=500'),
-    api('/api/reports?limit=100'),
+  const qs = queryString();
+  const suffix = qs ? `&${qs}` : '';
+  const [stats, candidates, recommendations, reports] = await Promise.all([
+    api('/api/stats'),
+    api(`/api/candidates?limit=500${suffix}`),
+    api(`/api/recommendations?limit=500${suffix}`),
+    api(`/api/reports?limit=200${state.filters.q ? `&q=${encodeURIComponent(state.filters.q)}` : ''}`),
   ]);
 
-  $('candidateCount').textContent = candidates.items.length;
-  $('recommendationCount').textContent = recommendations.items.length;
-  $('reportCount').textContent = reports.items.length;
+  state.stats = stats;
+  state.candidates = candidates.items || [];
+  state.recommendations = recommendations.items || [];
+  state.reports = reports.items || [];
 
-  $('candidateRows').innerHTML = candidates.items.map(item => row([
+  renderStats();
+  renderBreakdowns();
+  renderTables();
+}
+
+function renderStats() {
+  $('candidateCount').textContent = state.stats.totalCandidates || 0;
+  $('todayCount').textContent = state.stats.todayCandidates || 0;
+  $('yesterdayCount').textContent = state.stats.yesterdayCandidates || 0;
+  $('recommendationCount').textContent = state.stats.recommendationCount || 0;
+  $('averageScore').textContent = `${state.stats.averageScore || 0}%`;
+  $('reportCount').textContent = state.stats.reportCount || 0;
+}
+
+function renderBreakdowns() {
+  $('sourceBreakdown').innerHTML = renderBreakdown(state.stats.bySource || []);
+  $('accountBreakdown').innerHTML = renderBreakdown(state.stats.byAccount || []);
+  $('sourceCountHint').textContent = `${(state.stats.bySource || []).length} 类`;
+  $('accountCountHint').textContent = `${(state.stats.byAccount || []).length} 个`;
+
+  const top = state.stats.topRecommendations || [];
+  $('topRecommendations').innerHTML = top.map(item => `
+    <div class="top-item">
+      <strong>${escapeHtml(item.name || '未识别')}</strong>
+      <span>${escapeHtml(item.role || '待确认')}</span>
+      <b>${escapeHtml(item.score || 0)}%</b>
+      <em>${escapeHtml(item.recommendation || '待评估')}</em>
+    </div>
+  `).join('') || '<p class="empty">暂无推荐数据</p>';
+}
+
+function renderBreakdown(items) {
+  const max = Math.max(1, ...items.map(item => Number(item.count || 0)));
+  return items.slice(0, 8).map(item => {
+    const percent = Math.round((Number(item.count || 0) / max) * 100);
+    return `
+      <div class="breakdown-row">
+        <span title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
+        <div><i style="width:${percent}%"></i></div>
+        <b>${escapeHtml(item.count)}</b>
+      </div>
+    `;
+  }).join('') || '<p class="empty">暂无数据</p>';
+}
+
+function renderTables() {
+  $('candidateRows').innerHTML = state.candidates.map(item => row([
     item.received_date,
     item.name,
     item.role,
     item.education,
     item.experience,
     item.expected_salary,
+    `${item.score || 0}%`,
+    item.recommendation,
     item.source,
     item.account_name,
-  ])).join('') || row(['-', '暂无数据', '-', '-', '-', '-', '-', '-']);
+  ])).join('') || row(['-', '暂无数据', '-', '-', '-', '-', '-', '-', '-', '-']);
 
-  $('recommendationRows').innerHTML = recommendations.items.map(item => row([
+  $('recommendationRows').innerHTML = state.recommendations.map(item => row([
     item.name,
     item.role,
     `${item.score || 0}%`,
@@ -98,20 +199,55 @@ async function loadData() {
     item.source,
     item.account_name,
     item.next_step,
-  ])).join('') || row(['暂无数据', '-', '-', '-', '-', '-', '-']);
+    item.created_at,
+  ])).join('') || row(['暂无数据', '-', '-', '-', '-', '-', '-', '-']);
 
-  $('reportList').innerHTML = reports.items.slice(0, 20).map(item => `
+  $('reportList').innerHTML = state.reports.slice(0, 80).map((item, index) => `
     <article class="report">
-      <h3>${escapeHtml(item.name || '候选人')} - ${escapeHtml(item.role || '待确认')}</h3>
-      <pre>${escapeHtml(item.report || '')}</pre>
+      <div>
+        <h3>${escapeHtml(item.name || '候选人')} - ${escapeHtml(item.role || '待确认')}</h3>
+        <p>${escapeHtml(item.created_at || '')}</p>
+      </div>
+      <button class="secondary small" data-report-index="${index}">查看报告</button>
     </article>
-  `).join('') || '<p>暂无报告</p>';
+  `).join('') || '<p class="empty">暂无报告</p>';
+
+  document.querySelectorAll('[data-report-index]').forEach(button => {
+    button.addEventListener('click', () => {
+      const item = state.reports[Number(button.dataset.reportIndex)];
+      openDialog(`${item.name || '候选人'} - ${item.role || '待确认'}`, item.report || '');
+    });
+  });
+}
+
+function applyFilters() {
+  state.filters = {
+    q: $('searchInput').value.trim(),
+    source: $('sourceFilter').value.trim(),
+    account: $('accountFilter').value.trim(),
+  };
+  loadData().catch(showError);
+}
+
+function clearFilters() {
+  $('searchInput').value = '';
+  $('sourceFilter').value = '';
+  $('accountFilter').value = '';
+  applyFilters();
+}
+
+function exportCsv(type) {
+  const qs = queryString();
+  const path = type === 'recommendations'
+    ? '/api/export/recommendations.csv'
+    : '/api/export/candidates.csv';
+  location.href = qs ? `${path}?${qs}` : path;
 }
 
 async function ask(replyToDingTalk = false) {
   const question = $('questionInput').value.trim();
   if (!question) {
-    alert('请输入问题');
+    toast('请输入问题', 'warning');
     return;
   }
   $('answerBox').textContent = 'Agent 正在查询历史数据...';
@@ -120,27 +256,71 @@ async function ask(replyToDingTalk = false) {
     body: JSON.stringify({ question, replyToDingTalk }),
   });
   $('answerBox').textContent = result.answer;
+  if (replyToDingTalk) toast('答案已推送钉钉');
 }
 
 async function testDingTalk() {
-  await saveSettings();
+  await saveSettings(false);
   const result = await api('/api/dingtalk/test', { method: 'POST', body: '{}' });
-  alert(result.success ? '钉钉测试消息已发送' : result.message);
+  toast(result.success ? '钉钉测试消息已发送' : result.message, result.success ? 'success' : 'warning');
 }
 
 async function pushYesterday() {
   const result = await api('/api/summary/push?scope=yesterday', { method: 'POST', body: '{}' });
-  alert(result.success ? '昨日汇总已推送' : result.message);
+  toast(result.success ? '昨日汇总已推送' : result.message, result.success ? 'success' : 'warning');
 }
 
-$('refreshBtn').addEventListener('click', loadData);
-$('saveSettingsBtn').addEventListener('click', saveSettings);
-$('toggleScheduleBtn').addEventListener('click', toggleSchedule);
-$('testDingTalkBtn').addEventListener('click', testDingTalk);
-$('pushYesterdayBtn').addEventListener('click', pushYesterday);
-$('askBtn').addEventListener('click', () => ask(false));
-$('askAndPushBtn').addEventListener('click', () => ask(true));
+async function previewSummary() {
+  const result = await api('/api/summary?scope=yesterday');
+  openDialog('昨日招聘数据汇总预览', result.markdown || '');
+}
 
-loadSettings().then(loadData).catch(err => {
-  $('answerBox').textContent = `加载失败：${err.message}`;
-});
+function openDialog(title, content) {
+  $('dialogTitle').textContent = title;
+  $('dialogContent').textContent = content;
+  $('detailDialog').showModal();
+}
+
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.classList.toggle('active', tab.dataset.tab === name);
+  });
+  document.querySelectorAll('.tab-panel').forEach(panel => {
+    panel.classList.toggle('active', panel.id === `${name}Tab`);
+  });
+}
+
+function showError(err) {
+  toast(err.message || '操作失败', 'danger');
+  $('answerBox').textContent = `操作失败：${err.message}`;
+}
+
+function bindEvents() {
+  $('refreshBtn').addEventListener('click', () => refreshAll().catch(showError));
+  $('saveSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
+  $('toggleScheduleBtn').addEventListener('click', () => toggleSchedule().catch(showError));
+  $('testDingTalkBtn').addEventListener('click', () => testDingTalk().catch(showError));
+  $('pushYesterdayBtn').addEventListener('click', () => pushYesterday().catch(showError));
+  $('previewSummaryBtn').addEventListener('click', () => previewSummary().catch(showError));
+  $('askBtn').addEventListener('click', () => ask(false).catch(showError));
+  $('askAndPushBtn').addEventListener('click', () => ask(true).catch(showError));
+  $('applyFilterBtn').addEventListener('click', applyFilters);
+  $('clearFilterBtn').addEventListener('click', clearFilters);
+  $('exportCandidatesBtn').addEventListener('click', () => exportCsv('candidates'));
+  $('exportRecommendationsBtn').addEventListener('click', () => exportCsv('recommendations'));
+  $('closeDialogBtn').addEventListener('click', () => $('detailDialog').close());
+  $('searchInput').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') applyFilters();
+  });
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => showTab(tab.dataset.tab));
+  });
+}
+
+async function refreshAll() {
+  await Promise.all([loadHealth(), loadSettings()]);
+  await loadData();
+}
+
+bindEvents();
+refreshAll().catch(showError);

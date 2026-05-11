@@ -505,6 +505,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'detectedAccountUpdated') {
+    const accountInfo = message.accountInfo || {};
+    chrome.storage.local.get(['settings'], ({ settings = DEFAULT_SETTINGS }) => {
+      const mergedSettings = {
+        ...DEFAULT_SETTINGS,
+        ...settings,
+        accountName: accountInfo.name || settings.accountName || '',
+        accountPlatform: accountInfo.platform || settings.accountPlatform || 'BOSS直聘',
+      };
+      chrome.storage.local.set({ settings: mergedSettings, detectedAccount: accountInfo });
+      syncToBackend('/api/settings', {
+        accountName: mergedSettings.accountName,
+        accountPlatform: mergedSettings.accountPlatform,
+        detectedAccount: accountInfo,
+      }).catch(() => {});
+      sendResponse({ success: true, accountInfo });
+    });
+    return true;
+  }
+
   if (message.action === 'testDingTalk') {
     sendDingTalkMarkdown({
       title: '招聘助手钉钉连接测试',

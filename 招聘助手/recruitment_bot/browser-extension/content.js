@@ -1131,7 +1131,18 @@ function parseAge(text) {
 }
 
 function detectRecruiterAccountInfo() {
+  const benefitRightInfo = detectAccountInfoRightOfBenefits();
+  if (benefitRightInfo.name) {
+    persistDetectedAccount(benefitRightInfo);
+    return benefitRightInfo;
+  }
+
   const selectors = [
+    '[class*="recruiter"] [class*="name"]',
+    '[class*="hr"] [class*="name"]',
+    '[class*="boss"] [class*="name"]',
+    '[class*="user-info"]',
+    '[class*="account-info"]',
     '[class*="user"] [class*="name"]',
     '[class*="account"] [class*="name"]',
     '[class*="avatar"] + *',
@@ -1141,10 +1152,10 @@ function detectRecruiterAccountInfo() {
   ];
   for (const selector of selectors) {
     const element = document.querySelector(selector);
-    const text = normalizeText(element?.textContent || '');
-    if (isLikelyRecruiterName(text)) {
-      const info = { name: text.slice(0, 40), platform: 'BOSS直聘', detectedAt: new Date().toISOString() };
-      chrome.storage.local.set({ detectedAccount: info });
+    const text = sanitizeAccountText(element?.textContent || '');
+    if (isLikelyRecruiterName(text, element)) {
+      const info = buildAccountInfo(text, 'selector', element);
+      persistDetectedAccount(info);
       return info;
     }
   }
@@ -1152,18 +1163,138 @@ function detectRecruiterAccountInfo() {
   const bodyText = normalizeText(document.body.textContent || '');
   const match = bodyText.match(/(?:招聘者|当前账号|我的账号|账号)[:：\s]*([\u4e00-\u9fa5A-Za-z0-9_-]{2,20})/);
   if (match && isLikelyRecruiterName(match[1])) {
-    const info = { name: match[1], platform: 'BOSS直聘', detectedAt: new Date().toISOString() };
-    chrome.storage.local.set({ detectedAccount: info });
+    const info = buildAccountInfo(match[1], 'body-regex', null);
+    persistDetectedAccount(info);
     return info;
   }
 
   return { name: '', platform: 'BOSS直聘', detectedAt: new Date().toISOString() };
 }
 
-function isLikelyRecruiterName(text) {
+function detectAccountInfoRightOfBenefits() {
+  const anchors = findElementsContainingText('账号权益')
+    .filter(isActionableElement)
+    .sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+
+  for (const anchor of anchors) {
+    const anchorRect = anchor.getBoundingClientRect();
+    const scope = anchor.closest('header, nav, [class*="header"], [class*="top"], [class*="nav"], [class*="bar"]') || document.body;
+    const candidates = Array.from(scope.querySelectorAll('span, div, a, button, p, label'))
+      .map(element => {
+        if (element === anchor || !isActionableElement(element)) return null;
+        const rect = element.getBoundingClientRect();
+        const text = sanitizeAccountText(element.textContent || '');
+        if (!text || !isLikelyRecruiterName(text, element)) return null;
+
+        const isRightSide = rect.left >= anchorRect.right - 8;
+        const isSameLine = rect.top < anchorRect.bottom + 36 && rect.bottom > anchorRect.top - 36;
+        const isHeaderArea = rect.top <= Math.max(anchorRect.bottom + 80, 160);
+        if (!isRightSide || !isSameLine || !isHeaderArea) return null;
+
+        const distance = Math.max(0, rect.left - anchorRect.right) + Math.abs(rect.top - anchorRect.top) * 0.8;
+        const hasAvatarNeighbor = Boolean(
+          element.querySelector('img, [class*="avatar"]') ||
+          element.previousElementSibling?.querySelector?.('img, [class*="avatar"]') ||
+          element.parentElement?.querySelector?.('img, [class*="avatar"]')
+        );
+        const score = distance - (hasAvatarNeighbor ? 40 : 0) - (/HR|招聘|经理|主管|顾问|女士|先生/.test(text) ? 20 : 0);
+        return { element, text, score };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.score - b.score);
+
+    if (candidates.length) {
+      return buildAccountInfo(candidates[0].text, 'account-benefits-right', candidates[0].element);
+    }
+  }
+
+  return { name: '', platform: 'BOSS直聘', detectedAt: new Date().toISOString() };
+}
+
+function findElementsContainingText(keyword) {
+  const elements = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
+    acceptNode(node) {
+      const text = normalizeText(node.textContent || '');
+      if (!text.includes(keyword)) return NodeFilter.FILTER_SKIP;
+      if (text.length > 80 && !/^账号权益$/.test(text)) return NodeFilter.FILTER_SKIP;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+
+  let current = walker.nextNode();
+  while (current && elements.length < 20) {
+    const directText = normalizeText(Array.from(current.childNodes)
+      .filter(node => node.nodeType === Node.TEXT_NODE)
+      .map(node => node.textContent || '')
+      .join(' '));
+    if (directText.includes(keyword) || normalizeText(current.textContent || '') === keyword) {
+      elements.push(current);
+    }
+    current = walker.nextNode();
+  }
+  return elements;
+}
+
+function sanitizeAccountText(text) {
+  return normalizeText(text)
+    .replace(/账号权益/g, ' ')
+    .replace(/权益|续费|充值|购买|升级|会员|企业版|帮助|设置/g, ' ')
+    .replace(/在线|离线|未读|消息|\d+条/g, ' ')
+    .replace(/[｜|]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(part => part && part.length <= 24)
+    .slice(0, 3)
+    .join(' ')
+    .trim();
+}
+
+function buildAccountInfo(name, source, element) {
+  return {
+    name: sanitizeAccountText(name).slice(0, 40),
+    platform: 'BOSS直聘',
+    source,
+    detectedAt: new Date().toISOString(),
+    selectorHint: element ? getElementSelectorHint(element) : '',
+  };
+}
+
+function persistDetectedAccount(info) {
+  chrome.storage.local.set({ detectedAccount: info }, () => {
+    chrome.storage.local.get(['settings'], (result) => {
+      const nextSettings = {
+        ...(result.settings || {}),
+        accountName: info.name,
+        accountPlatform: info.platform || 'BOSS直聘',
+      };
+      chrome.storage.local.set({ settings: nextSettings });
+      chrome.runtime.sendMessage({
+        action: 'detectedAccountUpdated',
+        accountInfo: info,
+      }).catch(() => {});
+    });
+  });
+}
+
+function getElementSelectorHint(element) {
+  const parts = [];
+  if (element.id) parts.push(`#${element.id}`);
+  if (element.className && typeof element.className === 'string') {
+    parts.push(`.${element.className.trim().split(/\s+/).slice(0, 3).join('.')}`);
+  }
+  return `${element.tagName.toLowerCase()}${parts.join('')}`.slice(0, 120);
+}
+
+function isLikelyRecruiterName(text, element = null) {
   if (!text || text.length < 2 || text.length > 40) return false;
-  if (/登录|注册|消息|职位|简历|沟通|推荐|搜索|设置|帮助|首页/.test(text)) return false;
-  return /[\u4e00-\u9fa5A-Za-z]/.test(text);
+  if (/登录|注册|消息|职位|简历|沟通|推荐|搜索|设置|帮助|首页|账号权益|全部|筛选|排序|投递|候选人|人才|牛人|公司|岗位|下载|导出|刷新|通知|数据/.test(text)) return false;
+  if (/^\d+$/.test(text)) return false;
+  if (element) {
+    const rect = element.getBoundingClientRect();
+    if (rect.width > 260 || rect.height > 80) return false;
+  }
+  return /^[\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9_.·\-\s]{1,39}$/.test(text);
 }
 
 function isSameResume(a, b) {

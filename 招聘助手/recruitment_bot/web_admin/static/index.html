@@ -7,32 +7,72 @@
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <header>
+  <header class="app-header">
     <div>
       <h1>招聘助手 Web 管理后台</h1>
-      <p>历史数据、推荐报告、钉钉推送、问答 Agent</p>
+      <p>候选人历史、推荐报告、钉钉问答、自动推送与部署监控</p>
     </div>
-    <button id="refreshBtn">刷新数据</button>
+    <div class="header-actions">
+      <span id="healthBadge" class="badge">检查中</span>
+      <button id="refreshBtn">刷新</button>
+    </div>
   </header>
 
   <main>
-    <section class="grid stats">
-      <article>
-        <strong id="candidateCount">0</strong>
-        <span>候选人历史</span>
+    <section class="toolbar">
+      <div class="search-box">
+        <input id="searchInput" type="search" placeholder="搜索姓名、岗位、技能、推荐意见" />
+        <input id="sourceFilter" type="search" placeholder="数据来源" />
+        <input id="accountFilter" type="search" placeholder="账号信息" />
+      </div>
+      <div class="toolbar-actions">
+        <button id="applyFilterBtn">筛选</button>
+        <button id="clearFilterBtn" class="secondary">清空</button>
+        <button id="exportCandidatesBtn" class="secondary">导出候选人</button>
+        <button id="exportRecommendationsBtn" class="secondary">导出推荐</button>
+      </div>
+    </section>
+
+    <section class="stats-grid">
+      <article><span>历史候选人</span><strong id="candidateCount">0</strong></article>
+      <article><span>今日新增</span><strong id="todayCount">0</strong></article>
+      <article><span>昨日新增</span><strong id="yesterdayCount">0</strong></article>
+      <article><span>推荐候选人</span><strong id="recommendationCount">0</strong></article>
+      <article><span>平均匹配度</span><strong id="averageScore">0%</strong></article>
+      <article><span>报告数量</span><strong id="reportCount">0</strong></article>
+    </section>
+
+    <section class="dashboard-grid">
+      <article class="panel">
+        <div class="panel-title">
+          <h2>数据来源</h2>
+          <span id="sourceCountHint"></span>
+        </div>
+        <div id="sourceBreakdown" class="breakdown"></div>
       </article>
-      <article>
-        <strong id="recommendationCount">0</strong>
-        <span>推荐候选人</span>
+
+      <article class="panel">
+        <div class="panel-title">
+          <h2>账号识别</h2>
+          <span id="accountCountHint"></span>
+        </div>
+        <div id="accountBreakdown" class="breakdown"></div>
       </article>
-      <article>
-        <strong id="reportCount">0</strong>
-        <span>报告数量</span>
+
+      <article class="panel wide">
+        <div class="panel-title">
+          <h2>高匹配推荐 Top 10</h2>
+          <button id="previewSummaryBtn" class="secondary small">预览昨日汇总</button>
+        </div>
+        <div id="topRecommendations" class="top-list"></div>
       </article>
     </section>
 
     <section class="panel">
-      <h2>系统配置</h2>
+      <div class="panel-title">
+        <h2>系统配置</h2>
+        <span id="scheduleStatus" class="badge">未开启</span>
+      </div>
       <div class="form-grid">
         <label>
           钉钉 Webhook
@@ -43,8 +83,12 @@
           <input id="dingtalkSecret" type="password" placeholder="SEC..." />
         </label>
         <label>
-          账号信息
-          <input id="accountName" type="text" placeholder="可由插件自动同步，也可在这里修正" />
+          自动识别账号
+          <input id="accountName" type="text" placeholder="由插件自动识别，也可在这里修正" />
+        </label>
+        <label>
+          账号平台
+          <input id="accountPlatform" type="text" placeholder="BOSS直聘" />
         </label>
         <label>
           每日推送时间
@@ -53,69 +97,90 @@
       </div>
       <div class="actions">
         <button id="saveSettingsBtn">保存配置</button>
-        <button id="toggleScheduleBtn">开启定时推送</button>
-        <button id="testDingTalkBtn">测试钉钉</button>
-        <button id="pushYesterdayBtn">推送昨日汇总</button>
+        <button id="toggleScheduleBtn" class="secondary">开启定时推送</button>
+        <button id="testDingTalkBtn" class="secondary">测试钉钉</button>
+        <button id="pushYesterdayBtn" class="secondary">推送昨日汇总</button>
       </div>
-      <p class="hint">公开部署后，钉钉回调地址可配置为：<code id="callbackUrl"></code></p>
+      <p class="hint">钉钉机器人回调地址：<code id="callbackUrl"></code></p>
     </section>
 
     <section class="panel">
-      <h2>问答 Agent</h2>
+      <div class="panel-title">
+        <h2>问答 Agent</h2>
+        <span>基于历史候选人、推荐和报告回答</span>
+      </div>
       <div class="qa">
         <input id="questionInput" type="text" placeholder="例如：昨天推荐了谁？React候选人有哪些？匹配度最高的是谁？" />
         <button id="askBtn">提问</button>
-        <button id="askAndPushBtn">回答并推送钉钉</button>
+        <button id="askAndPushBtn" class="secondary">回答并推送</button>
       </div>
       <pre id="answerBox">等待提问...</pre>
     </section>
 
     <section class="panel">
-      <h2>推荐候选人</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>姓名</th>
-              <th>岗位</th>
-              <th>匹配度</th>
-              <th>推荐</th>
-              <th>来源</th>
-              <th>账号</th>
-              <th>下一步</th>
-            </tr>
-          </thead>
-          <tbody id="recommendationRows"></tbody>
-        </table>
+      <div class="tabs">
+        <button class="tab active" data-tab="recommendations">推荐候选人</button>
+        <button class="tab" data-tab="candidates">候选人历史</button>
+        <button class="tab" data-tab="reports">推荐报告</button>
       </div>
-    </section>
 
-    <section class="panel">
-      <h2>候选人历史</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>日期</th>
-              <th>姓名</th>
-              <th>岗位</th>
-              <th>学历</th>
-              <th>经验</th>
-              <th>薪资</th>
-              <th>来源</th>
-              <th>账号</th>
-            </tr>
-          </thead>
-          <tbody id="candidateRows"></tbody>
-        </table>
+      <div id="recommendationsTab" class="tab-panel active">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>姓名</th>
+                <th>岗位</th>
+                <th>匹配度</th>
+                <th>推荐</th>
+                <th>来源</th>
+                <th>账号</th>
+                <th>下一步</th>
+                <th>时间</th>
+              </tr>
+            </thead>
+            <tbody id="recommendationRows"></tbody>
+          </table>
+        </div>
       </div>
-    </section>
 
-    <section class="panel">
-      <h2>推荐报告</h2>
-      <div id="reportList" class="reports"></div>
+      <div id="candidatesTab" class="tab-panel">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>姓名</th>
+                <th>岗位</th>
+                <th>学历</th>
+                <th>经验</th>
+                <th>薪资</th>
+                <th>匹配度</th>
+                <th>推荐</th>
+                <th>来源</th>
+                <th>账号</th>
+              </tr>
+            </thead>
+            <tbody id="candidateRows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="reportsTab" class="tab-panel">
+        <div id="reportList" class="reports"></div>
+      </div>
     </section>
   </main>
+
+  <dialog id="detailDialog">
+    <div class="dialog-title">
+      <h2 id="dialogTitle">详情</h2>
+      <button id="closeDialogBtn" class="secondary small">关闭</button>
+    </div>
+    <pre id="dialogContent"></pre>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
 
   <script src="/app.js"></script>
 </body>
