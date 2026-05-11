@@ -96,6 +96,16 @@ code { background: #eef3f8; padding: 2px 5px; border-radius: 4px; }
   margin-bottom: 14px;
 }
 
+.connection-panel {
+  margin-bottom: 14px;
+}
+
+.connection-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+}
+
 .search-box {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) 180px 180px;
@@ -318,6 +328,7 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.42); }
 @media (max-width: 1100px) {
   .stats-grid { grid-template-columns: repeat(3, 1fr); }
   .dashboard-grid, .form-grid, .toolbar { grid-template-columns: 1fr; }
+  .connection-row { grid-template-columns: 1fr; }
   .search-box { grid-template-columns: 1fr; }
   .toolbar-actions, .actions { flex-wrap: wrap; }
 }

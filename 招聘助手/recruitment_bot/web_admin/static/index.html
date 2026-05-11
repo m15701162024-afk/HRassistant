@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>招聘助手 Web 管理后台</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="app-header">
@@ -31,6 +31,19 @@
         <button id="exportCandidatesBtn" class="secondary">导出候选人</button>
         <button id="exportRecommendationsBtn" class="secondary">导出推荐</button>
       </div>
+    </section>
+
+    <section class="panel connection-panel">
+      <div class="panel-title">
+        <h2>后端连接</h2>
+        <span id="apiBaseHint">自动识别</span>
+      </div>
+      <div class="connection-row">
+        <input id="apiBaseInput" type="url" placeholder="http://127.0.0.1:8787" />
+        <button id="saveApiBaseBtn" class="secondary">保存后端地址</button>
+        <button id="resetApiBaseBtn" class="secondary">恢复自动</button>
+      </div>
+      <p class="hint">如果你是直接打开 HTML 文件，请先启动 Web 后端，并将这里设置为 <code>http://127.0.0.1:8787</code>。</p>
     </section>
 
     <section class="stats-grid">
@@ -182,6 +195,6 @@
 
   <div id="toast" class="toast" hidden></div>
 
-  <script src="/app.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

@@ -13,12 +13,41 @@ const state = {
   },
 };
 
+const API_BASE_STORAGE_KEY = 'recruitmentAdminApiBase';
+
+function defaultApiBase() {
+  if (location.protocol === 'file:') return 'http://127.0.0.1:8787';
+  return '';
+}
+
+function getApiBase() {
+  return localStorage.getItem(API_BASE_STORAGE_KEY) || defaultApiBase();
+}
+
+function normalizeApiBase(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function apiUrl(path) {
+  const base = normalizeApiBase(getApiBase());
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${base}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
-  const data = await response.json();
+  const contentType = response.headers.get('content-type') || '';
+  const raw = await response.text();
+  let data;
+  if (contentType.includes('application/json')) {
+    data = raw ? JSON.parse(raw) : {};
+  } else {
+    const preview = raw.replace(/\s+/g, ' ').slice(0, 80);
+    throw new Error(`接口返回的不是 JSON。请确认后端服务已启动且后端地址正确。当前请求：${apiUrl(path)}；返回：${preview}`);
+  }
   if (!response.ok || data.success === false) {
     throw new Error(data.message || '请求失败');
   }
@@ -69,6 +98,12 @@ async function loadHealth() {
   }
 }
 
+function renderApiBase() {
+  const base = normalizeApiBase(getApiBase());
+  $('apiBaseInput').value = base || location.origin;
+  $('apiBaseHint').textContent = base ? `使用 ${base}` : '使用当前域名';
+}
+
 async function loadSettings() {
   const settings = await api('/api/settings');
   state.settings = settings;
@@ -82,7 +117,8 @@ async function loadSettings() {
     ? `已开启 ${settings.scheduledPushTime || '10:00'}`
     : '未开启';
   $('scheduleStatus').className = settings.scheduledPushEnabled ? 'badge ok' : 'badge';
-  $('callbackUrl').textContent = `${location.origin}/api/dingtalk/callback`;
+  const callbackOrigin = normalizeApiBase(getApiBase()) || location.origin;
+  $('callbackUrl').textContent = `${callbackOrigin}/api/dingtalk/callback`;
 }
 
 async function saveSettings(showToast = true) {
@@ -241,7 +277,7 @@ function exportCsv(type) {
   const path = type === 'recommendations'
     ? '/api/export/recommendations.csv'
     : '/api/export/candidates.csv';
-  location.href = qs ? `${path}?${qs}` : path;
+  location.href = apiUrl(qs ? `${path}?${qs}` : path);
 }
 
 async function ask(replyToDingTalk = false) {
@@ -308,6 +344,21 @@ function bindEvents() {
   $('clearFilterBtn').addEventListener('click', clearFilters);
   $('exportCandidatesBtn').addEventListener('click', () => exportCsv('candidates'));
   $('exportRecommendationsBtn').addEventListener('click', () => exportCsv('recommendations'));
+  $('saveApiBaseBtn').addEventListener('click', () => {
+    const value = normalizeApiBase($('apiBaseInput').value);
+    if (value) {
+      localStorage.setItem(API_BASE_STORAGE_KEY, value);
+    } else {
+      localStorage.removeItem(API_BASE_STORAGE_KEY);
+    }
+    renderApiBase();
+    refreshAll().catch(showError);
+  });
+  $('resetApiBaseBtn').addEventListener('click', () => {
+    localStorage.removeItem(API_BASE_STORAGE_KEY);
+    renderApiBase();
+    refreshAll().catch(showError);
+  });
   $('closeDialogBtn').addEventListener('click', () => $('detailDialog').close());
   $('searchInput').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') applyFilters();
@@ -318,6 +369,7 @@ function bindEvents() {
 }
 
 async function refreshAll() {
+  renderApiBase();
   await Promise.all([loadHealth(), loadSettings()]);
   await loadData();
 }
