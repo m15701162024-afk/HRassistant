@@ -6,6 +6,7 @@ const state = {
   candidates: [],
   recommendations: [],
   reports: [],
+  conversations: [],
   behaviorPolicy: {},
   filters: {
     q: '',
@@ -222,6 +223,23 @@ async function loadData() {
   renderStats();
   renderBreakdowns();
   renderTables();
+  await loadConversations();
+}
+
+async function loadConversations() {
+  const result = await api('/api/agent/conversations?limit=50');
+  state.conversations = result.items || [];
+  $('conversationCount').textContent = `${state.conversations.length} 条`;
+  $('conversationList').innerHTML = state.conversations.slice(0, 20).map(item => `
+    <article class="conversation">
+      <div>
+        <strong>${escapeHtml(item.channel || 'web')}｜${escapeHtml(item.sender || '未知')}</strong>
+        <span>${escapeHtml(item.created_at || '')}</span>
+      </div>
+      <p>问：${escapeHtml(item.question || '')}</p>
+      <pre>${escapeHtml(item.answer || '')}</pre>
+    </article>
+  `).join('') || '<p class="empty">暂无问答记录</p>';
 }
 
 function renderStats() {
@@ -343,6 +361,7 @@ async function ask(replyToDingTalk = false) {
     body: JSON.stringify({ question, replyToDingTalk }),
   });
   $('answerBox').textContent = result.answer;
+  await loadConversations();
   if (replyToDingTalk) toast('答案已推送钉钉');
 }
 

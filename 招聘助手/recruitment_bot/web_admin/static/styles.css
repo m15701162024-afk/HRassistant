@@ -176,6 +176,10 @@ code { background: #eef3f8; padding: 2px 5px; border-radius: 4px; }
   font-size: 12px;
 }
 
+.sub-title {
+  margin-top: 14px;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: 2fr 1.2fr 1fr 1fr 160px;
@@ -314,6 +318,30 @@ th {
 }
 
 .reports { display: grid; gap: 10px; }
+.conversation-list { display: grid; gap: 10px; }
+.conversation {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  padding: 10px;
+}
+.conversation div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 7px;
+}
+.conversation strong { color: var(--text); }
+.conversation p {
+  font-size: 13px;
+  margin-bottom: 7px;
+}
+.conversation pre {
+  margin: 0;
+  max-height: 160px;
+}
 .report {
   display: flex;
   justify-content: space-between;

@@ -7,410 +7,184 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      width: 400px;
-      min-height: 500px;
+      width: 380px;
+      min-height: 420px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
       background: #f5f7fa;
-      color: #333;
+      color: #1f2933;
     }
-
-    /* 顶部标题栏 */
     .header {
-      background: linear-gradient(135deg, #00b38a, #00d4aa);
+      background: #123b3b;
       color: white;
-      padding: 16px 20px;
+      padding: 16px 18px;
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
-    .header h1 {
-      font-size: 16px;
-      font-weight: 600;
-    }
-    .header .version {
+    .header h1 { font-size: 16px; font-weight: 650; }
+    .version {
       font-size: 11px;
-      opacity: 0.8;
-      background: rgba(255,255,255,0.2);
+      opacity: 0.85;
+      background: rgba(255,255,255,0.16);
       padding: 2px 8px;
-      border-radius: 8px;
+      border-radius: 999px;
     }
-
-    /* 状态面板 */
-    .status-panel {
+    .panel {
       background: white;
       margin: 12px;
+      border: 1px solid #e5e7eb;
       border-radius: 8px;
-      padding: 16px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      padding: 14px;
+      box-shadow: 0 1px 6px rgba(15, 23, 42, 0.05);
     }
-    .status-row {
+    .row {
       display: flex;
       justify-content: space-between;
       align-items: center;
+      gap: 12px;
       padding: 8px 0;
-      border-bottom: 1px solid #f0f0f0;
+      border-bottom: 1px solid #f0f2f5;
     }
-    .status-row:last-child { border-bottom: none; }
-    .status-label { color: #666; font-size: 13px; }
-    .status-value { font-weight: 600; font-size: 13px; }
-    .status-value.active { color: #00b38a; }
-    .status-value.inactive { color: #999; }
-
-    /* 开关按钮 */
-    .toggle-container {
-      display: flex;
-      align-items: center;
-      gap: 10px;
+    .row:last-child { border-bottom: none; }
+    .label { color: #64748b; font-size: 12px; white-space: nowrap; }
+    .value {
+      color: #111827;
+      font-size: 13px;
+      font-weight: 650;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: right;
     }
-    .toggle {
-      position: relative;
-      width: 44px;
-      height: 24px;
-      background: #ddd;
-      border-radius: 12px;
-      cursor: pointer;
-      transition: background 0.3s;
-    }
-    .toggle.active { background: #00b38a; }
-    .toggle::after {
-      content: '';
-      position: absolute;
-      width: 20px;
-      height: 20px;
-      background: white;
-      border-radius: 50%;
-      top: 2px;
-      left: 2px;
-      transition: transform 0.3s;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-    }
-    .toggle.active::after { transform: translateX(20px); }
-
-    /* 统计卡片 */
+    .value.ok { color: #0f766e; }
     .stats-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      margin: 0 12px 12px;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin: 12px;
     }
     .stat-card {
       background: white;
-      border-radius: 10px;
-      padding: 14px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 12px 8px;
       text-align: center;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
     }
     .stat-number {
-      font-size: 24px;
-      font-weight: 700;
-      color: #00b38a;
+      font-size: 22px;
+      font-weight: 750;
+      color: #0f766e;
+      line-height: 1.1;
     }
     .stat-label {
-      font-size: 12px;
-      color: #999;
-      margin-top: 4px;
-    }
-    .stat-sub {
+      margin-top: 5px;
+      color: #64748b;
       font-size: 11px;
-      color: #666;
-      margin-top: 4px;
-      min-height: 14px;
     }
-
-    /* 操作按钮 */
-    .actions {
+    .notice {
       margin: 0 12px 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
+      background: #f0fdfa;
+      border: 1px solid #ccfbf1;
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: #115e59;
+      font-size: 12px;
+      line-height: 1.55;
     }
     .btn {
-      padding: 10px 16px;
-      border: none;
-      border-radius: 8px;
-      font-size: 13px;
-      font-weight: 500;
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid #d8e0ea;
+      border-radius: 7px;
+      background: white;
+      color: #172033;
+      font-weight: 650;
       cursor: pointer;
-      transition: all 0.2s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
     }
-    .btn-primary {
-      background: linear-gradient(135deg, #00b38a, #00d4aa);
-      color: white;
-    }
-    .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
-    .btn-secondary {
-      background: white;
-      color: #333;
-      border: 1px solid #e0e0e0;
-    }
-    .btn-secondary:hover { background: #f5f5f5; }
-    .btn-danger {
-      background: #ff4d4f;
-      color: white;
-    }
-    .btn-danger:hover { opacity: 0.9; }
-
-    /* 日志区域 */
-    .log-section {
-      margin: 0 12px 12px;
-      background: white;
-      border-radius: 10px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-      overflow: hidden;
-    }
-    .log-header {
-      padding: 12px 16px;
-      font-size: 13px;
-      font-weight: 600;
-      border-bottom: 1px solid #f0f0f0;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
+    .btn:hover { background: #f8fafc; }
     .log-body {
-      max-height: 180px;
+      max-height: 150px;
       overflow-y: auto;
-      padding: 8px 16px;
       font-size: 12px;
-      line-height: 1.8;
+      line-height: 1.7;
+      color: #475569;
     }
     .log-entry {
-      display: flex;
+      display: grid;
+      grid-template-columns: 58px 1fr;
       gap: 8px;
       padding: 2px 0;
     }
-    .log-time { color: #999; white-space: nowrap; }
-    .log-msg { color: #333; }
-    .log-msg.success { color: #00b38a; }
-    .log-msg.error { color: #ff4d4f; }
-    .log-msg.info { color: #1890ff; }
-
-    /* 空状态 */
+    .log-time { color: #94a3b8; white-space: nowrap; }
     .empty-state {
       text-align: center;
-      padding: 20px;
-      color: #999;
-      font-size: 13px;
+      padding: 18px 0;
+      color: #94a3b8;
+      font-size: 12px;
     }
-
-    /* 滚动条 */
-    .log-body::-webkit-scrollbar { width: 4px; }
-    .log-body::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
-
-    /* 底部链接 */
     .footer {
       text-align: center;
-      padding: 12px;
+      padding: 4px 12px 12px;
       font-size: 11px;
-      color: #bbb;
-    }
-
-    /* 安全提示 */
-    .safety-warning {
-      margin: 0 12px 8px;
-      background: #fff7e6;
-      border: 1px solid #ffd591;
-      border-radius: 8px;
-      padding: 10px 14px;
-      font-size: 12px;
-      color: #ad6800;
-      display: flex;
-      align-items: flex-start;
-      gap: 8px;
-      line-height: 1.5;
-    }
-    .safety-warning .icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
-    .settings-panel {
-      background: white;
-      margin: 0 12px 12px;
-      border-radius: 8px;
-      padding: 14px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-    }
-    .settings-title {
-      font-size: 13px;
-      font-weight: 600;
-      margin-bottom: 10px;
-    }
-    .field {
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-      margin-bottom: 10px;
-    }
-    .field label {
-      font-size: 12px;
-      color: #666;
-    }
-    .field input {
-      width: 100%;
-      border: 1px solid #e0e0e0;
-      border-radius: 6px;
-      padding: 8px 10px;
-      font-size: 12px;
-      outline: none;
-    }
-    .field input:focus {
-      border-color: #00b38a;
-    }
-    .settings-actions {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-    }
-    .qa-row {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-    }
-    .qa-answer {
-      margin-top: 8px;
-      padding: 8px;
-      background: #f7fbfa;
-      border: 1px solid #e0f2ed;
-      border-radius: 6px;
-      font-size: 12px;
-      line-height: 1.6;
-      color: #333;
-      max-height: 120px;
-      overflow: auto;
-      white-space: pre-wrap;
+      color: #94a3b8;
     }
   </style>
 </head>
 <body>
   <div class="header">
     <h1>招聘助手</h1>
-    <span class="version">v1.1.0</span>
+    <span class="version">v2.1</span>
   </div>
 
-  <!-- 状态面板 -->
-  <div class="status-panel">
-    <div class="status-row">
-      <span class="status-label">安全状态</span>
-      <span class="status-value active" id="safetyStatus">正常</span>
+  <div class="panel">
+    <div class="row">
+      <span class="label">安全状态</span>
+      <span class="value ok" id="safetyStatus">正常</span>
     </div>
-    <div class="status-row">
-      <span class="status-label">当前页面</span>
-      <span class="status-value inactive" id="pageStatus">未检测</span>
+    <div class="row">
+      <span class="label">账号信息</span>
+      <span class="value" id="accountName">打开招聘页面后自动识别</span>
     </div>
-    <div class="status-row">
-      <span class="status-label">今日自动接收</span>
-      <span class="status-value inactive" id="limitStatus">0 / 50</span>
-    </div>
-    <div class="status-row">
-      <span class="status-label">钉钉推送</span>
-      <span class="status-value inactive" id="dingtalkStatus">未配置</span>
+    <div class="row">
+      <span class="label">Web 后台</span>
+      <span class="value" id="backendStatus">未检测</span>
     </div>
   </div>
 
-  <!-- 安全提示 -->
-  <div class="safety-warning" id="safetyWarning">
-    <span class="icon">⚠️</span>
-    <span>处理候选人时会自动浏览候选人沟通界面，并根据按钮状态执行索要简历或接收简历。推荐候选人会自动生成报告并推送钉钉。</span>
+  <div class="notice">
+    所有连接、推送、问答、定时任务和行为节奏均在 Web 管理后台配置。插件会自动同步配置并执行。
   </div>
 
-  <div class="settings-panel">
-    <div class="settings-title">钉钉机器人</div>
-    <div class="field">
-      <label for="dingtalkWebhook">Webhook</label>
-      <input id="dingtalkWebhook" type="password" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
-    </div>
-    <div class="field">
-      <label for="backendUrl">Web 后端地址</label>
-      <input id="backendUrl" type="text" placeholder="http://127.0.0.1:8787" />
-    </div>
-    <div class="field">
-      <label for="dingtalkSecret">加签 Secret（可选）</label>
-      <input id="dingtalkSecret" type="password" placeholder="SEC..." />
-    </div>
-    <div class="field">
-      <label for="accountName">账号信息</label>
-      <input id="accountName" type="text" placeholder="打开BOSS页面后自动识别" readonly />
-    </div>
-    <div class="field">
-      <label for="scheduledPushTime">每日定时推送时间</label>
-      <input id="scheduledPushTime" type="time" value="10:00" />
-    </div>
-    <div class="settings-actions">
-      <button class="btn btn-secondary" id="btnSaveDingTalk">保存连接</button>
-      <button class="btn btn-secondary" id="btnTestDingTalk">测试推送</button>
-    </div>
-    <div class="settings-actions" style="margin-top:8px;">
-      <button class="btn btn-secondary" id="btnToggleSchedule">开启定时推送</button>
-      <button class="btn btn-secondary" id="btnPushSummaryNow">立即推送汇总</button>
-    </div>
-  </div>
-
-  <div class="settings-panel">
-    <div class="settings-title">历史数据问答 Agent</div>
-    <div class="qa-row">
-      <input id="agentQuestion" type="text" placeholder="例如：今天推荐了谁？React候选人有哪些？" />
-      <button class="btn btn-secondary" id="btnAskAgent">提问</button>
-    </div>
-    <div class="qa-answer" id="agentAnswer">可基于插件保存的全部历史候选人和推荐报告回答问题。钉钉群内提问需要额外配置公网回调服务转发到此 Agent。</div>
-  </div>
-
-  <div class="settings-panel">
-    <div class="settings-title">历史数据存储</div>
-    <div class="qa-answer" id="historyStorageView">暂无历史数据</div>
-  </div>
-
-  <!-- 统计卡片 -->
   <div class="stats-grid">
     <div class="stat-card">
       <div class="stat-number" id="totalResumes">0</div>
-      <div class="stat-label">已接收简历</div>
-      <div class="stat-sub" id="sourceSummary">暂无来源</div>
+      <div class="stat-label">候选人</div>
     </div>
     <div class="stat-card">
       <div class="stat-number" id="todayResumes">0</div>
       <div class="stat-label">今日新增</div>
-      <div class="stat-sub" id="qualitySummary">完整度 0%</div>
     </div>
     <div class="stat-card">
       <div class="stat-number" id="recommendedCount">0</div>
-      <div class="stat-label">推荐候选人</div>
-      <div class="stat-sub" id="latestRecommendation">暂无推荐</div>
+      <div class="stat-label">推荐</div>
     </div>
   </div>
 
-  <!-- 操作按钮 -->
-  <div class="actions">
-    <button class="btn btn-primary" id="btnBrowseAndRun">
-      开始浏览并处理候选人
-    </button>
-    <button class="btn btn-secondary" id="btnExportReports">
-      导出推荐报告 (MD)
-    </button>
-    <button class="btn btn-secondary" id="btnResetSafety">
-      恢复安全状态
-    </button>
-    <button class="btn btn-secondary" id="btnOpenBoss">
-      🌐 打开BOSS直聘
-    </button>
-    <button class="btn btn-danger" id="btnClearData">
-      清除运行日志
-    </button>
+  <div class="panel">
+    <button class="btn" id="btnOpenWebAdmin">打开 Web 管理后台</button>
   </div>
 
-  <!-- 日志区域 -->
-  <div class="log-section">
-    <div class="log-header">
-      <span>📋 运行日志</span>
-      <span id="logCount" style="font-weight:400;color:#999;">0 条</span>
+  <div class="panel">
+    <div class="row">
+      <span class="label">最近运行日志</span>
+      <span class="value" id="logCount">0 条</span>
     </div>
     <div class="log-body" id="logBody">
       <div class="empty-state">暂无日志记录</div>
     </div>
   </div>
 
-  <div class="footer">招聘助手 · BOSS直聘简历自动接收插件 · v2.0 安全增强版</div>
-
+  <div class="footer">招聘助手 · Web 后台统一配置</div>
   <script src="popup.js"></script>
 </body>
 </html>

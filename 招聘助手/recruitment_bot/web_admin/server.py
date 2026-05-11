@@ -130,6 +130,16 @@ def init_db() -> None:
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS agent_conversations (
+                id TEXT PRIMARY KEY,
+                channel TEXT NOT NULL,
+                sender TEXT,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            );
             """
         )
 
@@ -343,6 +353,44 @@ def rows_to_csv(rows: list[dict[str, Any]], columns: list[tuple[str, str]]) -> s
     return output.getvalue()
 
 
+def save_agent_conversation(
+    question: str,
+    answer: str,
+    channel: str = "web",
+    sender: str = "",
+    raw: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    item_id = hashlib.sha1(f"{channel}:{sender}:{question}:{now_iso()}".encode()).hexdigest()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO agent_conversations
+            (id, channel, sender, question, answer, raw_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item_id,
+                channel,
+                sender,
+                question,
+                answer,
+                json.dumps(raw or {}, ensure_ascii=False),
+                now_iso(),
+            ),
+        )
+    return {"success": True, "id": item_id}
+
+
+def list_agent_conversations(limit: int = 100) -> list[dict[str, Any]]:
+    with connect() as conn:
+        return [
+            dict(row) for row in conn.execute(
+                "SELECT * FROM agent_conversations ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        ]
+
+
 def get_settings() -> dict[str, Any]:
     with connect() as conn:
         rows = conn.execute("SELECT key, value FROM settings").fetchall()
@@ -485,7 +533,16 @@ def parse_dingtalk_message(payload: dict[str, Any]) -> dict[str, Any]:
     elif isinstance(text_obj, str):
         text = text_obj
     if not text:
-        text = str(payload.get("content") or payload.get("message") or "")
+        msg_param = payload.get("msgParam")
+        if isinstance(msg_param, str):
+            try:
+                msg_payload = json.loads(msg_param)
+                if isinstance(msg_payload, dict):
+                    text = str(msg_payload.get("content") or msg_payload.get("text") or "")
+            except json.JSONDecodeError:
+                text = msg_param
+        if not text:
+            text = str(payload.get("content") or payload.get("message") or payload.get("query") or "")
 
     at_users = payload.get("atUsers") or []
     if isinstance(at_users, list):
@@ -497,7 +554,7 @@ def parse_dingtalk_message(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "question": text.strip(),
         "sessionWebhook": payload.get("sessionWebhook") or "",
-        "senderNick": payload.get("senderNick") or "",
+        "senderNick": payload.get("senderNick") or payload.get("senderStaffId") or payload.get("senderId") or "",
         "conversationTitle": payload.get("conversationTitle") or "",
         "msgtype": payload.get("msgtype") or "text",
         "raw": payload,
@@ -517,6 +574,22 @@ def dingtalk_callback_ack() -> dict[str, Any]:
     }
 
 
+def dingtalk_markdown_reply(title: str, text: str) -> dict[str, Any]:
+    return {
+        "msgtype": "markdown",
+        "markdown": {
+            "title": title,
+            "text": text,
+        },
+    }
+
+
+def dingtalk_stream_ack_with_answer(answer: str) -> dict[str, Any]:
+    ack = dingtalk_callback_ack()
+    ack["data"] = json.dumps(dingtalk_markdown_reply("招聘助手问答", answer), ensure_ascii=False)
+    return ack
+
+
 def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
     message = parse_dingtalk_message(payload)
     question = message["question"]
@@ -524,6 +597,14 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
         answer = "### 招聘助手\n\n我没有收到有效问题。你可以问：昨天推荐了谁？React候选人有哪些？匹配度最高的是谁？"
     else:
         answer = answer_question(question)
+
+    save_agent_conversation(
+        question=question or "(empty)",
+        answer=answer,
+        channel="dingtalk",
+        sender=message.get("senderNick", ""),
+        raw=message.get("raw", {}),
+    )
 
     webhook = message.get("sessionWebhook")
     if webhook:
@@ -534,14 +615,21 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
             "",
         )
     else:
-        push_result = send_dingtalk_markdown("招聘助手问答", answer)
+        settings = get_settings()
+        push_result = {"success": False, "skipped": True, "message": "使用钉钉回调直接回复"}
+        if settings.get("dingtalkWebhook"):
+            try:
+                push_result = send_dingtalk_markdown("招聘助手问答", answer)
+            except Exception as exc:
+                push_result = {"success": False, "message": str(exc)}
 
     return {
         "success": True,
         "question": question,
         "answer": answer,
         "reply": push_result,
-        "ack": dingtalk_callback_ack(),
+        "directReply": dingtalk_markdown_reply("招聘助手问答", answer),
+        "ack": dingtalk_stream_ack_with_answer(answer),
     }
 
 
@@ -580,13 +668,28 @@ def answer_question(question: str) -> str:
     if not question:
         return "请提出一个和招聘历史数据有关的问题。"
     today = date_str()
-    scope_date = today if ("今天" in question or "今日" in question) else None
+    yesterday = date_str(-1)
+    scope_label = "全部历史"
+    scope_date = None
+    if "今天" in question or "今日" in question:
+        scope_date = today
+        scope_label = "今日"
+    elif "昨天" in question or "昨日" in question:
+        scope_date = yesterday
+        scope_label = "昨日"
     candidates = list_rows("candidates", limit=1000, date_field="received_date", date_value=scope_date)
     recommendations = list_rows("recommendations", limit=1000, date_field="created_at", date_value=scope_date)
     if any(word in question for word in ["汇总", "统计", "多少", "数量"]):
-        return f"### 招聘助手答复\n\n- 候选人数量：{len(candidates)}\n- 推荐候选人：{len(recommendations)}\n- 查询范围：{'今日' if scope_date else '全部历史'}"
+        sources: dict[str, int] = {}
+        accounts: dict[str, int] = {}
+        for row in candidates:
+            sources[row.get("source") or "未知来源"] = sources.get(row.get("source") or "未知来源", 0) + 1
+            accounts[row.get("account_name") or "未识别"] = accounts.get(row.get("account_name") or "未识别", 0) + 1
+        source_text = "，".join(f"{k} {v}份" for k, v in sources.items()) or "暂无"
+        account_text = "，".join(f"{k} {v}份" for k, v in accounts.items()) or "暂无"
+        return f"### 招聘助手答复\n\n- 查询范围：{scope_label}\n- 候选人数量：{len(candidates)}\n- 推荐候选人：{len(recommendations)}\n- 数据来源：{source_text}\n- 账号分布：{account_text}"
     cleaned = question
-    for word in ["今天", "今日", "昨天", "昨日", "候选人", "推荐", "简历", "哪些", "哪个", "有没有", "最高", "匹配度", "统计", "汇总"]:
+    for word in ["今天", "今日", "昨天", "昨日", "候选人", "推荐", "简历", "哪些", "哪个", "有没有", "最高", "最好", "最合适", "匹配度", "统计", "汇总", "来源", "账号"]:
         cleaned = cleaned.replace(word, " ")
     keywords = [word for word in cleaned.replace("？", " ").replace("?", " ").split() if len(word) >= 2]
     rows = recommendations or candidates
@@ -599,10 +702,10 @@ def answer_question(question: str) -> str:
     if not rows:
         return f"### 招聘助手答复\n\n没有找到和“{question}”匹配的历史候选人。"
     lines = [
-        f"{idx + 1}. {row.get('name','未识别')}｜{row.get('role','待确认')}｜{row.get('score',0)}%｜{row.get('recommendation','待评估')}"
+        f"{idx + 1}. {row.get('name','未识别')}｜{row.get('role','待确认')}｜{row.get('score',0)}%｜{row.get('recommendation','待评估')}｜{row.get('source','未知来源')}｜{row.get('account_name','未识别')}"
         for idx, row in enumerate(rows[:10])
     ]
-    return "### 招聘助手答复\n\n" + "\n".join(lines)
+    return f"### 招聘助手答复\n\n查询范围：{scope_label}\n\n" + "\n".join(lines)
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -643,6 +746,8 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, {"items": list_rows("reports", int(query.get("limit", ["100"])[0]), filters={
                     "q": query.get("q", [""])[0],
                 })})
+            elif parsed.path == "/api/agent/conversations":
+                json_response(self, {"items": list_agent_conversations(int(query.get("limit", ["100"])[0]))})
             elif parsed.path == "/api/summary":
                 scope = query.get("scope", ["all"])[0]
                 json_response(self, {"markdown": build_summary(scope)})
@@ -701,6 +806,13 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, save_recommendation(payload.get("candidate", payload), payload.get("report", "")))
             elif parsed.path == "/api/agent/ask":
                 answer = answer_question(str(payload.get("question", "")))
+                save_agent_conversation(
+                    question=str(payload.get("question", "")),
+                    answer=answer,
+                    channel="web",
+                    sender=str(payload.get("sender", "Web 管理后台")),
+                    raw=payload,
+                )
                 if payload.get("replyToDingTalk"):
                     send_dingtalk_markdown("招聘助手问答", answer)
                 json_response(self, {"success": True, "answer": answer})
@@ -715,10 +827,11 @@ class Handler(SimpleHTTPRequestHandler):
                 if payload.get("data") is not None:
                     json_response(self, result["ack"])
                 else:
-                    json_response(self, result)
+                    json_response(self, result["directReply"])
             elif parsed.path == "/api/dingtalk/callback-test":
                 question = str(payload.get("question") or "")
                 answer = answer_question(question)
+                save_agent_conversation(question=question, answer=answer, channel="test", sender="callback-test", raw=payload)
                 json_response(self, {"success": True, "question": question, "answer": answer})
             else:
                 json_response(self, {"success": False, "message": "not found"}, 404)
