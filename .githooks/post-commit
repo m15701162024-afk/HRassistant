@@ -1,0 +1,25 @@
+#!/bin/sh
+
+set -eu
+
+case "${SKIP_AUTO_PUSH:-}" in
+  1|true|TRUE|yes|YES)
+    exit 0
+    ;;
+esac
+
+branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
+if [ -z "$branch" ]; then
+  exit 0
+fi
+
+if ! git remote get-url origin >/dev/null 2>&1; then
+  echo "[auto-push] origin remote is not configured; skipping push."
+  exit 0
+fi
+
+echo "[auto-push] pushing $branch to origin..."
+if ! git push origin "$branch"; then
+  echo "[auto-push] push failed; commit was created locally."
+  echo "[auto-push] fix credentials/network/remote, then run: git push origin $branch"
+fi

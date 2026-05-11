@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "招聘助手 - BOSS直聘简历自动接收",
+  "version": "1.1.0",
+  "description": "自动抓取BOSS直聘投递的简历信息，自动点击同意按钮接收简历，并同步到招聘助手系统",
+  "author": "Recruitment Bot",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs",
+    "scripting",
+    "alarms",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://www.zhipin.com/*",
+    "https://www.bosszhipin.com/*",
+    "https://oapi.dingtalk.com/*",
+    "http://localhost:*/*",
+    "http://127.0.0.1:*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.zhipin.com/*",
+        "https://www.bosszhipin.com/*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "招聘助手"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*"],
+      "matches": ["https://www.zhipin.com/*", "https://www.bosszhipin.com/*"]
+    }
+  ]
+}

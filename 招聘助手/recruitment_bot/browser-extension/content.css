@@ -1,0 +1,110 @@
+/**
+ * content.css - 招聘助手插件样式
+ * 在BOSS直聘页面上注入的视觉反馈样式
+ */
+
+/* 接收按钮高亮效果 */
+.recruitment-bot-highlight {
+  outline: 3px solid #00b38a !important;
+  outline-offset: 2px !important;
+  transition: outline 0.3s ease !important;
+  position: relative;
+}
+
+.recruitment-bot-highlight::after {
+  content: '🤖 自动接收中...';
+  position: absolute;
+  top: -24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #00b38a;
+  color: white;
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  white-space: nowrap;
+  z-index: 9999;
+  animation: fadeInDown 0.3s ease;
+}
+
+/* 已处理标记 */
+.recruitment-bot-processed {
+  position: relative;
+}
+
+.recruitment-bot-processed::before {
+  content: '✅';
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 16px;
+  z-index: 9999;
+}
+
+/* 浮动状态指示器 */
+.recruitment-bot-indicator {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: linear-gradient(135deg, #00b38a, #00d4aa);
+  color: white;
+  padding: 10px 16px;
+  border-radius: 25px;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 4px 12px rgba(0, 179, 138, 0.4);
+  z-index: 99999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  animation: slideInRight 0.5s ease;
+}
+
+.recruitment-bot-indicator:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 179, 138, 0.5);
+}
+
+.recruitment-bot-indicator .pulse {
+  width: 8px;
+  height: 8px;
+  background: white;
+  border-radius: 50%;
+  animation: pulse 2s infinite;
+}
+
+/* 动画 */
+@keyframes fadeInDown {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(100px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.5);
+  }
+}

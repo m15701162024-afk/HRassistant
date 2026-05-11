@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>招聘助手 Web 管理后台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>招聘助手 Web 管理后台</h1>
+      <p>历史数据、推荐报告、钉钉推送、问答 Agent</p>
+    </div>
+    <button id="refreshBtn">刷新数据</button>
+  </header>
+
+  <main>
+    <section class="grid stats">
+      <article>
+        <strong id="candidateCount">0</strong>
+        <span>候选人历史</span>
+      </article>
+      <article>
+        <strong id="recommendationCount">0</strong>
+        <span>推荐候选人</span>
+      </article>
+      <article>
+        <strong id="reportCount">0</strong>
+        <span>报告数量</span>
+      </article>
+    </section>
+
+    <section class="panel">
+      <h2>系统配置</h2>
+      <div class="form-grid">
+        <label>
+          钉钉 Webhook
+          <input id="dingtalkWebhook" type="password" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
+        </label>
+        <label>
+          钉钉加签 Secret
+          <input id="dingtalkSecret" type="password" placeholder="SEC..." />
+        </label>
+        <label>
+          账号信息
+          <input id="accountName" type="text" placeholder="可由插件自动同步，也可在这里修正" />
+        </label>
+        <label>
+          每日推送时间
+          <input id="scheduledPushTime" type="time" value="10:00" />
+        </label>
+      </div>
+      <div class="actions">
+        <button id="saveSettingsBtn">保存配置</button>
+        <button id="toggleScheduleBtn">开启定时推送</button>
+        <button id="testDingTalkBtn">测试钉钉</button>
+        <button id="pushYesterdayBtn">推送昨日汇总</button>
+      </div>
+      <p class="hint">公开部署后，钉钉回调地址可配置为：<code id="callbackUrl"></code></p>
+    </section>
+
+    <section class="panel">
+      <h2>问答 Agent</h2>
+      <div class="qa">
+        <input id="questionInput" type="text" placeholder="例如：昨天推荐了谁？React候选人有哪些？匹配度最高的是谁？" />
+        <button id="askBtn">提问</button>
+        <button id="askAndPushBtn">回答并推送钉钉</button>
+      </div>
+      <pre id="answerBox">等待提问...</pre>
+    </section>
+
+    <section class="panel">
+      <h2>推荐候选人</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>姓名</th>
+              <th>岗位</th>
+              <th>匹配度</th>
+              <th>推荐</th>
+              <th>来源</th>
+              <th>账号</th>
+              <th>下一步</th>
+            </tr>
+          </thead>
+          <tbody id="recommendationRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>候选人历史</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>日期</th>
+              <th>姓名</th>
+              <th>岗位</th>
+              <th>学历</th>
+              <th>经验</th>
+              <th>薪资</th>
+              <th>来源</th>
+              <th>账号</th>
+            </tr>
+          </thead>
+          <tbody id="candidateRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>推荐报告</h2>
+      <div id="reportList" class="reports"></div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

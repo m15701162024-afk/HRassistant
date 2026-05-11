@@ -1,0 +1,65 @@
+{
+  "metadata": {
+    "version": "2.0.0",
+    "created_at": "2026-04-24T12:03:53.933166",
+    "last_modified": "2026-04-24T12:03:53.933944"
+  },
+  "candidates": [
+    {
+      "id": 1,
+      "name": "赵六",
+      "role": "前端开发工程师",
+      "source": "BOSS直聘（插件同步）",
+      "resume_url": "https://www.zhipin.com/test",
+      "email": "",
+      "phone": "",
+      "stage": "screening",
+      "status": "active",
+      "scores": {},
+      "interviews": [],
+      "notes": [
+        {
+          "content": "[插件同步] 学历: 本科 | 经验: 3-5年 | 期望薪资: 20-30K | 当前公司: 某科技公司 | 男 | 28岁 | 状态: 活跃 | 简介: 熟悉React/Vue框架",
+          "timestamp": "2026-04-24T12:03:53.933468"
+        }
+      ],
+      "created_at": "2026-04-24T12:03:53.933462",
+      "updated_at": "2026-04-24T12:03:53.933469",
+      "extra": {
+        "plugin_id": "test_001",
+        "plugin_source": "BOSS直聘",
+        "received_date": "2026-04-24",
+        "received_time": "2026-04-24T12:00:00.000Z",
+        "scraped_at": "2026-04-24T12:00:00.000Z"
+      }
+    },
+    {
+      "id": 2,
+      "name": "孙七",
+      "role": "测试工程师",
+      "source": "BOSS直聘（插件同步）",
+      "resume_url": "",
+      "email": "",
+      "phone": "",
+      "stage": "screening",
+      "status": "active",
+      "scores": {},
+      "interviews": [],
+      "notes": [
+        {
+          "content": "[插件同步] 学历: 硕士 | 经验: 1-3年",
+          "timestamp": "2026-04-24T12:03:53.933941"
+        }
+      ],
+      "created_at": "2026-04-24T12:03:53.933937",
+      "updated_at": "2026-04-24T12:03:53.933942",
+      "extra": {
+        "plugin_id": "test_002",
+        "plugin_source": "BOSS直聘",
+        "received_date": "2026-04-24",
+        "received_time": "",
+        "scraped_at": ""
+      }
+    }
+  ]
+}

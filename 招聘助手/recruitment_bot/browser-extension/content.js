@@ -1,0 +1,1610 @@
+/**
+ * content.js - BOSS直聘简历自动接收插件 - 内容脚本 (v2.0 安全增强版)
+ *
+ * ============================================================
+ * 反反爬策略（学习自 GoodHR 开源方案）:
+ * ============================================================
+ * 1. 【人类行为模拟】使用 MouseEvent 模拟真实点击，而非 element.click()
+ * 2. 【随机延迟】操作间隔使用正态分布随机延迟，而非固定值
+ * 3. 【鼠标轨迹】点击前模拟鼠标移动到目标元素
+ * 4. 【概率浏览】随机概率"查看"候选人详情页，模拟真人浏览行为
+ * 5. 【操作限速】每日/每小时操作上限，防止高频触发风控
+ * 6. 【安全降级】检测到异常时自动降级为仅抓取模式
+ * 7. 【指纹隐藏】隐藏 webdriver 等自动化特征
+ * 8. 【页面停留】操作间随机停留，模拟阅读行为
+ * ============================================================
+ *
+ * 匹配页面：
+ * - https://www.zhipin.com/web/recruit/geek/receive  (简历接收页)
+ * - https://www.zhipin.com/web/recruit/geek/*        (候选人详情页)
+ * - https://www.zhipin.com/chat/*                     (聊天页面)
+ */
+
+// ============================================================
+// 配置
+// ============================================================
+
+let settings = {
+  autoAccept: false,       // 【安全默认关闭】自动接收简历（默认关闭，降低风险）
+  autoRequestResume: false,// 【安全默认关闭】自动索要简历
+  autoBrowseProfiles: false,// 【安全默认关闭】自动浏览候选人并切换沟通界面
+  autoScrape: true,        // 自动抓取信息（安全，只读取DOM）
+  autoSync: true,          // 自动同步数据
+  acceptDelay: 18000,      // 基础延迟（毫秒），降低自动化速度
+  delayVariance: 9000,     // 延迟随机波动范围
+  browseProbability: 0.55, // 概率浏览候选人详情
+  dailyLimit: 20,          // 每日自动操作上限
+  hourlyLimit: 6,          // 每小时自动操作上限
+  maxCandidatesPerRun: 5,  // 单轮最多处理候选人
+  candidateDwellMin: 12000,
+  candidateDwellMax: 30000,
+  actionDwellMin: 8000,
+  actionDwellMax: 18000,
+  longBreakEvery: 3,
+  longBreakMin: 60000,
+  longBreakMax: 150000,
+  scrollBeforeClick: true, // 点击前随机滚动页面
+  safeMode: true,          // 安全模式（检测到异常自动降级）
+};
+
+// 已处理的简历ID集合（避免重复处理）
+const processedResumeIds = new Set();
+const processedActionKeys = new Set();
+const processedBrowseKeys = new Set();
+let isBrowsingCandidates = false;
+
+const RESUME_ACTIONS = {
+  accept: {
+    label: '接收简历',
+    keywords: ['同意', '接收', '接收简历', '查看简历', '接受简历'],
+    blockedKeywords: ['已同意', '已接收', '已查看', '已处理', '不同意'],
+  },
+  request: {
+    label: '索要简历',
+    keywords: ['索要简历', '请求简历', '要简历', '获取简历', '请求发送简历', '请发简历', '让TA发简历', '让他发简历', '让她发简历'],
+    blockedKeywords: ['已索要', '已请求', '已发送', '已获取', '等待对方'],
+  },
+};
+
+const AGENTS_EVALUATION_RULES = {
+  hard: 20,
+  skills: 30,
+  projects: 30,
+  salary: 20,
+  recommendThreshold: 70,
+  strongRecommendThreshold: 90,
+  pendingThreshold: 50,
+};
+
+const SKILL_KEYWORDS = [
+  'JavaScript', 'TypeScript', 'React', 'Vue', 'Node', 'Java', 'Spring', 'Python',
+  'Go', 'C++', 'MySQL', 'Redis', 'Docker', 'Kubernetes', '微服务', '架构',
+  '自动化', '测试', '性能', '数据', '算法', '前端', '后端', '全栈', '运维',
+];
+
+const PROJECT_KEYWORDS = ['项目', '负责', '主导', '落地', '优化', '提升', '架构', '系统', '平台', '性能', '效率', '增长'];
+
+// 操作计数器（用于限速）
+let operationCount = {
+  today: 0,
+  hourly: 0,
+  todayDate: new Date().toISOString().split('T')[0],
+  currentHour: new Date().getHours(),
+};
+
+// 安全状态
+let safetyState = {
+  isDegraded: false,        // 是否已降级
+  consecutiveErrors: 0,     // 连续错误次数
+  lastOperationTime: 0,     // 上次操作时间
+  warningCount: 0,          // 风控警告次数
+};
+
+// ============================================================
+// 初始化
+// ============================================================
+
+async function init() {
+  console.log('[招聘助手] 插件已加载 (v2.0 安全增强版)');
+  await loadSettings();
+  hideAutomationFingerprints();
+  resetCountersIfNeeded();
+  startObserving();
+}
+
+async function loadSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['settings', 'operationCount', 'safetyState'], (result) => {
+      if (result.settings) {
+        settings = { ...settings, ...result.settings };
+      }
+      if (result.operationCount) {
+        operationCount = { ...operationCount, ...result.operationCount };
+      }
+      if (result.safetyState) {
+        safetyState = { ...safetyState, ...result.safetyState };
+      }
+      console.log('[招聘助手] 设置已加载:', settings);
+      resolve();
+    });
+  });
+}
+
+/**
+ * 【反检测】隐藏自动化指纹
+ * 参考 GoodHR 策略：移除 webdriver 等可被检测的属性
+ */
+function hideAutomationFingerprints() {
+  try {
+    // 移除 webdriver 标记
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined,
+    });
+
+    // 伪装 plugins 数组（空数组是自动化工具的典型特征）
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => {
+        const plugins = [
+          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+          { name: 'Native Client', filename: 'internal-nacl-plugin' },
+        ];
+        plugins.length = 3;
+        return plugins;
+      },
+    });
+
+    // 伪装 languages
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+    });
+
+    console.log('[招聘助手] 自动化指纹已隐藏');
+  } catch (e) {
+    console.warn('[招聘助手] 指纹隐藏部分失败:', e.message);
+  }
+}
+
+/**
+ * 重置操作计数器（跨天/跨小时）
+ */
+function resetCountersIfNeeded() {
+  const now = new Date();
+  const today = now.toISOString().split('T')[0];
+  const currentHour = now.getHours();
+  let changed = false;
+
+  if (today !== operationCount.todayDate) {
+    operationCount.today = 0;
+    operationCount.hourly = 0;
+    operationCount.todayDate = today;
+    operationCount.currentHour = currentHour;
+    changed = true;
+    console.log('[招聘助手] 新的一天，操作计数器已重置');
+  } else if (currentHour !== operationCount.currentHour) {
+    operationCount.hourly = 0;
+    operationCount.currentHour = currentHour;
+    changed = true;
+    console.log('[招聘助手] 新的小时，小时计数器已重置');
+  }
+
+  if (changed) {
+    chrome.storage.local.set({ operationCount });
+  }
+}
+
+// ============================================================
+// 人类行为模拟引擎（核心反检测模块）
+// ============================================================
+
+/**
+ * 生成人类化的随机延迟
+ * 使用正态分布，中心值为 acceptDelay，标准差为 delayVariance/2
+ * 最小值不低于 acceptDelay - delayVariance
+ * 最大值不超过 acceptDelay + delayVariance * 2
+ */
+function humanDelay() {
+  const min = Math.max(1000, settings.acceptDelay - settings.delayVariance);
+  const max = settings.acceptDelay + settings.delayVariance * 2;
+  const mean = settings.acceptDelay;
+  const stdDev = settings.delayVariance / 2;
+
+  // Box-Muller 变换生成正态分布随机数
+  let u1 = Math.random();
+  let u2 = Math.random();
+  // 避免 log(0)
+  u1 = Math.max(0.0001, u1);
+  const normalRandom = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  let delay = mean + normalRandom * stdDev;
+
+  // 限制范围
+  delay = Math.max(min, Math.min(max, delay));
+
+  return Math.round(delay);
+}
+
+/**
+ * 【核心】模拟真实鼠标点击事件
+ * 不使用 element.click()，而是构造完整的 MouseEvent 链
+ * 使用完整事件链触发页面自身的交互监听，避免只调用 click() 时遗漏前置事件。
+ */
+function simulateHumanClick(element) {
+  if (!element) return false;
+
+  try {
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + rect.width * (0.3 + Math.random() * 0.4); // 避免精确中心
+    const y = rect.top + rect.height * (0.3 + Math.random() * 0.4);
+
+    // 完整的鼠标事件序列：mousemove → mouseover → mousedown → mouseup → click
+    const eventSequence = [
+      new MouseEvent('mousemove', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: x, clientY: y,
+      }),
+      new MouseEvent('mouseover', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: x, clientY: y,
+      }),
+      new MouseEvent('mouseenter', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: x, clientY: y,
+      }),
+      new MouseEvent('mousedown', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: x, clientY: y,
+        button: 0, // 左键
+      }),
+      new MouseEvent('mouseup', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: x, clientY: y,
+        button: 0,
+      }),
+      new MouseEvent('click', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: x, clientY: y,
+        button: 0,
+      }),
+    ];
+
+    eventSequence.forEach(event => {
+      element.dispatchEvent(event);
+    });
+
+    return true;
+  } catch (err) {
+    console.warn('[招聘助手] 模拟点击失败，回退到原生点击:', err.message);
+    element.click();
+    return true;
+  }
+}
+
+/**
+ * 模拟鼠标移动到目标元素（带随机路径）
+ * 生成多个中间点，模拟人类手部移动的贝塞尔曲线
+ */
+async function simulateMouseMove(targetElement) {
+  if (!targetElement) return;
+
+  const targetRect = targetElement.getBoundingClientRect();
+  const targetX = targetRect.left + targetRect.width / 2;
+  const targetY = targetRect.top + targetRect.height / 2;
+
+  // 起始位置（当前鼠标位置附近，加随机偏移）
+  const startX = window.innerWidth / 2 + (Math.random() - 0.5) * 200;
+  const startY = window.innerHeight / 2 + (Math.random() - 0.5) * 200;
+
+  // 生成 3-5 个中间控制点
+  const numPoints = 3 + Math.floor(Math.random() * 3);
+  const points = [];
+
+  for (let i = 1; i <= numPoints; i++) {
+    const t = i / (numPoints + 1);
+    const x = startX + (targetX - startX) * t + (Math.random() - 0.5) * 80;
+    const y = startY + (targetY - startY) * t + (Math.random() - 0.5) * 60;
+    points.push({ x, y });
+  }
+
+  points.push({ x: targetX, y: targetY });
+
+  // 依次触发 mousemove 事件
+  for (const point of points) {
+    document.dispatchEvent(new MouseEvent('mousemove', {
+      bubbles: true, clientX: point.x, clientY: point.y,
+    }));
+    await sleep(30 + Math.random() * 50); // 每个点间隔 30-80ms
+  }
+}
+
+/**
+ * 模拟人类滚动行为
+ * 随机滚动一段距离，模拟阅读页面
+ */
+async function simulateHumanScroll() {
+  if (!settings.scrollBeforeClick) return;
+
+  const scrollAmount = 100 + Math.random() * 300; // 随机滚动 100-400px
+  const scrollDuration = 300 + Math.random() * 500; // 滚动动画 300-800ms
+
+  window.scrollBy({
+    top: Math.random() > 0.5 ? scrollAmount : -scrollAmount * 0.3,
+    behavior: 'smooth',
+  });
+
+  await sleep(scrollDuration);
+}
+
+/**
+ * 模拟页面停留（阅读时间）
+ */
+async function simulateReadingTime(minMs = 1000, maxMs = 3000) {
+  const readingTime = minMs + Math.random() * (maxMs - minMs);
+  await sleep(readingTime);
+}
+
+async function simulateCandidateDwell() {
+  await simulateReadingTime(settings.candidateDwellMin || 12000, settings.candidateDwellMax || 30000);
+}
+
+async function simulateActionDwell() {
+  await simulateReadingTime(settings.actionDwellMin || 8000, settings.actionDwellMax || 18000);
+}
+
+async function maybeTakeLongBreak(processedCount) {
+  const every = Number(settings.longBreakEvery || 0);
+  if (!every || processedCount === 0 || processedCount % every !== 0) return;
+  notifyPopup('log', {
+    message: `已处理 ${processedCount} 位候选人，进入长暂停以降低风控风险`,
+    type: 'info',
+  });
+  await simulateReadingTime(settings.longBreakMin || 60000, settings.longBreakMax || 150000);
+}
+
+/**
+ * 工具函数：延迟
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================================
+// 安全控制模块
+// ============================================================
+
+/**
+ * 检查是否可以执行操作（限速检查）
+ */
+function canPerformOperation() {
+  resetCountersIfNeeded();
+
+  // 检查每日上限
+  if (operationCount.today >= settings.dailyLimit) {
+    console.warn(`[招聘助手] 已达到每日操作上限 (${settings.dailyLimit})，暂停自动操作`);
+    notifyPopup('log', {
+      message: `⚠️ 已达每日上限 ${settings.dailyLimit} 次，自动接收已暂停`,
+      type: 'error',
+    });
+    return false;
+  }
+
+  // 检查每小时上限
+  if (operationCount.hourly >= settings.hourlyLimit) {
+    console.warn(`[招聘助手] 已达到每小时操作上限 (${settings.hourlyLimit})，暂停自动操作`);
+    notifyPopup('log', {
+      message: `⚠️ 已达每小时上限 ${settings.hourlyLimit} 次，等待下一小时`,
+      type: 'error',
+    });
+    return false;
+  }
+
+  // 检查安全降级状态
+  if (safetyState.isDegraded && settings.safeMode) {
+    console.warn('[招聘助手] 安全模式已降级，仅执行抓取操作');
+    return false;
+  }
+
+  // 检查最小操作间隔（至少 3 秒）
+  const now = Date.now();
+  if (safetyState.lastOperationTime > 0) {
+    const elapsed = now - safetyState.lastOperationTime;
+    if (elapsed < 3000) {
+      console.warn(`[招聘助手] 操作间隔过短 (${elapsed}ms)，跳过`);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * 记录操作
+ */
+function recordOperation() {
+  operationCount.today++;
+  operationCount.hourly++;
+  safetyState.lastOperationTime = Date.now();
+  safetyState.consecutiveErrors = 0;
+
+  // 保存计数到 storage
+  chrome.storage.local.set({
+    operationCount: {
+      ...operationCount,
+      timestamp: Date.now(),
+    },
+  });
+}
+
+/**
+ * 报告错误（连续错误触发降级）
+ */
+function reportError(errorMsg) {
+  safetyState.consecutiveErrors++;
+  console.error(`[招聘助手] 操作错误 (${safetyState.consecutiveErrors}次):`, errorMsg);
+
+  if (safetyState.consecutiveErrors >= 3 && settings.safeMode) {
+    triggerSafetyDegradation();
+  }
+}
+
+/**
+ * 触发安全降级
+ * 参考 GoodHR v1.3.1：曾因安全考虑禁用自动下载简历功能
+ */
+function triggerSafetyDegradation() {
+  safetyState.isDegraded = true;
+  settings.autoAccept = false;
+
+  chrome.storage.local.set({ settings, safetyState });
+
+  console.warn('[招聘助手] 🚨 检测到连续异常，已自动降级为安全模式');
+  notifyPopup('log', {
+    message: '🚨 连续异常，已自动关闭自动接收（安全降级）',
+    type: 'error',
+  });
+}
+
+/**
+ * 概率浏览候选人详情页
+ * 参考 GoodHR v1.4：概率查看候选人信息功能
+ */
+async function probabilisticBrowse(card) {
+  if (Math.random() > settings.browseProbability) return;
+
+  const detailLink = card.querySelector('a[href*="geek"]') ||
+                    card.querySelector('a[href*="resume"]') ||
+                    card.querySelector('a[href*="detail"]');
+  if (!detailLink) return;
+
+  console.log('[招聘助手] 概率浏览：查看候选人详情');
+  notifyPopup('log', {
+    message: '📖 模拟浏览候选人详情页',
+    type: 'info',
+  });
+
+  // 在新标签页中打开（不影响当前页面操作）
+  // 注意：不实际打开，仅模拟鼠标悬停行为
+  detailLink.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+  await sleep(500 + Math.random() * 1000);
+  detailLink.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+}
+
+// ============================================================
+// MutationObserver - 监听页面变化
+// ============================================================
+
+let observer = null;
+let observeDebounce = null;
+
+function startObserving() {
+  if (observer) observer.disconnect();
+
+  observer = new MutationObserver((mutations) => {
+    if (!window.location.hostname.includes('zhipin.com')) return;
+
+    // 防抖：避免短时间内多次触发
+    if (observeDebounce) clearTimeout(observeDebounce);
+    observeDebounce = setTimeout(() => {
+      handlePageChange();
+    }, 2000 + Math.random() * 2000); // 2-4秒随机防抖
+  });
+
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: false,
+    characterData: false,
+  });
+
+  console.log('[招聘助手] 开始监听页面变化（防抖模式）');
+
+  // 首次加载延迟执行
+  setTimeout(() => handlePageChange(), 3000 + Math.random() * 2000);
+}
+
+// ============================================================
+// 页面变化处理
+// ============================================================
+
+function handlePageChange() {
+  const url = window.location.href;
+
+  if (url.includes('/web/recruit/geek/receive') ||
+      url.includes('/web/recruit/geek/deliver')) {
+    handleReceivePage();
+  }
+
+  if (url.includes('/chat/')) {
+    handleChatPage();
+  }
+
+  // 候选人浏览只由用户在弹窗中主动触发，避免页面变化导致连续自动操作。
+}
+
+// ============================================================
+// 简历接收页面处理（安全增强版）
+// ============================================================
+
+async function handleReceivePage() {
+  const resumeCards = findResumeCards();
+  console.log(`[招聘助手] 发现 ${resumeCards.length} 个简历卡片`);
+
+  for (let index = 0; index < resumeCards.length; index++) {
+    const card = resumeCards[index];
+    const resumeId = extractResumeId(card);
+    if (!resumeId || processedResumeIds.has(resumeId)) continue;
+
+    // 1. 抓取简历信息（始终执行，安全操作）
+    let resumeInfo = null;
+    if (settings.autoScrape) {
+      resumeInfo = scrapeResumeInfo(card, resumeId);
+      if (resumeInfo) {
+        const saveResult = await saveResumeData(resumeInfo);
+        if (saveResult.saved) {
+          notifyPopup('resumeScraped', resumeInfo);
+        }
+      }
+    }
+
+    // 2. 概率浏览详情页（模拟真人行为）
+    await probabilisticBrowse(card);
+
+    // 3. 自动接收（需要通过安全检查）
+    if (settings.autoAccept || settings.autoRequestResume) {
+      const actionResult = await runResumeActions({
+        scope: card,
+        contextName: resumeInfo?.name || `第 ${index + 1} 位候选人`,
+        manual: false,
+        sequenceOffset: index,
+      });
+      if (actionResult.blockedBySafety) {
+        break;
+      }
+    }
+
+    processedResumeIds.add(resumeId);
+  }
+}
+
+// ============================================================
+// DOM 查找函数（保持不变）
+// ============================================================
+
+function findResumeCards() {
+  const selectors = [
+    '.resume-list-item',
+    '.geek-item',
+    '.deliver-item',
+    '[class*="resume"]',
+    '[class*="geek-list"] > [class*="item"]',
+    '[class*="deliver"] [class*="item"]',
+    '[class*="candidate"] [class*="card"]',
+    '.job-card-wrapper',
+    '.search-job-result li',
+    '.list-job-card',
+  ];
+
+  for (const selector of selectors) {
+    const cards = document.querySelectorAll(selector);
+    if (cards.length > 0) {
+      return Array.from(cards);
+    }
+  }
+
+  const acceptButtons = document.querySelectorAll(
+    'button, [role="button"], a, span, div'
+  );
+  const cardContainers = new Set();
+
+  acceptButtons.forEach(btn => {
+    const text = (btn.textContent || '').trim();
+    if (text === '同意' || text === '接收' || text === '查看简历') {
+      let container = btn.closest('[class*="item"]') ||
+                      btn.closest('[class*="card"]') ||
+                      btn.closest('[class*="row"]') ||
+                      btn.closest('li') ||
+                      btn.parentElement?.parentElement;
+      if (container) {
+        cardContainers.add(container);
+      }
+    }
+  });
+
+  return Array.from(cardContainers);
+}
+
+function findAcceptButton(card) {
+  const target = findActionTargets(card).find(item => item.type === 'accept');
+  return target?.button || null;
+}
+
+function findActionTargets(scope = document) {
+  const roots = scope === document
+    ? [document]
+    : [scope];
+  const targets = [];
+  const seen = new Set();
+
+  roots.forEach(root => {
+    const clickable = root.querySelectorAll('button, a, [role="button"], span, div');
+    clickable.forEach(element => {
+      if (!isActionableElement(element)) return;
+
+      const text = getClickableText(element);
+      const actionType = matchResumeAction(text, element);
+      if (!actionType) return;
+
+      const actionKey = getActionKey(actionType, element, text);
+      if (seen.has(actionKey)) return;
+      seen.add(actionKey);
+
+      targets.push({
+        type: actionType,
+        label: RESUME_ACTIONS[actionType].label,
+        button: element,
+        text,
+        key: actionKey,
+      });
+    });
+  });
+
+  return targets;
+}
+
+function isActionableElement(element) {
+  if (!element || element.disabled || element.getAttribute('aria-disabled') === 'true') {
+    return false;
+  }
+  const style = window.getComputedStyle(element);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') {
+    return false;
+  }
+  const rect = element.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+
+function getClickableText(element) {
+  return normalizeText([
+    element.textContent,
+    element.getAttribute('aria-label'),
+    element.getAttribute('title'),
+    element.getAttribute('data-title'),
+  ].filter(Boolean).join(' '));
+}
+
+function matchResumeAction(text, element) {
+  if (!text || text.length > 40) return null;
+
+  for (const [type, config] of Object.entries(RESUME_ACTIONS)) {
+    if (config.blockedKeywords.some(keyword => text.includes(keyword))) {
+      continue;
+    }
+    if (config.keywords.some(keyword => text === keyword || text.includes(keyword))) {
+      return type;
+    }
+  }
+
+  return null;
+}
+
+function getActionKey(type, element, text) {
+  const rect = element.getBoundingClientRect();
+  const path = window.location.pathname;
+  const position = `${Math.round(rect.left)}_${Math.round(rect.top)}_${Math.round(rect.width)}_${Math.round(rect.height)}`;
+  return `${type}_${hashString(`${path}|${text}|${position}`)}`;
+}
+
+function findCandidateNavigationTargets() {
+  const selectors = [
+    '.geek-item',
+    '.resume-list-item',
+    '.deliver-item',
+    '[class*="geek-list"] > [class*="item"]',
+    '[class*="candidate"] [class*="card"]',
+    '[class*="recommend"] [class*="item"]',
+    '[class*="list"] [class*="item"]',
+    '.job-card-wrapper',
+    '.search-job-result li',
+    '.list-job-card',
+  ];
+  const targets = [];
+  const seen = new Set();
+
+  selectors.forEach(selector => {
+    document.querySelectorAll(selector).forEach(card => {
+      if (!isActionableElement(card)) return;
+      const text = normalizeText(card.textContent || '');
+      if (!text || text.length < 2) return;
+      if (/^(同意|接收|接收简历|索要简历|请求简历)$/.test(text)) return;
+
+      const clickable = findCardClickable(card);
+      if (!clickable) return;
+
+      const key = getCandidateBrowseKey(card, clickable);
+      if (seen.has(key) || processedBrowseKeys.has(key)) return;
+      seen.add(key);
+
+      targets.push({
+        card,
+        clickable,
+        key,
+        name: extractCandidateName(card),
+      });
+    });
+  });
+
+  return targets;
+}
+
+function findCardClickable(card) {
+  const link = card.querySelector('a[href*="geek"], a[href*="resume"], a[href*="chat"], a[href*="detail"]');
+  if (link && isActionableElement(link)) return link;
+
+  const preferred = card.querySelector('[class*="name"], [class*="title"], [class*="geek-name"], h3, h4');
+  if (preferred && isActionableElement(preferred)) return preferred;
+
+  return card;
+}
+
+function extractCandidateName(card) {
+  return extractText(card, [
+    '[class*="name"]',
+    '[class*="title"]',
+    '[class*="geek-name"]',
+    'h3',
+    'h4',
+  ]) || '候选人';
+}
+
+function getCandidateBrowseKey(card, clickable) {
+  const href = clickable.href || '';
+  const text = normalizeText(card.textContent || '').slice(0, 180);
+  const rect = card.getBoundingClientRect();
+  const position = `${Math.round(rect.left)}_${Math.round(rect.top)}`;
+  return `browse_${hashString(`${window.location.pathname}|${href}|${text}|${position}`)}`;
+}
+
+async function waitForCommunicationInterface(previousUrl, previousText) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 5000) {
+    await sleep(350);
+    const currentText = normalizeText(document.body.textContent || '').slice(0, 500);
+    if (window.location.href !== previousUrl) return true;
+    if (currentText && currentText !== previousText) return true;
+    if (findActionTargets(document).length > 0) return true;
+  }
+  return false;
+}
+
+function extractResumeId(card) {
+  const dataId = card.getAttribute('data-id') ||
+                 card.getAttribute('data-geek-id') ||
+                 card.getAttribute('data-resume-id') ||
+                 card.getAttribute('data-encrypt-id');
+  if (dataId) return dataId;
+
+  const link = card.querySelector('a[href*="geek"]') ||
+               card.querySelector('a[href*="resume"]');
+  if (link) {
+    const match = link.href.match(/\/(\w{10,})/);
+    if (match) return match[1];
+  }
+
+  const allCards = findResumeCards();
+  const index = allCards.indexOf(card);
+  const stableText = normalizeText(card.textContent || '').slice(0, 240);
+  return `card_${index}_${hashString(`${window.location.pathname}|${stableText}`)}`;
+}
+
+// ============================================================
+// 简历信息抓取（保持不变）
+// ============================================================
+
+function scrapeResumeInfo(card, resumeId) {
+  try {
+    const info = {
+      id: resumeId,
+      source: 'BOSS直聘',
+      sourceUrl: window.location.href,
+      receivedDate: new Date().toISOString().split('T')[0],
+      receivedTime: new Date().toISOString(),
+      scrapedAt: new Date().toISOString(),
+      accountName: detectRecruiterAccountInfo().name || settings.accountName || '',
+      accountPlatform: settings.accountPlatform || 'BOSS直聘',
+    };
+    info.rawText = normalizeText(card.textContent || '').slice(0, 3000);
+
+    info.name = extractText(card, [
+      '[class*="name"]', '[class*="title"]', '[class*="geek-name"]',
+      'h3', 'h4', 'a[class*="name"]',
+    ]);
+    info.role = extractText(card, [
+      '[class*="job"]', '[class*="position"]',
+      '[class*="expect"]', '[class*="intention"]',
+    ]);
+    info.education = extractText(card, [
+      '[class*="edu"]', '[class*="degree"]', '[class*="education"]',
+    ]);
+    info.experience = extractText(card, [
+      '[class*="exp"]', '[class*="experience"]', '[class*="work"]',
+    ]);
+    info.ageGender = extractText(card, [
+      '[class*="age"]', '[class*="gender"]', '[class*="basic"]',
+    ]);
+    info.currentCompany = extractText(card, [
+      '[class*="company"]', '[class*="corp"]',
+    ]);
+    info.expectedSalary = extractText(card, [
+      '[class*="salary"]', '[class*="pay"]',
+    ]);
+    info.status = extractText(card, [
+      '[class*="status"]', '[class*="active"]', '[class*="state"]',
+    ]);
+    info.summary = extractText(card, [
+      '[class*="summary"]', '[class*="desc"]',
+      '[class*="intro"]', '[class*="self"]',
+    ]);
+    info.email = extractByRegex(card.textContent || '', /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    info.phone = extractByRegex(card.textContent || '', /(?:\+?86[-\s]?)?1[3-9]\d{9}/);
+    info.qualityScore = calculateResumeQuality(info);
+    info.evaluation = evaluateCandidate(info);
+
+    if (!info.name) {
+      const fullText = card.textContent || '';
+      const nameMatch = fullText.match(/^[\u4e00-\u9fa5]{2,4}/);
+      if (nameMatch) info.name = nameMatch[0];
+    }
+
+    if (!info.name) {
+      console.warn('[招聘助手] 无法提取简历姓名，跳过');
+      return null;
+    }
+
+    console.log('[招聘助手] 抓取到简历信息:', info.name, info.role);
+    return info;
+
+  } catch (err) {
+    console.error('[招聘助手] 抓取简历信息失败:', err);
+    return null;
+  }
+}
+
+function extractText(container, selectors) {
+  for (const selector of selectors) {
+    try {
+      const el = container.querySelector(selector);
+      if (el) {
+        const text = (el.textContent || '').trim();
+        if (text && text.length > 0 && text.length < 200) {
+          return text;
+        }
+      }
+    } catch (e) {}
+  }
+  return '';
+}
+
+function extractByRegex(text, regex) {
+  const match = text.match(regex);
+  return match ? match[0] : '';
+}
+
+function normalizeText(text) {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function hashString(text) {
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function calculateResumeQuality(info) {
+  const fields = ['name', 'role', 'education', 'experience', 'expectedSalary', 'summary', 'phone', 'email'];
+  const filled = fields.filter(field => Boolean(info[field])).length;
+  return Math.round((filled / fields.length) * 100);
+}
+
+function evaluateCandidate(info) {
+  const text = [
+    info.name,
+    info.role,
+    info.education,
+    info.experience,
+    info.expectedSalary,
+    info.currentCompany,
+    info.summary,
+    info.rawText,
+  ].filter(Boolean).join(' ');
+
+  const hard = evaluateHardConditions(info, text);
+  const skills = evaluateSkillMatch(info, text);
+  const projects = evaluateProjectMatch(info, text);
+  const salary = evaluateSalaryMatch(info, text);
+  const score = hard.score + skills.score + projects.score + salary.score;
+  const risks = [
+    ...hard.risks,
+    ...skills.risks,
+    ...projects.risks,
+    ...salary.risks,
+    ...detectGeneralRisks(text),
+  ];
+  const strengths = [
+    ...hard.strengths,
+    ...skills.strengths,
+    ...projects.strengths,
+    ...salary.strengths,
+  ];
+
+  let recommendation = '不推荐';
+  let level = 'no';
+  let nextStep = '礼貌婉拒或放入人才库';
+  if (score >= AGENTS_EVALUATION_RULES.strongRecommendThreshold) {
+    recommendation = '强烈推荐';
+    level = 'strong';
+    nextStep = '立即安排面试';
+  } else if (score >= AGENTS_EVALUATION_RULES.recommendThreshold) {
+    recommendation = '推荐';
+    level = 'recommend';
+    nextStep = '电话沟通后安排面试';
+  } else if (score >= AGENTS_EVALUATION_RULES.pendingThreshold) {
+    recommendation = '待定';
+    level = 'pending';
+    nextStep = '补充追问项目职责、技术深度和薪资期望';
+  }
+
+  return {
+    score,
+    recommendation,
+    level,
+    nextStep,
+    suitable: score >= AGENTS_EVALUATION_RULES.recommendThreshold,
+    dimensions: {
+      hard,
+      skills,
+      projects,
+      salary,
+    },
+    strengths: strengths.slice(0, 5),
+    risks: risks.slice(0, 5),
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+function evaluateHardConditions(info, text) {
+  let score = 0;
+  const strengths = [];
+  const risks = [];
+
+  if (/博士|硕士|本科|211|985/i.test(info.education || text)) {
+    score += 8;
+    strengths.push(`学历信息较完整：${info.education || '简历中含本科及以上/重点院校信号'}`);
+  } else if (/大专|专科/i.test(info.education || text)) {
+    score += 4;
+    risks.push('学历可能低于部分岗位要求，需核对JD');
+  } else {
+    score += 3;
+    risks.push('学历信息不足，需进一步确认');
+  }
+
+  if (info.experience || /\d+\s*年|应届|实习/i.test(text)) {
+    score += 6;
+    strengths.push(`工作年限可识别：${info.experience || '简历中含年限信息'}`);
+  } else {
+    score += 2;
+    risks.push('工作年限信息不足');
+  }
+
+  const age = parseAge(text);
+  if (!age) {
+    score += 3;
+  } else if (age <= 45) {
+    score += 4;
+    strengths.push(`年龄在常规招聘范围内：${age}岁`);
+  } else {
+    score += 1;
+    risks.push(`年龄 ${age} 岁，需确认岗位适配性`);
+  }
+
+  const majorRelated = /计算机|软件|电子|通信|自动化|机械|信息|数学|统计/i.test(text);
+  if (majorRelated) {
+    score += 2;
+    strengths.push('专业或背景与技术/工程方向相关');
+  } else {
+    risks.push('专业相关性未明确');
+  }
+
+  return {
+    score: Math.min(score, AGENTS_EVALUATION_RULES.hard),
+    max: AGENTS_EVALUATION_RULES.hard,
+    match: score >= 14 ? 'match' : score >= 9 ? 'partial' : 'weak',
+    strengths,
+    risks,
+  };
+}
+
+function evaluateSkillMatch(info, text) {
+  const matched = SKILL_KEYWORDS.filter(keyword => text.toLowerCase().includes(keyword.toLowerCase()));
+  let score = Math.min(AGENTS_EVALUATION_RULES.skills, matched.length * 4);
+  const role = info.role || '';
+  const roleTokens = role.split(/[\/\s,，、|-]+/).filter(token => token.length >= 2);
+  const roleMatched = roleTokens.filter(token => text.includes(token));
+  if (roleMatched.length) score += 4;
+
+  const strengths = matched.length
+    ? [`技能关键词匹配：${matched.slice(0, 8).join('、')}`]
+    : [];
+  const risks = matched.length < 3
+    ? ['技能关键词不足，需结合完整简历或面试追问确认']
+    : [];
+
+  return {
+    score: Math.min(score, AGENTS_EVALUATION_RULES.skills),
+    max: AGENTS_EVALUATION_RULES.skills,
+    match: score >= 22 ? 'match' : score >= 12 ? 'partial' : 'weak',
+    matchedKeywords: matched,
+    strengths,
+    risks,
+  };
+}
+
+function evaluateProjectMatch(info, text) {
+  const matched = PROJECT_KEYWORDS.filter(keyword => text.includes(keyword));
+  const hasMetric = /\d+%|\d+\s*倍|\d+\s*人|\d+\s*万|QPS|DAU|ROI|成本|效率|性能/i.test(text);
+  let score = Math.min(AGENTS_EVALUATION_RULES.projects, matched.length * 3);
+  if (info.summary) score += 6;
+  if (hasMetric) score += 6;
+  if (/主导|负责人|Owner|核心/i.test(text)) score += 5;
+
+  const strengths = [];
+  const risks = [];
+  if (matched.length) strengths.push(`项目经历信号：${matched.slice(0, 6).join('、')}`);
+  if (hasMetric) strengths.push('简历中出现量化成果信号');
+  if (!matched.length && !info.summary) risks.push('项目经历信息不足，需追问具体职责和成果');
+
+  return {
+    score: Math.min(score, AGENTS_EVALUATION_RULES.projects),
+    max: AGENTS_EVALUATION_RULES.projects,
+    match: score >= 22 ? 'match' : score >= 12 ? 'partial' : 'weak',
+    strengths,
+    risks,
+  };
+}
+
+function evaluateSalaryMatch(info, text) {
+  const salary = info.expectedSalary || extractByRegex(text, /\d+\s*[-~到]\s*\d+\s*[kK万]?|\d+\s*[kK]\s*[-~到]\s*\d+\s*[kK]/);
+  if (!salary) {
+    return {
+      score: 8,
+      max: AGENTS_EVALUATION_RULES.salary,
+      match: 'partial',
+      strengths: [],
+      risks: ['薪资期望未明确，需沟通预算匹配'],
+    };
+  }
+
+  const abnormal = /100k|100K|百万|面议/i.test(salary) && !/面议/i.test(salary);
+  return {
+    score: abnormal ? 8 : AGENTS_EVALUATION_RULES.salary,
+    max: AGENTS_EVALUATION_RULES.salary,
+    match: abnormal ? 'weak' : 'match',
+    strengths: abnormal ? [] : [`薪资期望可识别：${salary}`],
+    risks: abnormal ? [`薪资期望可能异常：${salary}`] : [],
+  };
+}
+
+function detectGeneralRisks(text) {
+  const risks = [];
+  if (/频繁跳槽|多段经历|gap|空窗|离职原因/i.test(text)) risks.push('存在稳定性或空档期信号，需进一步确认');
+  if (/了解|入门|自学/i.test(text) && !/熟悉|精通|负责|主导/i.test(text)) risks.push('技能深度可能不足');
+  if (/外包|短期|试用/i.test(text)) risks.push('需确认项目归属、职责深度和稳定性');
+  return risks;
+}
+
+function parseAge(text) {
+  const match = text.match(/(\d{2})\s*岁/);
+  if (!match) return null;
+  const age = Number(match[1]);
+  return age > 15 && age < 70 ? age : null;
+}
+
+function detectRecruiterAccountInfo() {
+  const selectors = [
+    '[class*="user"] [class*="name"]',
+    '[class*="account"] [class*="name"]',
+    '[class*="avatar"] + *',
+    '[class*="profile"] [class*="name"]',
+    '.user-name',
+    '.name',
+  ];
+  for (const selector of selectors) {
+    const element = document.querySelector(selector);
+    const text = normalizeText(element?.textContent || '');
+    if (isLikelyRecruiterName(text)) {
+      const info = { name: text.slice(0, 40), platform: 'BOSS直聘', detectedAt: new Date().toISOString() };
+      chrome.storage.local.set({ detectedAccount: info });
+      return info;
+    }
+  }
+
+  const bodyText = normalizeText(document.body.textContent || '');
+  const match = bodyText.match(/(?:招聘者|当前账号|我的账号|账号)[:：\s]*([\u4e00-\u9fa5A-Za-z0-9_-]{2,20})/);
+  if (match && isLikelyRecruiterName(match[1])) {
+    const info = { name: match[1], platform: 'BOSS直聘', detectedAt: new Date().toISOString() };
+    chrome.storage.local.set({ detectedAccount: info });
+    return info;
+  }
+
+  return { name: '', platform: 'BOSS直聘', detectedAt: new Date().toISOString() };
+}
+
+function isLikelyRecruiterName(text) {
+  if (!text || text.length < 2 || text.length > 40) return false;
+  if (/登录|注册|消息|职位|简历|沟通|推荐|搜索|设置|帮助|首页/.test(text)) return false;
+  return /[\u4e00-\u9fa5A-Za-z]/.test(text);
+}
+
+function isSameResume(a, b) {
+  if (a.id && b.id && a.id === b.id) return true;
+  if (a.phone && b.phone && a.phone === b.phone) return true;
+  if (a.email && b.email && a.email === b.email) return true;
+  return Boolean(a.name && b.name && a.role && b.role && a.name === b.name && a.role === b.role);
+}
+
+async function runResumeActions({
+  scope = document,
+  contextName = '候选人',
+  manual = false,
+  sequenceOffset = 0,
+} = {}) {
+  const targets = findActionTargets(scope).filter(target => {
+    if (processedActionKeys.has(target.key)) return false;
+    if (target.type === 'accept') return manual || settings.autoAccept;
+    if (target.type === 'request') return manual || settings.autoRequestResume;
+    return false;
+  });
+
+  const summary = {
+    success: true,
+    total: targets.length,
+    executed: 0,
+    skipped: 0,
+    blockedBySafety: false,
+    actions: [],
+  };
+
+  for (let index = 0; index < targets.length; index++) {
+    const target = targets[index];
+    if (!canPerformOperation()) {
+      summary.blockedBySafety = true;
+      break;
+    }
+
+    const delay = humanDelay() + ((sequenceOffset + index) * (3000 + Math.random() * 5000));
+    await sleep(delay);
+    await simulateHumanScroll();
+    await simulateActionDwell();
+    await simulateMouseMove(target.button);
+    await sleep(800 + Math.random() * 1200);
+
+    const success = simulateHumanClick(target.button);
+    processedActionKeys.add(target.key);
+
+    if (success) {
+      recordOperation();
+      summary.executed++;
+      summary.actions.push({ type: target.type, label: target.label, text: target.text, success: true });
+      notifyPopup('resumeActionExecuted', {
+        name: contextName,
+        actionType: target.type,
+        actionLabel: target.label,
+      });
+      console.log(`[招聘助手] ✅ 已执行${target.label}: ${contextName}`);
+      await simulateActionDwell();
+    } else {
+      summary.skipped++;
+      summary.actions.push({ type: target.type, label: target.label, text: target.text, success: false });
+      reportError(`${target.label}点击失败`);
+    }
+  }
+
+  return summary;
+}
+
+async function browseCandidatesAndRunActions({
+  manual = false,
+  maxCandidates = 10,
+} = {}) {
+  if (isBrowsingCandidates) {
+    return { success: false, message: '候选人浏览流程正在执行中' };
+  }
+
+  isBrowsingCandidates = true;
+  const safeMaxCandidates = Math.min(
+    Number(maxCandidates || settings.maxCandidatesPerRun || 5),
+    Number(settings.maxCandidatesPerRun || 5)
+  );
+  const targets = findCandidateNavigationTargets().slice(0, safeMaxCandidates);
+  const summary = {
+    success: true,
+    total: targets.length,
+    browsed: 0,
+    actionExecuted: 0,
+    blockedBySafety: false,
+    details: [],
+  };
+
+  try {
+    for (let index = 0; index < targets.length; index++) {
+      const target = targets[index];
+      if (!manual && !settings.autoBrowseProfiles) break;
+      if (!canPerformOperation()) {
+        summary.blockedBySafety = true;
+        break;
+      }
+
+      const previousUrl = window.location.href;
+      const previousText = normalizeText(document.body.textContent || '').slice(0, 500);
+      const delay = humanDelay() + (index * (5000 + Math.random() * 9000));
+
+      await sleep(delay);
+      await simulateHumanScroll();
+      await simulateMouseMove(target.clickable);
+      await sleep(1200 + Math.random() * 1800);
+
+      const clicked = simulateHumanClick(target.clickable);
+      processedBrowseKeys.add(target.key);
+      if (!clicked) {
+        summary.details.push({ name: target.name, browsed: false, actions: 0 });
+        reportError(`浏览候选人失败: ${target.name}`);
+        continue;
+      }
+
+      recordOperation();
+      summary.browsed++;
+      notifyPopup('candidateBrowsed', { name: target.name });
+      await waitForCommunicationInterface(previousUrl, previousText);
+      await simulateCandidateDwell();
+
+      if (settings.autoScrape) {
+        await scanCurrentPage({ notify: false });
+      }
+
+      const actionResult = await runResumeActions({
+        scope: document,
+        contextName: target.name,
+        manual: true,
+        sequenceOffset: index,
+      });
+      summary.actionExecuted += actionResult.executed;
+      summary.details.push({
+        name: target.name,
+        browsed: true,
+        actions: actionResult.executed,
+      });
+
+      if (actionResult.blockedBySafety) {
+        summary.blockedBySafety = true;
+        break;
+      }
+      await maybeTakeLongBreak(summary.browsed);
+    }
+  } finally {
+    isBrowsingCandidates = false;
+  }
+
+  return summary;
+}
+
+async function scanCurrentPage({ notify = false } = {}) {
+  const resumeCards = findResumeCards();
+  const results = [];
+  let savedCount = 0;
+  let duplicateCount = 0;
+
+  for (const card of resumeCards) {
+    const resumeId = extractResumeId(card);
+    if (!resumeId) continue;
+
+    const resumeInfo = scrapeResumeInfo(card, resumeId);
+    if (!resumeInfo) continue;
+
+    results.push(resumeInfo);
+    if (settings.autoScrape) {
+      const saveResult = await saveResumeData(resumeInfo);
+      if (saveResult.saved) savedCount++;
+      if (saveResult.duplicate) duplicateCount++;
+      if (notify && saveResult.saved) {
+        notifyPopup('resumeScraped', resumeInfo);
+      }
+    }
+  }
+
+  return {
+    success: true,
+    resumes: results,
+    savedCount,
+    duplicateCount,
+    browseTargets: findCandidateNavigationTargets().map(item => ({
+      name: item.name,
+      key: item.key,
+    })),
+    actionTargets: findActionTargets(document).map(item => ({
+      type: item.type,
+      label: item.label,
+      text: item.text,
+    })),
+    message: `扫描完成，发现 ${results.length} 份简历，新增 ${savedCount} 份`,
+  };
+}
+
+// ============================================================
+// 聊天页面处理
+// ============================================================
+
+function handleChatPage() {
+  const resumeLinks = document.querySelectorAll(
+    'a[href*="resume"], [class*="resume"] a, [class*="attachment"]'
+  );
+
+  resumeLinks.forEach(link => {
+    if (processedResumeIds.has(link.href)) return;
+
+    const name = extractText(link.closest('[class*="message"]') || link.parentElement, [
+      '[class*="name"]', '[class*="sender"]',
+    ]);
+
+    if (name) {
+      console.log(`[招聘助手] 聊天中发现简历: ${name}`);
+      processedResumeIds.add(link.href);
+    }
+  });
+}
+
+// ============================================================
+// 数据存储
+// ============================================================
+
+async function saveResumeData(resumeInfo) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['resumes'], (result) => {
+      const resumes = result.resumes || [];
+
+      const exists = resumes.some(r => isSameResume(r, resumeInfo));
+      if (exists) {
+        resolve({ saved: false, duplicate: true });
+        return;
+      }
+
+      resumes.unshift(resumeInfo);
+      chrome.storage.local.set({ resumes }, () => {
+        notifyPopup('resumeReceived', resumeInfo);
+        chrome.runtime.sendMessage({
+          action: 'syncCandidateToBackend',
+          candidate: resumeInfo,
+        }).catch(() => {});
+        if (resumeInfo.evaluation?.suitable) {
+          pushCandidateRecommendation(resumeInfo);
+        }
+        resolve({ saved: true, duplicate: false });
+      });
+    });
+  });
+}
+
+async function pushCandidateRecommendation(resumeInfo) {
+  const report = buildCandidateReport(resumeInfo);
+  chrome.storage.local.get(['recommendedCandidates', 'candidateReports'], (result) => {
+    const recommendedCandidates = result.recommendedCandidates || [];
+    const candidateReports = result.candidateReports || [];
+    const exists = recommendedCandidates.some(item => isSameResume(item, resumeInfo));
+    if (exists) return;
+
+    const summary = {
+      id: resumeInfo.id,
+      name: resumeInfo.name,
+      role: resumeInfo.role || '待确认岗位',
+      education: resumeInfo.education || '',
+      experience: resumeInfo.experience || '',
+      expectedSalary: resumeInfo.expectedSalary || '',
+      source: resumeInfo.source || resumeInfo.accountPlatform || 'BOSS直聘',
+      accountName: resumeInfo.accountName || '',
+      accountPlatform: resumeInfo.accountPlatform || 'BOSS直聘',
+      score: resumeInfo.evaluation.score,
+      recommendation: resumeInfo.evaluation.recommendation,
+      nextStep: resumeInfo.evaluation.nextStep,
+      strengths: resumeInfo.evaluation.strengths,
+      risks: resumeInfo.evaluation.risks,
+      sourceUrl: resumeInfo.sourceUrl,
+      pushedAt: new Date().toISOString(),
+    };
+
+    recommendedCandidates.unshift(summary);
+    candidateReports.unshift({
+      id: resumeInfo.id,
+      name: resumeInfo.name,
+      role: resumeInfo.role || '待确认岗位',
+      report,
+      createdAt: new Date().toISOString(),
+    });
+
+    chrome.storage.local.set({
+      recommendedCandidates,
+      candidateReports,
+    }, () => {
+      chrome.runtime.sendMessage({
+        action: 'pushCandidateRecommendation',
+        candidate: summary,
+        report,
+      }).catch(() => {});
+      chrome.runtime.sendMessage({
+        action: 'syncRecommendationToBackend',
+        candidate: summary,
+        report,
+      }).catch(() => {});
+      notifyPopup('candidateRecommended', summary);
+    });
+  });
+}
+
+function buildCandidateReport(info) {
+  const evaluation = info.evaluation || evaluateCandidate(info);
+  const dimensions = evaluation.dimensions || {};
+  const mark = {
+    match: '✅',
+    partial: '⚠️',
+    weak: '❌',
+  };
+  const stars = evaluation.score >= 90 ? '⭐⭐⭐' : evaluation.score >= 70 ? '⭐⭐' : evaluation.score >= 50 ? '⭐' : '❌';
+
+  return [
+    `## 📋 ${info.role || '待确认岗位'} - ${info.name || '候选人'}`,
+    '',
+    '### 候选人概况',
+    '| 项目 | 信息 |',
+    '|------|------|',
+    `| 姓名 | ${info.name || '未识别'} |`,
+    `| 学历 | ${info.education || '未识别'} |`,
+    `| 工作年限 | ${info.experience || '未识别'} |`,
+    `| 当前状态 | ${info.status || '未识别'} |`,
+    `| 申请职位 | ${info.role || '待确认'} |`,
+    `| 期望薪资 | ${info.expectedSalary || '未识别'} |`,
+    `| 数据来源 | ${info.source || info.accountPlatform || 'BOSS直聘'} |`,
+    `| 账号信息 | ${info.accountName || '未配置'} |`,
+    '',
+    '### 匹配度分析',
+    '| 要求项 | 权重 | 匹配情况 | 候选人条件 |',
+    '|--------|------|----------|------------|',
+    `| 学历/硬性条件 | 20% | ${mark[dimensions.hard?.match] || '⚠️'} | ${info.education || info.experience || '信息不足'} |`,
+    `| 技术栈 | 30% | ${mark[dimensions.skills?.match] || '⚠️'} | ${(dimensions.skills?.matchedKeywords || []).slice(0, 8).join('、') || '待确认'} |`,
+    `| 项目经验 | 30% | ${mark[dimensions.projects?.match] || '⚠️'} | ${info.summary || '待确认项目深度'} |`,
+    `| 薪资期望 | 20% | ${mark[dimensions.salary?.match] || '⚠️'} | ${info.expectedSalary || '待沟通'} |`,
+    '',
+    `**综合匹配度：${stars} (${evaluation.score}%)**`,
+    '',
+    '### 优势',
+    ...(evaluation.strengths.length ? evaluation.strengths.map(item => `- ✅ ${item}`) : ['- 暂无明显优势信号，需补充简历信息']),
+    '',
+    '### 劣势/风险',
+    ...(evaluation.risks.length ? evaluation.risks.map(item => `- ⚠️ ${item}`) : ['- 暂无明显风险信号']),
+    '',
+    '### 推荐意见',
+    `**${evaluation.recommendation}**`,
+    '',
+    '### 下一步行动建议',
+    `- [ ] ${evaluation.nextStep}`,
+    '- [ ] 核对学历、年限、薪资与JD要求',
+    '- [ ] 面试中深挖项目职责、技术深度和量化成果',
+  ].join('\n');
+}
+
+// ============================================================
+// 通知 popup
+// ============================================================
+
+function notifyPopup(action, data) {
+  try {
+    chrome.runtime.sendMessage({ action, ...data }).catch(() => {});
+  } catch (e) {}
+}
+
+// ============================================================
+// 消息监听
+// ============================================================
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'settingsChanged') {
+    settings = { ...settings, ...message.settings };
+    sendResponse({ success: true });
+  }
+
+  if (message.action === 'scanPage') {
+    scanCurrentPage({ notify: true }).then(sendResponse);
+    return true;
+  }
+
+  if (message.action === 'checkNewResumes') {
+    scanCurrentPage({ notify: false }).then(sendResponse);
+    return true;
+  }
+
+  if (message.action === 'runResumeActions') {
+    runResumeActions({
+      scope: document,
+      contextName: '当前页面',
+      manual: true,
+    }).then(sendResponse);
+    return true;
+  }
+
+  if (message.action === 'browseCandidatesAndRunActions') {
+    browseCandidatesAndRunActions({
+      manual: true,
+      maxCandidates: message.maxCandidates || 10,
+    }).then(sendResponse);
+    return true;
+  }
+
+  if (message.action === 'getSafetyStatus') {
+    resetCountersIfNeeded();
+    const actionTargets = findActionTargets(document);
+    const browseTargets = findCandidateNavigationTargets();
+    const accountInfo = detectRecruiterAccountInfo();
+    sendResponse({
+      isDegraded: safetyState.isDegraded,
+      operationCount,
+      settings,
+      accountInfo,
+      page: {
+        url: window.location.href,
+        cardCount: findResumeCards().length,
+        browseCount: browseTargets.length,
+        actionCount: actionTargets.length,
+        actions: actionTargets.map(item => ({
+          type: item.type,
+          label: item.label,
+          text: item.text,
+        })),
+      },
+    });
+  }
+
+  if (message.action === 'resetSafety') {
+    safetyState.isDegraded = false;
+    safetyState.consecutiveErrors = 0;
+    operationCount.today = 0;
+    operationCount.hourly = 0;
+    chrome.storage.local.set({ safetyState, operationCount });
+    sendResponse({ success: true });
+  }
+
+  return true;
+});
+
+// ============================================================
+// 启动
+// ============================================================
+
+init();

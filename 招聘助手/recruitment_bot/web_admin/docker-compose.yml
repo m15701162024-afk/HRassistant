@@ -1,0 +1,13 @@
+services:
+  recruitment-web-admin:
+    build: .
+    container_name: recruitment-web-admin
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/data
+    environment:
+      RECRUITMENT_HOST: 0.0.0.0
+      RECRUITMENT_PORT: 8787
+      RECRUITMENT_DB: /data/recruitment_history.db
