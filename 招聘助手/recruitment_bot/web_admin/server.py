@@ -35,6 +35,35 @@ DB_PATH = Path(os.environ.get("RECRUITMENT_DB", ROOT / "recruitment_history.db")
 HOST = os.environ.get("RECRUITMENT_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RECRUITMENT_PORT", "8787"))
 
+DEFAULT_BEHAVIOR_POLICY: dict[str, Any] = {
+    "behaviorPolicyEnabled": True,
+    "requestDelayMin": 5000,
+    "requestDelayMax": 15000,
+    "detailDwellMin": 10000,
+    "detailDwellMax": 30000,
+    "actionDwellMin": 8000,
+    "actionDwellMax": 18000,
+    "scrollMode": "mixed",
+    "dailyLimit": 20,
+    "hourlyLimit": 6,
+    "maxCandidatesPerRun": 5,
+    "browseProbability": 0.55,
+    "longBreakEvery": 3,
+    "longBreakMin": 60000,
+    "longBreakMax": 150000,
+    "interactionModes": {
+        "manualPage": 40,
+        "detailClick": 35,
+        "filterReview": 25,
+    },
+    "searchKeywordPool": [
+        "Java开发 北京 25-35K",
+        "前端工程师 React 上海",
+        "Python 后端 杭州",
+        "测试开发 深圳 20-30K",
+    ],
+}
+
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -336,6 +365,60 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
     return {"success": True}
 
 
+def get_behavior_policy() -> dict[str, Any]:
+    settings = get_settings()
+    saved = settings.get("behaviorPolicy") if isinstance(settings.get("behaviorPolicy"), dict) else {}
+    policy = {**DEFAULT_BEHAVIOR_POLICY, **saved}
+    interaction_modes = {
+        **DEFAULT_BEHAVIOR_POLICY["interactionModes"],
+        **(saved.get("interactionModes", {}) if isinstance(saved.get("interactionModes"), dict) else {}),
+    }
+    policy["interactionModes"] = interaction_modes
+    return policy
+
+
+def save_behavior_policy(payload: dict[str, Any]) -> dict[str, Any]:
+    current = get_behavior_policy()
+    next_policy = {**current}
+    numeric_fields = [
+        "requestDelayMin", "requestDelayMax", "detailDwellMin", "detailDwellMax",
+        "actionDwellMin", "actionDwellMax", "dailyLimit", "hourlyLimit",
+        "maxCandidatesPerRun", "browseProbability", "longBreakEvery",
+        "longBreakMin", "longBreakMax",
+    ]
+    for field in numeric_fields:
+        if field in payload:
+            value = float(payload[field]) if field == "browseProbability" else int(payload[field])
+            next_policy[field] = max(0, value)
+    if next_policy["requestDelayMax"] < next_policy["requestDelayMin"]:
+        next_policy["requestDelayMax"] = next_policy["requestDelayMin"]
+    if next_policy["detailDwellMax"] < next_policy["detailDwellMin"]:
+        next_policy["detailDwellMax"] = next_policy["detailDwellMin"]
+    if next_policy["actionDwellMax"] < next_policy["actionDwellMin"]:
+        next_policy["actionDwellMax"] = next_policy["actionDwellMin"]
+
+    next_policy["behaviorPolicyEnabled"] = bool(payload.get("behaviorPolicyEnabled", next_policy.get("behaviorPolicyEnabled")))
+    if payload.get("scrollMode") in {"mixed", "fast", "slow", "segmented"}:
+        next_policy["scrollMode"] = payload["scrollMode"]
+    if isinstance(payload.get("interactionModes"), dict):
+        next_policy["interactionModes"] = {
+            "manualPage": int(payload["interactionModes"].get("manualPage", 40) or 0),
+            "detailClick": int(payload["interactionModes"].get("detailClick", 35) or 0),
+            "filterReview": int(payload["interactionModes"].get("filterReview", 25) or 0),
+        }
+    if isinstance(payload.get("searchKeywordPool"), list):
+        next_policy["searchKeywordPool"] = [
+            str(item).strip() for item in payload["searchKeywordPool"] if str(item).strip()
+        ][:30]
+    elif isinstance(payload.get("searchKeywordPool"), str):
+        next_policy["searchKeywordPool"] = [
+            item.strip() for item in payload["searchKeywordPool"].replace("，", "\n").splitlines() if item.strip()
+        ][:30]
+
+    save_settings({"behaviorPolicy": next_policy})
+    return {"success": True, "behaviorPolicy": next_policy}
+
+
 def scheduled_push_loop() -> None:
     while True:
         try:
@@ -542,6 +625,8 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, get_stats())
             elif parsed.path == "/api/settings":
                 json_response(self, get_settings())
+            elif parsed.path == "/api/behavior-policy":
+                json_response(self, get_behavior_policy())
             elif parsed.path == "/api/candidates":
                 json_response(self, {"items": list_rows("candidates", int(query.get("limit", ["200"])[0]), filters={
                     "q": query.get("q", [""])[0],
@@ -608,6 +693,8 @@ class Handler(SimpleHTTPRequestHandler):
             payload = read_json(self)
             if parsed.path == "/api/settings":
                 json_response(self, save_settings(payload))
+            elif parsed.path == "/api/behavior-policy":
+                json_response(self, save_behavior_policy(payload))
             elif parsed.path == "/api/candidates":
                 json_response(self, upsert_candidate(payload))
             elif parsed.path == "/api/recommendations":

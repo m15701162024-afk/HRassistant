@@ -34,6 +34,18 @@ const DEFAULT_SETTINGS = {
   candidateDwellMax: 30000,
   actionDwellMin: 8000,
   actionDwellMax: 18000,
+  requestDelayMin: 5000,
+  requestDelayMax: 15000,
+  detailDwellMin: 10000,
+  detailDwellMax: 30000,
+  behaviorPolicyEnabled: true,
+  scrollMode: 'mixed',
+  interactionModes: {
+    manualPage: 40,
+    detailClick: 35,
+    filterReview: 25,
+  },
+  searchKeywordPool: [],
   longBreakEvery: 3,
   longBreakMin: 60000,
   longBreakMax: 150000,
@@ -82,6 +94,9 @@ configureAlarm(DEFAULT_SETTINGS.syncInterval);
 chrome.alarms.create('scheduledSummaryPush', {
   periodInMinutes: 1,
 });
+chrome.alarms.create('syncBehaviorPolicy', {
+  periodInMinutes: 10,
+});
 
 async function configureAlarm(intervalMinutes = DEFAULT_SETTINGS.syncInterval) {
   const minutes = Math.max(1, Number(intervalMinutes) || DEFAULT_SETTINGS.syncInterval);
@@ -96,6 +111,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     checkBOSSPage();
   } else if (alarm.name === 'scheduledSummaryPush') {
     checkScheduledSummaryPush();
+  } else if (alarm.name === 'syncBehaviorPolicy') {
+    syncBehaviorPolicyFromBackend();
   }
 });
 
@@ -261,6 +278,64 @@ async function syncToBackend(path, payload) {
     throw new Error(body.message || `后端同步失败: HTTP ${response.status}`);
   }
   return body;
+}
+
+async function fetchFromBackend(path) {
+  const { settings = DEFAULT_SETTINGS } = await chrome.storage.local.get(['settings']);
+  const mergedSettings = { ...DEFAULT_SETTINGS, ...settings };
+  if (!mergedSettings.backendUrl) {
+    return { success: false, skipped: true, message: '后端地址未配置' };
+  }
+  const base = mergedSettings.backendUrl.replace(/\/+$/, '');
+  const response = await fetch(`${base}${path}`);
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error(`后端接口返回非 JSON，请检查后端地址: ${base}`);
+  }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.success === false) {
+    throw new Error(body.message || `后端读取失败: HTTP ${response.status}`);
+  }
+  return body;
+}
+
+async function syncBehaviorPolicyFromBackend() {
+  try {
+    const policy = await fetchFromBackend('/api/behavior-policy');
+    const { settings = DEFAULT_SETTINGS } = await chrome.storage.local.get(['settings']);
+    const mergedSettings = {
+      ...DEFAULT_SETTINGS,
+      ...settings,
+      behaviorPolicyEnabled: Boolean(policy.behaviorPolicyEnabled),
+      requestDelayMin: Number(policy.requestDelayMin || DEFAULT_SETTINGS.requestDelayMin),
+      requestDelayMax: Number(policy.requestDelayMax || DEFAULT_SETTINGS.requestDelayMax),
+      acceptDelay: Math.round((Number(policy.requestDelayMin || 5000) + Number(policy.requestDelayMax || 15000)) / 2),
+      delayVariance: Math.max(1000, Math.round((Number(policy.requestDelayMax || 15000) - Number(policy.requestDelayMin || 5000)) / 2)),
+      candidateDwellMin: Number(policy.detailDwellMin || DEFAULT_SETTINGS.candidateDwellMin),
+      candidateDwellMax: Number(policy.detailDwellMax || DEFAULT_SETTINGS.candidateDwellMax),
+      actionDwellMin: Number(policy.actionDwellMin || DEFAULT_SETTINGS.actionDwellMin),
+      actionDwellMax: Number(policy.actionDwellMax || DEFAULT_SETTINGS.actionDwellMax),
+      scrollMode: policy.scrollMode || DEFAULT_SETTINGS.scrollMode,
+      dailyLimit: Number(policy.dailyLimit || DEFAULT_SETTINGS.dailyLimit),
+      hourlyLimit: Number(policy.hourlyLimit || DEFAULT_SETTINGS.hourlyLimit),
+      maxCandidatesPerRun: Number(policy.maxCandidatesPerRun || DEFAULT_SETTINGS.maxCandidatesPerRun),
+      browseProbability: Number(policy.browseProbability ?? DEFAULT_SETTINGS.browseProbability),
+      longBreakEvery: Number(policy.longBreakEvery || DEFAULT_SETTINGS.longBreakEvery),
+      longBreakMin: Number(policy.longBreakMin || DEFAULT_SETTINGS.longBreakMin),
+      longBreakMax: Number(policy.longBreakMax || DEFAULT_SETTINGS.longBreakMax),
+      interactionModes: policy.interactionModes || DEFAULT_SETTINGS.interactionModes,
+      searchKeywordPool: policy.searchKeywordPool || [],
+    };
+    await chrome.storage.local.set({ settings: mergedSettings, behaviorPolicy: policy });
+    const tabs = await chrome.tabs.query({ url: ['https://www.zhipin.com/*', 'https://www.bosszhipin.com/*'] });
+    for (const tab of tabs) {
+      chrome.tabs.sendMessage(tab.id, { action: 'settingsChanged', settings: mergedSettings }).catch(() => {});
+    }
+    return { success: true, policy };
+  } catch (err) {
+    console.warn('[招聘助手] 同步后端节奏策略失败:', err.message);
+    return { success: false, message: err.message };
+  }
 }
 
 function getLocalDateString(date = new Date()) {
@@ -566,7 +641,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'settingsUpdated') {
     configureAlarm(message.settings?.syncInterval);
+    syncBehaviorPolicyFromBackend();
     sendResponse({ success: true });
+    return true;
+  }
+
+  if (message.action === 'syncBehaviorPolicy') {
+    syncBehaviorPolicyFromBackend().then(sendResponse);
     return true;
   }
 

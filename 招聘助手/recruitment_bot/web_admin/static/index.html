@@ -119,6 +119,83 @@
 
     <section class="panel">
       <div class="panel-title">
+        <h2>操作节奏策略</h2>
+        <span id="behaviorStatus" class="badge">未加载</span>
+      </div>
+      <div class="form-grid behavior-grid">
+        <label>
+          随机请求最小间隔(ms)
+          <input id="requestDelayMin" type="number" min="1000" step="1000" />
+        </label>
+        <label>
+          随机请求最大间隔(ms)
+          <input id="requestDelayMax" type="number" min="1000" step="1000" />
+        </label>
+        <label>
+          详情停留最短(ms)
+          <input id="detailDwellMin" type="number" min="3000" step="1000" />
+        </label>
+        <label>
+          详情停留最长(ms)
+          <input id="detailDwellMax" type="number" min="3000" step="1000" />
+        </label>
+        <label>
+          滚动模式
+          <select id="scrollMode">
+            <option value="mixed">混合</option>
+            <option value="slow">慢速</option>
+            <option value="segmented">分段</option>
+            <option value="fast">快速</option>
+          </select>
+        </label>
+        <label>
+          每日操作上限
+          <input id="dailyLimit" type="number" min="0" />
+        </label>
+        <label>
+          每小时操作上限
+          <input id="hourlyLimit" type="number" min="0" />
+        </label>
+        <label>
+          单轮候选人数
+          <input id="maxCandidatesPerRun" type="number" min="1" max="30" />
+        </label>
+        <label>
+          详情浏览概率(0-1)
+          <input id="browseProbability" type="number" min="0" max="1" step="0.05" />
+        </label>
+        <label>
+          长暂停频率
+          <input id="longBreakEvery" type="number" min="0" />
+        </label>
+      </div>
+      <div class="mode-grid">
+        <label>
+          手动翻页占比
+          <input id="manualPageWeight" type="number" min="0" max="100" />
+        </label>
+        <label>
+          详情点击占比
+          <input id="detailClickWeight" type="number" min="0" max="100" />
+        </label>
+        <label>
+          筛选复核占比
+          <input id="filterReviewWeight" type="number" min="0" max="100" />
+        </label>
+      </div>
+      <label class="textarea-field">
+        搜索关键词分散池
+        <textarea id="searchKeywordPool" rows="5" placeholder="每行一个关键词组合，例如：Java开发 北京 25-35K"></textarea>
+      </label>
+      <div class="actions">
+        <button id="saveBehaviorBtn">保存节奏策略</button>
+        <button id="loadBehaviorBtn" class="secondary">重新加载</button>
+      </div>
+      <p class="hint">该策略用于降低误操作和过快操作风险，插件会从后端同步随机间隔、停留时间、滚动节奏和操作上限。</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">
         <h2>问答 Agent</h2>
         <span>基于历史候选人、推荐和报告回答</span>
       </div>

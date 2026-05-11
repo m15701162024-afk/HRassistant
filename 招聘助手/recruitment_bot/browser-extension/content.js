@@ -40,6 +40,18 @@ let settings = {
   candidateDwellMax: 30000,
   actionDwellMin: 8000,
   actionDwellMax: 18000,
+  requestDelayMin: 5000,
+  requestDelayMax: 15000,
+  detailDwellMin: 10000,
+  detailDwellMax: 30000,
+  behaviorPolicyEnabled: true,
+  scrollMode: 'mixed',
+  interactionModes: {
+    manualPage: 40,
+    detailClick: 35,
+    filterReview: 25,
+  },
+  searchKeywordPool: [],
   longBreakEvery: 3,
   longBreakMin: 60000,
   longBreakMax: 150000,
@@ -204,6 +216,12 @@ function resetCountersIfNeeded() {
  * 最大值不超过 acceptDelay + delayVariance * 2
  */
 function humanDelay() {
+  if (settings.behaviorPolicyEnabled && Number(settings.requestDelayMax) > 0) {
+    const min = Math.max(1000, Number(settings.requestDelayMin || 5000));
+    const max = Math.max(min, Number(settings.requestDelayMax || 15000));
+    return Math.round(min + Math.random() * (max - min));
+  }
+
   const min = Math.max(1000, settings.acceptDelay - settings.delayVariance);
   const max = settings.acceptDelay + settings.delayVariance * 2;
   const mean = settings.acceptDelay;
@@ -323,15 +341,43 @@ async function simulateMouseMove(targetElement) {
 async function simulateHumanScroll() {
   if (!settings.scrollBeforeClick) return;
 
-  const scrollAmount = 100 + Math.random() * 300; // 随机滚动 100-400px
-  const scrollDuration = 300 + Math.random() * 500; // 滚动动画 300-800ms
+  const mode = chooseScrollMode();
+  if (mode === 'segmented') {
+    const segments = 2 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < segments; i++) {
+      window.scrollBy({
+        top: 60 + Math.random() * 160,
+        behavior: 'smooth',
+      });
+      await sleep(450 + Math.random() * 900);
+    }
+    return;
+  }
+
+  const scrollAmount = mode === 'fast'
+    ? 260 + Math.random() * 520
+    : mode === 'slow'
+    ? 50 + Math.random() * 140
+    : 100 + Math.random() * 300;
+  const scrollDuration = mode === 'fast'
+    ? 180 + Math.random() * 260
+    : mode === 'slow'
+    ? 900 + Math.random() * 1600
+    : 300 + Math.random() * 500;
 
   window.scrollBy({
-    top: Math.random() > 0.5 ? scrollAmount : -scrollAmount * 0.3,
+    top: Math.random() > 0.2 ? scrollAmount : -scrollAmount * 0.35,
     behavior: 'smooth',
   });
 
   await sleep(scrollDuration);
+}
+
+function chooseScrollMode() {
+  const configured = settings.scrollMode || 'mixed';
+  if (configured !== 'mixed') return configured;
+  const modes = ['slow', 'segmented', 'fast'];
+  return modes[Math.floor(Math.random() * modes.length)];
 }
 
 /**
@@ -343,7 +389,10 @@ async function simulateReadingTime(minMs = 1000, maxMs = 3000) {
 }
 
 async function simulateCandidateDwell() {
-  await simulateReadingTime(settings.candidateDwellMin || 12000, settings.candidateDwellMax || 30000);
+  await simulateReadingTime(
+    settings.detailDwellMin || settings.candidateDwellMin || 12000,
+    settings.detailDwellMax || settings.candidateDwellMax || 30000
+  );
 }
 
 async function simulateActionDwell() {

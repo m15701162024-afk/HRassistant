@@ -6,6 +6,7 @@ const state = {
   candidates: [],
   recommendations: [],
   reports: [],
+  behaviorPolicy: {},
   filters: {
     q: '',
     source: '',
@@ -119,6 +120,56 @@ async function loadSettings() {
   $('scheduleStatus').className = settings.scheduledPushEnabled ? 'badge ok' : 'badge';
   const callbackOrigin = normalizeApiBase(getApiBase()) || location.origin;
   $('callbackUrl').textContent = `${callbackOrigin}/api/dingtalk/callback`;
+}
+
+async function loadBehaviorPolicy() {
+  const policy = await api('/api/behavior-policy');
+  state.behaviorPolicy = policy;
+  $('requestDelayMin').value = policy.requestDelayMin ?? 5000;
+  $('requestDelayMax').value = policy.requestDelayMax ?? 15000;
+  $('detailDwellMin').value = policy.detailDwellMin ?? 10000;
+  $('detailDwellMax').value = policy.detailDwellMax ?? 30000;
+  $('scrollMode').value = policy.scrollMode || 'mixed';
+  $('dailyLimit').value = policy.dailyLimit ?? 20;
+  $('hourlyLimit').value = policy.hourlyLimit ?? 6;
+  $('maxCandidatesPerRun').value = policy.maxCandidatesPerRun ?? 5;
+  $('browseProbability').value = policy.browseProbability ?? 0.55;
+  $('longBreakEvery').value = policy.longBreakEvery ?? 3;
+  $('manualPageWeight').value = policy.interactionModes?.manualPage ?? 40;
+  $('detailClickWeight').value = policy.interactionModes?.detailClick ?? 35;
+  $('filterReviewWeight').value = policy.interactionModes?.filterReview ?? 25;
+  $('searchKeywordPool').value = (policy.searchKeywordPool || []).join('\n');
+  $('behaviorStatus').textContent = policy.behaviorPolicyEnabled ? '已开启' : '已关闭';
+  $('behaviorStatus').className = policy.behaviorPolicyEnabled ? 'badge ok' : 'badge';
+}
+
+async function saveBehaviorPolicy() {
+  const payload = {
+    behaviorPolicyEnabled: true,
+    requestDelayMin: Number($('requestDelayMin').value || 5000),
+    requestDelayMax: Number($('requestDelayMax').value || 15000),
+    detailDwellMin: Number($('detailDwellMin').value || 10000),
+    detailDwellMax: Number($('detailDwellMax').value || 30000),
+    scrollMode: $('scrollMode').value || 'mixed',
+    dailyLimit: Number($('dailyLimit').value || 20),
+    hourlyLimit: Number($('hourlyLimit').value || 6),
+    maxCandidatesPerRun: Number($('maxCandidatesPerRun').value || 5),
+    browseProbability: Number($('browseProbability').value || 0.55),
+    longBreakEvery: Number($('longBreakEvery').value || 3),
+    interactionModes: {
+      manualPage: Number($('manualPageWeight').value || 40),
+      detailClick: Number($('detailClickWeight').value || 35),
+      filterReview: Number($('filterReviewWeight').value || 25),
+    },
+    searchKeywordPool: $('searchKeywordPool').value,
+  };
+  const result = await api('/api/behavior-policy', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  state.behaviorPolicy = result.behaviorPolicy || payload;
+  await loadBehaviorPolicy();
+  toast('操作节奏策略已保存');
 }
 
 async function saveSettings(showToast = true) {
@@ -337,6 +388,8 @@ function bindEvents() {
   $('toggleScheduleBtn').addEventListener('click', () => toggleSchedule().catch(showError));
   $('testDingTalkBtn').addEventListener('click', () => testDingTalk().catch(showError));
   $('pushYesterdayBtn').addEventListener('click', () => pushYesterday().catch(showError));
+  $('saveBehaviorBtn').addEventListener('click', () => saveBehaviorPolicy().catch(showError));
+  $('loadBehaviorBtn').addEventListener('click', () => loadBehaviorPolicy().catch(showError));
   $('previewSummaryBtn').addEventListener('click', () => previewSummary().catch(showError));
   $('askBtn').addEventListener('click', () => ask(false).catch(showError));
   $('askAndPushBtn').addEventListener('click', () => ask(true).catch(showError));
@@ -370,7 +423,7 @@ function bindEvents() {
 
 async function refreshAll() {
   renderApiBase();
-  await Promise.all([loadHealth(), loadSettings()]);
+  await Promise.all([loadHealth(), loadSettings(), loadBehaviorPolicy()]);
   await loadData();
 }
 
