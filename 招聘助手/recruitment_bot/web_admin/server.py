@@ -64,6 +64,14 @@ DEFAULT_BEHAVIOR_POLICY: dict[str, Any] = {
     ],
 }
 
+DEFAULT_LLM_CONFIG: dict[str, Any] = {
+    "llmEnabled": False,
+    "llmApiBase": "https://api.openai.com/v1",
+    "llmModel": "gpt-4o-mini",
+    "llmTemperature": 0.2,
+    "llmMaxContextItems": 80,
+}
+
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -391,6 +399,96 @@ def list_agent_conversations(limit: int = 100) -> list[dict[str, Any]]:
         ]
 
 
+def build_llm_history_context(question: str, max_items: int = 80) -> str:
+    candidates = list_rows("candidates", limit=max_items)
+    recommendations = list_rows("recommendations", limit=max_items)
+    reports = list_rows("reports", limit=max(20, min(max_items, 80)))
+    stats = get_stats()
+    parts = [
+        "【统计概览】",
+        json.dumps(stats, ensure_ascii=False),
+        "",
+        "【候选人历史】",
+    ]
+    for idx, item in enumerate(candidates, 1):
+        parts.append(
+            f"{idx}. 姓名:{item.get('name','')}｜岗位:{item.get('role','')}｜学历:{item.get('education','')}｜"
+            f"经验:{item.get('experience','')}｜薪资:{item.get('expected_salary','')}｜匹配度:{item.get('score',0)}｜"
+            f"推荐:{item.get('recommendation','')}｜来源:{item.get('source','')}｜账号:{item.get('account_name','')}｜日期:{item.get('received_date','')}"
+        )
+    parts.extend(["", "【推荐记录】"])
+    for idx, item in enumerate(recommendations, 1):
+        parts.append(
+            f"{idx}. 姓名:{item.get('name','')}｜岗位:{item.get('role','')}｜匹配度:{item.get('score',0)}｜"
+            f"推荐:{item.get('recommendation','')}｜下一步:{item.get('next_step','')}｜来源:{item.get('source','')}｜账号:{item.get('account_name','')}｜时间:{item.get('created_at','')}"
+        )
+    parts.extend(["", "【候选人报告摘要】"])
+    for idx, item in enumerate(reports[:30], 1):
+        report = str(item.get("report") or "").replace("\n", " ")
+        parts.append(f"{idx}. {item.get('name','')}｜{item.get('role','')}｜{report[:900]}")
+    return "\n".join(parts)[:24000]
+
+
+def call_llm_chat(question: str, context: str) -> str:
+    config = get_llm_config(mask_key=False)
+    if not config.get("llmEnabled"):
+        raise RuntimeError("大模型问答未启用")
+    if not config.get("llmApiKey"):
+        raise RuntimeError("大模型 API Key 未配置")
+
+    api_base = str(config["llmApiBase"]).rstrip("/")
+    url = f"{api_base}/chat/completions"
+    system_prompt = (
+        "你是招聘助手的问答 Agent。你只能根据提供的招聘历史数据回答问题。"
+        "回答要使用中文，适合钉钉 markdown 展示。"
+        "如果历史数据没有答案，要明确说没有找到，不要编造候选人。"
+        "回答候选人时优先给出姓名、岗位、匹配度、推荐意见、来源、账号、下一步。"
+    )
+    payload = {
+        "model": config["llmModel"],
+        "temperature": config["llmTemperature"],
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"问题：{question}\n\n招聘历史数据：\n{context}"},
+        ],
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config['llmApiKey']}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        body = json.loads(response.read().decode("utf-8") or "{}")
+    choices = body.get("choices") or []
+    if not choices:
+        raise RuntimeError("大模型 API 未返回 choices")
+    message = choices[0].get("message") or {}
+    answer = str(message.get("content") or "").strip()
+    if not answer:
+        raise RuntimeError("大模型 API 返回空答案")
+    return answer[:18000]
+
+
+def answer_question_with_agent(question: str) -> tuple[str, dict[str, Any]]:
+    fallback = answer_question_rules(question)
+    config = get_llm_config(mask_key=False)
+    if not config.get("llmEnabled"):
+        return fallback, {"mode": "rules", "llmEnabled": False}
+    try:
+        context = build_llm_history_context(question, int(config.get("llmMaxContextItems") or 80))
+        answer = call_llm_chat(question, context)
+        return answer, {"mode": "llm", "model": config.get("llmModel"), "contextLength": len(context)}
+    except Exception as exc:
+        return (
+            f"{fallback}\n\n---\n\n> 大模型回答暂不可用，已使用本地历史规则回答。原因：{exc}",
+            {"mode": "rules-fallback", "error": str(exc), "model": config.get("llmModel")},
+        )
+
+
 def get_settings() -> dict[str, Any]:
     with connect() as conn:
         rows = conn.execute("SELECT key, value FROM settings").fetchall()
@@ -411,6 +509,45 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
                 (key, json.dumps(value, ensure_ascii=False), now_iso()),
             )
     return {"success": True}
+
+
+def get_llm_config(mask_key: bool = False) -> dict[str, Any]:
+    settings = get_settings()
+    config = {
+        **DEFAULT_LLM_CONFIG,
+        "llmEnabled": bool(settings.get("llmEnabled", DEFAULT_LLM_CONFIG["llmEnabled"])),
+        "llmApiBase": str(settings.get("llmApiBase") or DEFAULT_LLM_CONFIG["llmApiBase"]).rstrip("/"),
+        "llmApiKey": str(settings.get("llmApiKey") or ""),
+        "llmModel": str(settings.get("llmModel") or DEFAULT_LLM_CONFIG["llmModel"]),
+        "llmTemperature": float(settings.get("llmTemperature", DEFAULT_LLM_CONFIG["llmTemperature"]) or 0.2),
+        "llmMaxContextItems": int(settings.get("llmMaxContextItems", DEFAULT_LLM_CONFIG["llmMaxContextItems"]) or 80),
+    }
+    if mask_key and config.get("llmApiKey"):
+        config["llmApiKey"] = "********"
+        config["llmApiKeyConfigured"] = True
+    else:
+        config["llmApiKeyConfigured"] = bool(config.get("llmApiKey"))
+    return config
+
+
+def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
+    current = get_llm_config(mask_key=False)
+    config: dict[str, Any] = {
+        "llmEnabled": bool(payload.get("llmEnabled", current["llmEnabled"])),
+        "llmApiBase": str(payload.get("llmApiBase") or current["llmApiBase"]).rstrip("/"),
+        "llmModel": str(payload.get("llmModel") or current["llmModel"]),
+        "llmTemperature": max(0, min(float(payload.get("llmTemperature", current["llmTemperature"]) or 0.2), 2)),
+        "llmMaxContextItems": max(10, min(int(payload.get("llmMaxContextItems", current["llmMaxContextItems"]) or 80), 500)),
+    }
+    api_key = str(payload.get("llmApiKey") or "").strip()
+    if api_key and api_key != "********":
+        config["llmApiKey"] = api_key
+    elif current.get("llmApiKey"):
+        config["llmApiKey"] = current["llmApiKey"]
+    else:
+        config["llmApiKey"] = ""
+    save_settings(config)
+    return {"success": True, "llm": get_llm_config(mask_key=True)}
 
 
 def get_behavior_policy() -> dict[str, Any]:
@@ -595,8 +732,9 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
     question = message["question"]
     if not question:
         answer = "### 招聘助手\n\n我没有收到有效问题。你可以问：昨天推荐了谁？React候选人有哪些？匹配度最高的是谁？"
+        agent_meta = {"mode": "empty"}
     else:
-        answer = answer_question(question)
+        answer, agent_meta = answer_question_with_agent(question)
 
     save_agent_conversation(
         question=question or "(empty)",
@@ -627,6 +765,7 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
         "success": True,
         "question": question,
         "answer": answer,
+        "agent": agent_meta,
         "reply": push_result,
         "directReply": dingtalk_markdown_reply("招聘助手问答", answer),
         "ack": dingtalk_stream_ack_with_answer(answer),
@@ -663,7 +802,7 @@ def build_summary(scope: str = "all") -> str:
     )
 
 
-def answer_question(question: str) -> str:
+def answer_question_rules(question: str) -> str:
     question = question.strip()
     if not question:
         return "请提出一个和招聘历史数据有关的问题。"
@@ -689,11 +828,12 @@ def answer_question(question: str) -> str:
         account_text = "，".join(f"{k} {v}份" for k, v in accounts.items()) or "暂无"
         return f"### 招聘助手答复\n\n- 查询范围：{scope_label}\n- 候选人数量：{len(candidates)}\n- 推荐候选人：{len(recommendations)}\n- 数据来源：{source_text}\n- 账号分布：{account_text}"
     cleaned = question
-    for word in ["今天", "今日", "昨天", "昨日", "候选人", "推荐", "简历", "哪些", "哪个", "有没有", "最高", "最好", "最合适", "匹配度", "统计", "汇总", "来源", "账号"]:
+    highest_query = any(word in question for word in ["最高", "最好", "最合适", "排名"])
+    for word in ["今天", "今日", "昨天", "昨日", "候选人", "推荐", "简历", "哪些", "哪个", "有没有", "最高", "最好", "最合适", "匹配度", "统计", "汇总", "来源", "账号", "的是谁", "是谁", "的", "谁"]:
         cleaned = cleaned.replace(word, " ")
     keywords = [word for word in cleaned.replace("？", " ").replace("?", " ").split() if len(word) >= 2]
     rows = recommendations or candidates
-    if keywords:
+    if keywords and not highest_query:
         rows = [
             row for row in rows
             if any(keyword.lower() in json.dumps(dict(row), ensure_ascii=False).lower() for keyword in keywords)
@@ -727,7 +867,12 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/stats":
                 json_response(self, get_stats())
             elif parsed.path == "/api/settings":
-                json_response(self, get_settings())
+                settings = get_settings()
+                llm_config = get_llm_config(mask_key=True)
+                settings.update(llm_config)
+                json_response(self, settings)
+            elif parsed.path == "/api/llm/config":
+                json_response(self, get_llm_config(mask_key=True))
             elif parsed.path == "/api/behavior-policy":
                 json_response(self, get_behavior_policy())
             elif parsed.path == "/api/candidates":
@@ -798,6 +943,8 @@ class Handler(SimpleHTTPRequestHandler):
             payload = read_json(self)
             if parsed.path == "/api/settings":
                 json_response(self, save_settings(payload))
+            elif parsed.path == "/api/llm/config":
+                json_response(self, save_llm_config(payload))
             elif parsed.path == "/api/behavior-policy":
                 json_response(self, save_behavior_policy(payload))
             elif parsed.path == "/api/candidates":
@@ -805,7 +952,7 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/recommendations":
                 json_response(self, save_recommendation(payload.get("candidate", payload), payload.get("report", "")))
             elif parsed.path == "/api/agent/ask":
-                answer = answer_question(str(payload.get("question", "")))
+                answer, agent_meta = answer_question_with_agent(str(payload.get("question", "")))
                 save_agent_conversation(
                     question=str(payload.get("question", "")),
                     answer=answer,
@@ -815,7 +962,7 @@ class Handler(SimpleHTTPRequestHandler):
                 )
                 if payload.get("replyToDingTalk"):
                     send_dingtalk_markdown("招聘助手问答", answer)
-                json_response(self, {"success": True, "answer": answer})
+                json_response(self, {"success": True, "answer": answer, "agent": agent_meta})
             elif parsed.path == "/api/dingtalk/test":
                 json_response(self, send_dingtalk_markdown("招聘助手钉钉连接测试", "### 招聘助手钉钉连接测试\n\n连接成功。"))
             elif parsed.path == "/api/summary/push":
@@ -830,9 +977,9 @@ class Handler(SimpleHTTPRequestHandler):
                     json_response(self, result["directReply"])
             elif parsed.path == "/api/dingtalk/callback-test":
                 question = str(payload.get("question") or "")
-                answer = answer_question(question)
+                answer, agent_meta = answer_question_with_agent(question)
                 save_agent_conversation(question=question, answer=answer, channel="test", sender="callback-test", raw=payload)
-                json_response(self, {"success": True, "question": question, "answer": answer})
+                json_response(self, {"success": True, "question": question, "answer": answer, "agent": agent_meta})
             else:
                 json_response(self, {"success": False, "message": "not found"}, 404)
         except Exception as exc:

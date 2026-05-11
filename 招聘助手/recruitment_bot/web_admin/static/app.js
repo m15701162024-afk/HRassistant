@@ -114,6 +114,17 @@ async function loadSettings() {
   $('accountName').value = settings.accountName || settings.detectedAccount?.name || '';
   $('accountPlatform').value = settings.accountPlatform || settings.detectedAccount?.platform || 'BOSS直聘';
   $('scheduledPushTime').value = settings.scheduledPushTime || '10:00';
+  $('llmEnabled').value = settings.llmEnabled ? 'true' : 'false';
+  $('llmApiBase').value = settings.llmApiBase || 'https://api.openai.com/v1';
+  $('llmApiKey').value = '';
+  $('llmApiKey').placeholder = settings.llmApiKeyConfigured ? '已配置，留空则保留原 Key' : '请输入 API Key';
+  $('llmModel').value = settings.llmModel || 'gpt-4o-mini';
+  $('llmTemperature').value = settings.llmTemperature ?? 0.2;
+  $('llmMaxContextItems').value = settings.llmMaxContextItems ?? 80;
+  $('llmStatus').textContent = settings.llmEnabled
+    ? `已启用 ${settings.llmModel || '模型'}`
+    : '未启用';
+  $('llmStatus').className = settings.llmEnabled ? 'badge ok' : 'badge';
   $('toggleScheduleBtn').textContent = settings.scheduledPushEnabled ? '关闭定时推送' : '开启定时推送';
   $('scheduleStatus').textContent = settings.scheduledPushEnabled
     ? `已开启 ${settings.scheduledPushTime || '10:00'}`
@@ -121,6 +132,35 @@ async function loadSettings() {
   $('scheduleStatus').className = settings.scheduledPushEnabled ? 'badge ok' : 'badge';
   const callbackOrigin = normalizeApiBase(getApiBase()) || location.origin;
   $('callbackUrl').textContent = `${callbackOrigin}/api/dingtalk/callback`;
+}
+
+async function saveLlmConfig(showToast = true) {
+  const payload = {
+    llmEnabled: $('llmEnabled').value === 'true',
+    llmApiBase: $('llmApiBase').value.trim() || 'https://api.openai.com/v1',
+    llmModel: $('llmModel').value.trim() || 'gpt-4o-mini',
+    llmTemperature: Number($('llmTemperature').value || 0.2),
+    llmMaxContextItems: Number($('llmMaxContextItems').value || 80),
+  };
+  const apiKey = $('llmApiKey').value.trim();
+  if (apiKey) payload.llmApiKey = apiKey;
+  await api('/api/llm/config', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  await loadSettings();
+  if (showToast) toast('大模型配置已保存');
+}
+
+async function testLlm() {
+  await saveLlmConfig(false);
+  $('answerBox').textContent = '正在测试大模型问答...';
+  const result = await api('/api/agent/ask', {
+    method: 'POST',
+    body: JSON.stringify({ question: '请用一句话汇总当前招聘历史数据', sender: 'LLM 配置测试' }),
+  });
+  $('answerBox').textContent = `${result.answer}\n\n[Agent 模式] ${result.agent?.mode || 'unknown'}${result.agent?.model ? `｜${result.agent.model}` : ''}`;
+  await loadConversations();
 }
 
 async function loadBehaviorPolicy() {
@@ -404,6 +444,8 @@ function showError(err) {
 function bindEvents() {
   $('refreshBtn').addEventListener('click', () => refreshAll().catch(showError));
   $('saveSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
+  $('saveLlmBtn').addEventListener('click', () => saveLlmConfig().catch(showError));
+  $('testLlmBtn').addEventListener('click', () => testLlm().catch(showError));
   $('toggleScheduleBtn').addEventListener('click', () => toggleSchedule().catch(showError));
   $('testDingTalkBtn').addEventListener('click', () => testDingTalk().catch(showError));
   $('pushYesterdayBtn').addEventListener('click', () => pushYesterday().catch(showError));

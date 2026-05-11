@@ -119,6 +119,47 @@
 
     <section class="panel">
       <div class="panel-title">
+        <h2>大模型 API</h2>
+        <span id="llmStatus" class="badge">未启用</span>
+      </div>
+      <div class="form-grid llm-grid">
+        <label>
+          启用大模型问答
+          <select id="llmEnabled">
+            <option value="false">关闭</option>
+            <option value="true">开启</option>
+          </select>
+        </label>
+        <label>
+          API Base URL
+          <input id="llmApiBase" type="url" placeholder="https://api.openai.com/v1" />
+        </label>
+        <label>
+          API Key
+          <input id="llmApiKey" type="password" placeholder="留空则保留原 Key" />
+        </label>
+        <label>
+          模型名
+          <input id="llmModel" type="text" placeholder="gpt-4o-mini / deepseek-chat / qwen-plus" />
+        </label>
+        <label>
+          温度
+          <input id="llmTemperature" type="number" min="0" max="2" step="0.1" />
+        </label>
+        <label>
+          历史上下文条数
+          <input id="llmMaxContextItems" type="number" min="10" max="500" step="10" />
+        </label>
+      </div>
+      <div class="actions">
+        <button id="saveLlmBtn">保存大模型配置</button>
+        <button id="testLlmBtn" class="secondary">测试问答</button>
+      </div>
+      <p class="hint">支持 OpenAI-compatible Chat Completions 接口。钉钉机器人提问时会检索所有历史候选人、推荐和报告，再调用模型生成回答；未启用或调用失败时自动使用本地规则回答。</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">
         <h2>操作节奏策略</h2>
         <span id="behaviorStatus" class="badge">未加载</span>
       </div>
