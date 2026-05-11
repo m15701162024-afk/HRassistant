@@ -1,5 +1,29 @@
 # 招聘助手 Web 管理后台部署
 
+## CI/CD 自动部署
+
+仓库已提供 GitHub Actions 流水线：
+
+```text
+.github/workflows/ci-cd.yml
+```
+
+代码提交到 `main` 后会自动执行：
+
+1. 拉取代码。
+2. 校验 Python 后端和浏览器插件脚本。
+3. 打包浏览器插件 zip。
+4. 构建并推送 Web 后台 Docker 镜像到 GHCR。
+5. 配置生产 SSH secrets 后自动部署到服务器。
+6. 调用 `/api/health` 监控部署状态。
+7. 构建或部署失败时通过钉钉通知。
+
+完整配置见仓库根目录：
+
+```text
+docs/CICD_DEPLOYMENT.md
+```
+
 ## 本地启动
 
 ```bash
@@ -30,6 +54,19 @@ docker compose up -d --build
 
 ```text
 recruitment_bot/web_admin/data/recruitment_history.db
+```
+
+## 生产镜像部署
+
+```bash
+cd /opt/hrassistant
+IMAGE_TAG=latest ./scripts/deploy-production.sh
+```
+
+健康检查：
+
+```bash
+./scripts/check-production.sh http://127.0.0.1:8787
 ```
 
 ## 公网部署

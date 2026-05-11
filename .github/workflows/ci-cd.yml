@@ -1,0 +1,142 @@
+name: Recruitment Assistant CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: ghcr.io/m15701162024-afk/hrassistant/recruitment-web-admin
+  WEB_ADMIN_DIR: 招聘助手/recruitment_bot/web_admin
+
+jobs:
+  build-test-package:
+    name: Build, Test, Package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate Python backend
+        run: python -m py_compile "${WEB_ADMIN_DIR}/server.py"
+
+      - name: Validate browser extension scripts
+        run: |
+          node --check "招聘助手/recruitment_bot/browser-extension/background.js"
+          node --check "招聘助手/recruitment_bot/browser-extension/content.js"
+          node --check "招聘助手/recruitment_bot/browser-extension/popup.js"
+
+      - name: Build browser extension package
+        run: |
+          mkdir -p dist
+          cd "招聘助手/recruitment_bot/browser-extension"
+          zip -r "../../../dist/browser-extension-${GITHUB_SHA}.zip" . -x "*.DS_Store"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.WEB_ADMIN_DIR }}
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Upload deployment package
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-package
+          path: |
+            dist/*.zip
+            招聘助手/recruitment_bot/web_admin/docker-compose.prod.yml
+            scripts/deploy-production.sh
+            scripts/check-production.sh
+            scripts/notify-dingtalk.sh
+            docs/CICD_DEPLOYMENT.md
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build-test-package
+    if: ${{ github.ref == 'refs/heads/main' }}
+    environment: production
+    env:
+      PROD_HOST: ${{ secrets.PROD_HOST }}
+      PROD_USER: ${{ secrets.PROD_USER }}
+      PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+      PROD_PORT: ${{ secrets.PROD_PORT }}
+
+    steps:
+      - name: Checkout deployment files
+        uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        if: ${{ env.PROD_HOST != '' && env.PROD_USER != '' && env.PROD_SSH_KEY != '' }}
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          IMAGE_NAME: ghcr.io/m15701162024-afk/hrassistant/recruitment-web-admin
+          IMAGE_TAG: ${{ github.sha }}
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          port: ${{ secrets.PROD_PORT || 22 }}
+          envs: IMAGE_NAME,IMAGE_TAG
+          script: |
+            mkdir -p /opt/hrassistant
+            cd /opt/hrassistant
+            if [ ! -d .git ]; then
+              git clone https://github.com/${{ github.repository }}.git .
+            else
+              git fetch origin main
+              git checkout main
+              git reset --hard origin/main
+            fi
+            chmod +x scripts/deploy-production.sh
+            IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" ./scripts/deploy-production.sh
+
+      - name: Skip deployment when production secrets are missing
+        if: ${{ env.PROD_HOST == '' || env.PROD_USER == '' || env.PROD_SSH_KEY == '' }}
+        run: |
+          echo "Production SSH secrets are not configured. Build and package succeeded; deployment was skipped."
+
+  notify-failure:
+    name: Notify Failure
+    runs-on: ubuntu-latest
+    needs:
+      - build-test-package
+      - deploy-production
+    if: ${{ always() && (needs.build-test-package.result == 'failure' || needs.deploy-production.result == 'failure') }}
+    env:
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+    steps:
+      - name: Checkout notification script
+        uses: actions/checkout@v4
+
+      - name: Send DingTalk failure notification
+        if: ${{ env.DINGTALK_WEBHOOK != '' }}
+        run: |
+          chmod +x scripts/notify-dingtalk.sh
+          scripts/notify-dingtalk.sh "招聘助手部署失败" "### 招聘助手部署失败
+
+          - 仓库：${{ github.repository }}
+          - 分支：${{ github.ref_name }}
+          - 提交：${{ github.sha }}
+          - 工作流：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
