@@ -1174,30 +1174,40 @@ function detectRecruiterAccountInfo() {
 function detectAccountInfoRightOfBenefits() {
   const anchors = findElementsContainingText('账号权益')
     .filter(isActionableElement)
-    .sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+    .sort((a, b) => {
+      const rectA = a.getBoundingClientRect();
+      const rectB = b.getBoundingClientRect();
+      return rectA.top - rectB.top || rectB.right - rectA.right;
+    });
 
   for (const anchor of anchors) {
     const anchorRect = anchor.getBoundingClientRect();
     const scope = anchor.closest('header, nav, [class*="header"], [class*="top"], [class*="nav"], [class*="bar"]') || document.body;
+    const avatar = findTopRightAvatarAfter(anchor, scope);
+    const avatarRect = avatar?.getBoundingClientRect();
+    if (!avatarRect) continue;
+    const rightBoundary = avatarRect.left + 8;
     const candidates = Array.from(scope.querySelectorAll('span, div, a, button, p, label'))
       .map(element => {
         if (element === anchor || !isActionableElement(element)) return null;
         const rect = element.getBoundingClientRect();
-        const text = sanitizeAccountText(element.textContent || '');
+        const text = sanitizeAccountText(getElementOwnText(element) || element.textContent || '');
         if (!text || !isLikelyRecruiterName(text, element)) return null;
 
         const isRightSide = rect.left >= anchorRect.right - 8;
+        const isLeftOfAvatar = rect.right <= rightBoundary;
         const isSameLine = rect.top < anchorRect.bottom + 36 && rect.bottom > anchorRect.top - 36;
         const isHeaderArea = rect.top <= Math.max(anchorRect.bottom + 80, 160);
-        if (!isRightSide || !isSameLine || !isHeaderArea) return null;
+        if (!isRightSide || !isLeftOfAvatar || !isSameLine || !isHeaderArea) return null;
 
-        const distance = Math.max(0, rect.left - anchorRect.right) + Math.abs(rect.top - anchorRect.top) * 0.8;
+        const distanceToAvatar = avatarRect ? Math.abs(avatarRect.left - rect.right) : 80;
+        const distance = Math.max(0, rect.left - anchorRect.right) + Math.abs(rect.top - anchorRect.top) * 0.8 + distanceToAvatar * 0.4;
         const hasAvatarNeighbor = Boolean(
           element.querySelector('img, [class*="avatar"]') ||
           element.previousElementSibling?.querySelector?.('img, [class*="avatar"]') ||
           element.parentElement?.querySelector?.('img, [class*="avatar"]')
         );
-        const score = distance - (hasAvatarNeighbor ? 40 : 0) - (/HR|招聘|经理|主管|顾问|女士|先生/.test(text) ? 20 : 0);
+        const score = distance - (hasAvatarNeighbor ? 30 : 0) - (/HR|招聘|经理|主管|顾问|女士|先生/.test(text) ? 20 : 0);
         return { element, text, score };
       })
       .filter(Boolean)
@@ -1209,6 +1219,39 @@ function detectAccountInfoRightOfBenefits() {
   }
 
   return { name: '', platform: 'BOSS直聘', detectedAt: new Date().toISOString() };
+}
+
+function findTopRightAvatarAfter(anchor, scope) {
+  const anchorRect = anchor.getBoundingClientRect();
+  const avatarSelectors = [
+    'img',
+    '[class*="avatar"]',
+    '[class*="head"]',
+    '[class*="photo"]',
+    '[class*="portrait"]',
+  ];
+  const avatars = Array.from(scope.querySelectorAll(avatarSelectors.join(',')))
+    .map(element => {
+      if (!isActionableElement(element)) return null;
+      const rect = element.getBoundingClientRect();
+      const isRightOfBenefits = rect.left >= anchorRect.right - 8;
+      const isSameLine = rect.top < anchorRect.bottom + 44 && rect.bottom > anchorRect.top - 44;
+      const isReasonableAvatar = rect.width >= 18 && rect.width <= 72 && rect.height >= 18 && rect.height <= 72;
+      const isTopRight = rect.top <= Math.max(anchorRect.bottom + 90, 170);
+      if (!isRightOfBenefits || !isSameLine || !isReasonableAvatar || !isTopRight) return null;
+      return { element, rect };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.rect.right - a.rect.right);
+
+  return avatars[0]?.element || null;
+}
+
+function getElementOwnText(element) {
+  return normalizeText(Array.from(element.childNodes)
+    .filter(node => node.nodeType === Node.TEXT_NODE)
+    .map(node => node.textContent || '')
+    .join(' '));
 }
 
 function findElementsContainingText(keyword) {
