@@ -95,7 +95,7 @@ async function updatePopup() {
 
   elements.safetyStatus.textContent = safetyState.isDegraded ? '已降级' : '正常';
   elements.safetyStatus.classList.toggle('ok', !safetyState.isDegraded);
-  elements.accountName.textContent = detectedAccount.name || mergedSettings.accountName || '打开招聘页面后自动识别';
+  elements.accountName.textContent = mergedSettings.accountName || detectedAccount.name || '打开招聘页面后自动识别';
   elements.accountNameInput.value = mergedSettings.accountName || '';
   elements.totalResumes.textContent = dashboard.totalCount ?? 0;
   elements.todayResumes.textContent = dashboard.todayCount ?? 0;

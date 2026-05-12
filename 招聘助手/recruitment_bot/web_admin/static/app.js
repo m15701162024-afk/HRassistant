@@ -286,6 +286,7 @@ async function saveSettings(showToast = true) {
       dingtalkSecret: $('dingtalkSecret').value.trim(),
       accountName: $('accountName').value.trim(),
       accountPlatform: $('accountPlatform').value.trim() || 'BOSS直聘',
+      accountNameManual: Boolean($('accountName').value.trim()),
       scheduledPushTime: $('scheduledPushTime').value || '10:00',
     }),
   });
@@ -302,6 +303,7 @@ async function toggleSchedule() {
       dingtalkSecret: $('dingtalkSecret').value.trim(),
       accountName: $('accountName').value.trim(),
       accountPlatform: $('accountPlatform').value.trim() || 'BOSS直聘',
+      accountNameManual: Boolean($('accountName').value.trim()),
       scheduledPushTime: $('scheduledPushTime').value || '10:00',
       scheduledPushEnabled: !settings.scheduledPushEnabled,
     }),

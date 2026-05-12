@@ -1123,6 +1123,10 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def markdown_cell(value: Any) -> str:
+    return str(value or "").replace("|", "｜").replace("\n", " ").strip()
+
+
 def build_summary(scope: str = "all") -> str:
     target_date = date_str(-1) if scope == "yesterday" else None
     candidates = list_rows("candidates", limit=1000, date_field="received_date", date_value=target_date)
@@ -1139,10 +1143,14 @@ def build_summary(scope: str = "all") -> str:
     def account_count(rows: list[dict[str, Any]], account: str) -> int:
         return sum(1 for item in rows if str(item.get("account_name") or "未识别") == account)
 
-    def account_lines(rows: list[dict[str, Any]], empty: str = "暂无") -> list[str]:
+    def account_lines(rows: list[dict[str, Any]], label: str, empty: str = "暂无") -> list[str]:
         if not rows:
             return [empty]
-        return [f"{account}丨{account_count(rows, account)}" for account in account_names if account_count(rows, account) > 0] or [empty]
+        return [
+            f"{account}丨{label}：{account_count(rows, account)}"
+            for account in account_names
+            if account_count(rows, account) > 0
+        ] or [empty]
 
     received_candidates = [item for item in candidates if item.get("raw_json")]
     source_counts: dict[str, int] = {}
@@ -1152,22 +1160,22 @@ def build_summary(scope: str = "all") -> str:
     source_text = "，".join(f"{k} {v}份" for k, v in source_counts.items()) or "暂无"
 
     detail_rows = [
-        f"| {item.get('name','')} | {item.get('role','')} | {item.get('education','')} | {item.get('experience','')} | {item.get('score',0)}% | {item.get('source','')} | {item.get('account_name') or '未识别'} |"
-        for item in recommended_candidates[:50]
+        f"| {markdown_cell(item.get('name',''))} | {markdown_cell(item.get('role',''))} | {markdown_cell(item.get('education',''))} | {markdown_cell(item.get('experience',''))} | {item.get('score',0)}% | {markdown_cell(item.get('source',''))} | {markdown_cell(item.get('account_name') or '未识别')} |"
+        for item in sorted(recommended_candidates, key=lambda row: int(row.get("score") or 0), reverse=True)[:50]
     ]
     return "\n".join(
         [
             f"### {title_date} 招聘数据汇总",
             "",
             "#### 定时推送",
-            f"昨日新增：{len(candidates)}",
-            *account_lines(candidates),
+            f"昨日新增：全部 {len(candidates)}",
+            *account_lines(candidates, "昨日新增"),
             "",
-            f"昨日收到简历数量：{len(received_candidates)}",
-            *account_lines(received_candidates),
+            f"昨日收到简历数量：全部 {len(received_candidates)}",
+            *account_lines(received_candidates, "昨日收到简历数量"),
             "",
-            f"昨日推荐候选人：{len(recommended_candidates)}",
-            *account_lines(recommended_candidates),
+            f"昨日推荐候选人：全部 {len(recommended_candidates)}",
+            *account_lines(recommended_candidates, "推荐候选人"),
             "",
             f"数据来源：{source_text}",
             "",

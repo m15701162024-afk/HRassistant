@@ -1033,7 +1033,7 @@ function scrapeResumeInfo(card, resumeId) {
       receivedDate: new Date().toISOString().split('T')[0],
       receivedTime: new Date().toISOString(),
       scrapedAt: new Date().toISOString(),
-      accountName: detectRecruiterAccountInfo().name || settings.accountName || '',
+      accountName: settings.accountName || detectRecruiterAccountInfo().name || '',
       accountPlatform: settings.accountPlatform || 'BOSS直聘',
     };
     info.rawText = normalizeText(card.textContent || '').slice(0, 3000);
@@ -1925,7 +1925,7 @@ async function scrapeChatCandidateInfo() {
     receivedDate: new Date().toISOString().split('T')[0],
     receivedTime: new Date().toISOString(),
     scrapedAt: new Date().toISOString(),
-    accountName: detectRecruiterAccountInfo().name || settings.accountName || '',
+    accountName: settings.accountName || detectRecruiterAccountInfo().name || '',
     accountPlatform: settings.accountPlatform || 'BOSS直聘',
     rawText: bodyText.slice(0, 5000),
     education: extractEducationFromText(text) || extractEducationFromText(bodyText),
