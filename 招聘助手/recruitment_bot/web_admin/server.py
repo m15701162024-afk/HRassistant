@@ -72,6 +72,7 @@ DEFAULT_BEHAVIOR_POLICY: dict[str, Any] = {
 DEFAULT_LLM_CONFIG: dict[str, Any] = {
     "llmEnabled": False,
     "llmProvider": "openai-compatible",
+    "llmEndpointMode": "auto",
     "llmApiBase": "https://api.openai.com/v1",
     "llmModel": "gpt-4o-mini",
     "llmTemperature": 0.2,
@@ -627,29 +628,16 @@ def build_llm_history_context(question: str, max_items: int = 80) -> str:
     return "\n".join(parts)[:24000]
 
 
-def call_llm_chat(question: str, context: str) -> str:
-    config = get_llm_config(mask_key=False)
-    if not config.get("llmEnabled"):
-        raise RuntimeError("大模型问答未启用")
-    if not config.get("llmApiKey"):
-        raise RuntimeError("大模型 API Key 未配置")
-
-    api_base = str(config["llmApiBase"]).rstrip("/")
-    url = f"{api_base}/chat/completions"
-    system_prompt = (
+def build_llm_system_prompt() -> str:
+    return (
         "你是招聘助手的问答 Agent。你只能根据提供的招聘历史数据回答问题。"
         "回答要使用中文，适合钉钉 markdown 展示。"
         "如果历史数据没有答案，要明确说没有找到，不要编造候选人。"
         "回答候选人时优先给出姓名、岗位、匹配度、推荐意见、来源、账号、下一步。"
     )
-    payload = {
-        "model": config["llmModel"],
-        "temperature": config["llmTemperature"],
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"问题：{question}\n\n招聘历史数据：\n{context}"},
-        ],
-    }
+
+
+def request_llm_json(url: str, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -659,17 +647,35 @@ def call_llm_chat(question: str, context: str) -> str:
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            body = json.loads(response.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:1200]
-        if exc.code == 403:
-            raise RuntimeError(
-                "大模型 API 返回 403 Forbidden。请检查 API Key 是否有权限、Base URL 是否正确、模型名是否在该服务开通。"
-                f" 服务返回：{detail}"
-            )
-        raise RuntimeError(f"大模型 API HTTP {exc.code}: {detail}")
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8") or "{}")
+
+
+def extract_responses_answer(body: dict[str, Any]) -> str:
+    if body.get("output_text"):
+        return str(body["output_text"]).strip()
+    parts: list[str] = []
+    for item in body.get("output", []) or []:
+        for content in item.get("content", []) or []:
+            if content.get("text"):
+                parts.append(str(content["text"]))
+    return "\n".join(parts).strip()
+
+
+def call_llm_chat_completions(question: str, context: str, config: dict[str, Any]) -> str:
+    url = f"{str(config['llmApiBase']).rstrip('/')}/chat/completions"
+    system_prompt = (
+        build_llm_system_prompt()
+    )
+    payload = {
+        "model": config["llmModel"],
+        "temperature": config["llmTemperature"],
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"问题：{question}\n\n招聘历史数据：\n{context}"},
+        ],
+    }
+    body = request_llm_json(url, payload, config)
     choices = body.get("choices") or []
     if not choices:
         raise RuntimeError("大模型 API 未返回 choices")
@@ -678,6 +684,63 @@ def call_llm_chat(question: str, context: str) -> str:
     if not answer:
         raise RuntimeError("大模型 API 返回空答案")
     return answer[:18000]
+
+
+def call_llm_responses(question: str, context: str, config: dict[str, Any]) -> str:
+    url = f"{str(config['llmApiBase']).rstrip('/')}/responses"
+    payload = {
+        "model": config["llmModel"],
+        "temperature": config["llmTemperature"],
+        "instructions": build_llm_system_prompt(),
+        "input": f"问题：{question}\n\n招聘历史数据：\n{context}",
+    }
+    body = request_llm_json(url, payload, config)
+    answer = extract_responses_answer(body)
+    if not answer:
+        raise RuntimeError("大模型 Responses API 返回空答案")
+    return answer[:18000]
+
+
+def call_llm_chat(question: str, context: str) -> str:
+    config = get_llm_config(mask_key=False)
+    if not config.get("llmEnabled"):
+        raise RuntimeError("大模型问答未启用")
+    if not config.get("llmApiKey"):
+        raise RuntimeError("大模型 API Key 未配置")
+
+    mode = str(config.get("llmEndpointMode") or "auto")
+    preferred = "responses" if (
+        mode == "responses" or
+        (mode == "auto" and config.get("llmProvider") == "gptsapi" and str(config.get("llmModel", "")).startswith("gpt-5"))
+    ) else "chat"
+    attempts = [preferred]
+    if mode == "auto":
+        attempts.append("responses" if preferred == "chat" else "chat")
+
+    errors: list[str] = []
+    for attempt in attempts:
+        try:
+            if attempt == "responses":
+                return call_llm_responses(question, context, config)
+            return call_llm_chat_completions(question, context, config)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1200]
+            errors.append(f"{attempt}: HTTP {exc.code} {detail}")
+            if exc.code == 403:
+                break
+        except Exception as exc:
+            errors.append(f"{attempt}: {exc}")
+
+    message = "；".join(errors) or "未知错误"
+    if "HTTP 403" in message:
+        raise RuntimeError(
+            "大模型 API 返回 403 Forbidden。请检查 API Key 是否有效、账户额度/模型权限是否开通、Base URL 是否为 https://api.gptsapi.net/v1。"
+            f" 服务返回：{message}"
+        )
+    raise RuntimeError(
+        "大模型 API 调用失败。已尝试 Chat Completions/Responses 兼容模式，请检查模型名和接口模式。"
+        f" 详情：{message}"
+    )
 
 
 def answer_question_with_agent(question: str) -> tuple[str, dict[str, Any]]:
@@ -724,6 +787,7 @@ def get_llm_config(mask_key: bool = False) -> dict[str, Any]:
         **DEFAULT_LLM_CONFIG,
         "llmEnabled": bool(settings.get("llmEnabled", DEFAULT_LLM_CONFIG["llmEnabled"])),
         "llmProvider": str(settings.get("llmProvider") or DEFAULT_LLM_CONFIG["llmProvider"]),
+        "llmEndpointMode": str(settings.get("llmEndpointMode") or DEFAULT_LLM_CONFIG["llmEndpointMode"]),
         "llmApiBase": str(settings.get("llmApiBase") or DEFAULT_LLM_CONFIG["llmApiBase"]).rstrip("/"),
         "llmApiKey": str(settings.get("llmApiKey") or ""),
         "llmModel": str(settings.get("llmModel") or DEFAULT_LLM_CONFIG["llmModel"]),
@@ -745,6 +809,7 @@ def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
     config: dict[str, Any] = {
         "llmEnabled": bool(payload.get("llmEnabled", current["llmEnabled"])),
         "llmProvider": provider,
+        "llmEndpointMode": str(payload.get("llmEndpointMode") or current["llmEndpointMode"] or "auto"),
         "llmApiBase": str(payload.get("llmApiBase") or default_base).rstrip("/"),
         "llmModel": str(payload.get("llmModel") or current["llmModel"]),
         "llmTemperature": max(0, min(float(payload.get("llmTemperature", current["llmTemperature"]) or 0.2), 2)),

@@ -88,7 +88,7 @@ const AGENTS_EVALUATION_RULES = {
   skills: 30,
   projects: 30,
   salary: 20,
-  recommendThreshold: 70,
+  recommendThreshold: 60,
   strongRecommendThreshold: 90,
   pendingThreshold: 50,
 };
@@ -711,6 +711,39 @@ async function ensureJobRequirementForResume(card, resumeInfo) {
   }
 }
 
+async function ensureChatJobRequirement(resumeInfo) {
+  if (!resumeInfo?.role) return;
+  const key = normalizeRoleKey(resumeInfo.role);
+  if (cachedJobRequirements[key]?.requirement) {
+    resumeInfo.jobRequirement = cachedJobRequirements[key].requirement;
+    resumeInfo.evaluation = evaluateCandidate(resumeInfo);
+    return;
+  }
+
+  let requirement = extractJobRequirementFromPage(document.body, resumeInfo.role);
+  if (!requirement) {
+    const trigger = findCommunicationJobTrigger(resumeInfo.role);
+    if (trigger && canPerformOperation()) {
+      await simulateHumanScroll();
+      await simulateMouseMove(trigger);
+      await sleep(900 + Math.random() * 1400);
+      simulateHumanClick(trigger);
+      await sleep(1800 + Math.random() * 2200);
+      requirement = extractJobRequirementFromPage(document.body, resumeInfo.role);
+    }
+  }
+
+  if (requirement) {
+    resumeInfo.jobRequirement = requirement;
+    cacheJobRequirement(resumeInfo.role, requirement, {
+      source: resumeInfo.source,
+      accountName: resumeInfo.accountName,
+      sourceUrl: resumeInfo.sourceUrl,
+    });
+    resumeInfo.evaluation = evaluateCandidate(resumeInfo);
+  }
+}
+
 async function openJobDetailAndExtractRequirement(card, role) {
   const trigger = findJobDetailTrigger(card, role);
   if (!trigger || !canPerformOperation()) return '';
@@ -865,6 +898,17 @@ function matchResumeAction(text, element) {
   }
 
   return null;
+}
+
+function findCommunicationJobTrigger(role = '') {
+  const roleText = normalizeText(role || '');
+  const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], [class*="job"], [class*="position"], [class*="chat"], div, span'));
+  return candidates.find((element) => {
+    if (!isActionableElement(element)) return false;
+    const text = normalizeText(element.textContent || '');
+    if (!text || text.length > 120) return false;
+    return text.includes('沟通职位') || (roleText && text.includes(roleText) && /\(J\d+\)|J\d+|职位/.test(text));
+  }) || null;
 }
 
 function getActionKey(type, element, text) {
@@ -1763,6 +1807,7 @@ async function browseCandidatesAndRunActions({
       await simulateCandidateDwell();
 
       if (settings.autoScrape) {
+        await openCurrentCandidateDetailFromSummary();
         await scanCurrentPage({ notify: false });
       }
 
@@ -1797,6 +1842,19 @@ async function scanCurrentPage({ notify = false } = {}) {
   const results = [];
   let savedCount = 0;
   let duplicateCount = 0;
+
+  if (window.location.href.includes('/chat/') || normalizeText(document.body.textContent || '').includes('沟通职位')) {
+    const chatInfo = await scrapeChatCandidateInfo();
+    if (chatInfo) {
+      results.push(chatInfo);
+      const saveResult = await saveResumeData(chatInfo);
+      if (saveResult.saved) savedCount++;
+      if (saveResult.duplicate) duplicateCount++;
+      if (notify && saveResult.saved) {
+        notifyPopup('resumeScraped', chatInfo);
+      }
+    }
+  }
 
   for (const card of resumeCards) {
     const resumeId = extractResumeId(card);
@@ -1838,7 +1896,11 @@ async function scanCurrentPage({ notify = false } = {}) {
 // 聊天页面处理
 // ============================================================
 
-function handleChatPage() {
+async function handleChatPage() {
+  if (settings.autoScrape) {
+    await scanCurrentPage({ notify: false });
+  }
+
   const resumeLinks = document.querySelectorAll(
     'a[href*="resume"], [class*="resume"] a, [class*="attachment"]'
   );
@@ -1855,6 +1917,113 @@ function handleChatPage() {
       processedResumeIds.add(link.href);
     }
   });
+}
+
+async function openCurrentCandidateDetailFromSummary() {
+  const summary = findCandidateSummaryPanel();
+  if (!summary || !canPerformOperation()) return false;
+  await simulateMouseMove(summary);
+  await sleep(700 + Math.random() * 1200);
+  const before = normalizeText(document.body.textContent || '').slice(0, 800);
+  const clicked = simulateHumanClick(summary);
+  if (!clicked) return false;
+  await sleep(1800 + Math.random() * 2600);
+  return normalizeText(document.body.textContent || '').slice(0, 800) !== before;
+}
+
+async function scrapeChatCandidateInfo() {
+  const panel = findCandidateSummaryPanel() || document.body;
+  const text = normalizeText(panel.textContent || '');
+  const bodyText = normalizeText(document.body.textContent || '');
+  const role = extractCommunicationRole(bodyText);
+  const name = extractChatCandidateName(text, bodyText);
+  if (!name && !role) return null;
+
+  const resumeInfo = {
+    id: `chat_${hashString(`${window.location.pathname}|${name}|${role}|${bodyText.slice(0, 500)}`)}`,
+    name: name || '候选人',
+    role: role || extractExpectedRole(bodyText),
+    source: 'BOSS直聘',
+    sourceUrl: window.location.href,
+    receivedDate: new Date().toISOString().split('T')[0],
+    receivedTime: new Date().toISOString(),
+    scrapedAt: new Date().toISOString(),
+    accountName: detectRecruiterAccountInfo().name || settings.accountName || '',
+    accountPlatform: settings.accountPlatform || 'BOSS直聘',
+    rawText: bodyText.slice(0, 5000),
+    education: extractEducationFromText(text) || extractEducationFromText(bodyText),
+    experience: extractExperienceFromText(text) || extractExperienceFromText(bodyText),
+    expectedSalary: extractExpectedSalaryFromText(bodyText),
+    ageGender: extractAgeFromText(text),
+    summary: extractLatestCandidateMessage(bodyText),
+  };
+
+  await ensureChatJobRequirement(resumeInfo);
+  resumeInfo.qualityScore = calculateResumeQuality(resumeInfo);
+  resumeInfo.evaluation = evaluateCandidate(resumeInfo);
+  return resumeInfo;
+}
+
+function findCandidateSummaryPanel() {
+  const elements = Array.from(document.querySelectorAll('section, header, article, [class*="card"], [class*="geek"], [class*="resume"], [class*="user"], [class*="profile"], div'));
+  const candidates = elements
+    .filter(isActionableElement)
+    .map((element) => ({
+      element,
+      text: normalizeText(element.textContent || ''),
+      rect: element.getBoundingClientRect(),
+    }))
+    .filter(({ text, rect }) => {
+      if (!text || text.length < 12 || text.length > 900) return false;
+      if (rect.width < 180 || rect.height < 45) return false;
+      return /(牛人分析器|在线|岁|年|本科|大专|硕士|博士)/.test(text) && /(J\d+|沟通职位|本科|大专|硕士|博士|年)/.test(text);
+    })
+    .sort((a, b) => (a.text.length - b.text.length) || (b.rect.width * b.rect.height - a.rect.width * a.rect.height));
+  return candidates[0]?.element || null;
+}
+
+function extractCommunicationRole(text) {
+  const match = normalizeText(text || '').match(/沟通职位[:：]\s*([^\s|，,。]+(?:\([^)]+\))?)/);
+  return match ? match[1].trim() : '';
+}
+
+function extractExpectedRole(text) {
+  const match = normalizeText(text || '').match(/期望[:：]?\s*([^\s|，,。]+工程师|[^\s|，,。]+分析师|[^\s|，,。]+开发|[^\s|，,。]+运营|[^\s|，,。]+产品)/);
+  return match ? match[1].trim() : '';
+}
+
+function extractChatCandidateName(panelText, bodyText) {
+  const text = panelText || bodyText || '';
+  const match = text.match(/^([\u4e00-\u9fa5]{2,4})\s*(?:[·•]|在线|离线|\d{2}岁)/);
+  if (match) return match[1];
+  const fallback = bodyText.match(/([\u4e00-\u9fa5]{2,4})\s+(?:在线|离线)\s+\d{2}岁/);
+  return fallback ? fallback[1] : '';
+}
+
+function extractEducationFromText(text) {
+  const match = normalizeText(text || '').match(/(博士|硕士|本科|大专|高中|中专)/);
+  return match ? match[1] : '';
+}
+
+function extractExperienceFromText(text) {
+  const match = normalizeText(text || '').match(/(\d{1,2}\s*年(?:工作|开发|数据|测试|运营|产品)?经验?|\d{1,2}\s*年)/);
+  return match ? match[1].replace(/\s+/g, '') : '';
+}
+
+function extractExpectedSalaryFromText(text) {
+  const match = normalizeText(text || '').match(/(\d{1,3}\s*[-~到]\s*\d{1,3}\s*[kK]|面议|\d{1,3}\s*[kK])/);
+  return match ? match[1].replace(/\s+/g, '') : '';
+}
+
+function extractAgeFromText(text) {
+  const match = normalizeText(text || '').match(/(\d{2}\s*岁)/);
+  return match ? match[1].replace(/\s+/g, '') : '';
+}
+
+function extractLatestCandidateMessage(text) {
+  const normalized = normalizeText(text || '');
+  const match = normalized.match(/您好[，,][\s\S]{10,260}/);
+  return match ? match[0].slice(0, 260) : '';
 }
 
 // ============================================================

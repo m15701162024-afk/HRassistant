@@ -24,7 +24,7 @@ const LLM_PROVIDER_DEFAULTS = {
   },
   gptsapi: {
     apiBase: 'https://api.gptsapi.net/v1',
-    model: 'gpt-4o-mini',
+    model: 'gpt-5-chat',
   },
 };
 
@@ -130,6 +130,7 @@ async function loadSettings() {
   $('llmEnabled').value = settings.llmEnabled ? 'true' : 'false';
   $('llmProvider').value = settings.llmProvider || 'openai-compatible';
   $('llmApiBase').value = settings.llmApiBase || 'https://api.openai.com/v1';
+  $('llmEndpointMode').value = settings.llmEndpointMode || 'auto';
   $('llmApiKey').value = '';
   $('llmApiKey').placeholder = settings.llmApiKeyConfigured ? '已配置，留空则保留原 Key' : '请输入 API Key';
   $('llmModel').value = settings.llmModel || 'gpt-4o-mini';
@@ -153,6 +154,7 @@ async function saveLlmConfig(showToast = true) {
     llmEnabled: $('llmEnabled').value === 'true',
     llmProvider: $('llmProvider').value || 'openai-compatible',
     llmApiBase: $('llmApiBase').value.trim() || 'https://api.openai.com/v1',
+    llmEndpointMode: $('llmEndpointMode').value || 'auto',
     llmModel: $('llmModel').value.trim() || 'gpt-4o-mini',
     llmTemperature: Number($('llmTemperature').value || 0.2),
     llmMaxContextItems: Number($('llmMaxContextItems').value || 80),

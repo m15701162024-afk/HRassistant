@@ -142,6 +142,14 @@
           <input id="llmApiBase" type="url" placeholder="https://api.openai.com/v1" />
         </label>
         <label>
+          接口模式
+          <select id="llmEndpointMode">
+            <option value="auto">自动兼容</option>
+            <option value="chat">Chat Completions</option>
+            <option value="responses">Responses</option>
+          </select>
+        </label>
+        <label>
           API Key
           <input id="llmApiKey" type="password" placeholder="留空则保留原 Key" />
         </label>
