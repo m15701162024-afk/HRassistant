@@ -24,7 +24,7 @@ const LLM_PROVIDER_DEFAULTS = {
   },
   gptsapi: {
     apiBase: 'https://api.gptsapi.net/v1',
-    model: 'gpt-5-chat',
+    model: 'gpt-5.2',
   },
 };
 
@@ -136,6 +136,7 @@ async function loadSettings() {
   $('llmModel').value = settings.llmModel || 'gpt-4o-mini';
   $('llmTemperature').value = settings.llmTemperature ?? 0.2;
   $('llmMaxContextItems').value = settings.llmMaxContextItems ?? 80;
+  $('llmMaxTokens').value = settings.llmMaxTokens ?? 1000;
   $('llmStatus').textContent = settings.llmEnabled
     ? `已启用 ${settings.llmModel || '模型'}`
     : '未启用';
@@ -158,6 +159,7 @@ async function saveLlmConfig(showToast = true) {
     llmModel: $('llmModel').value.trim() || 'gpt-4o-mini',
     llmTemperature: Number($('llmTemperature').value || 0.2),
     llmMaxContextItems: Number($('llmMaxContextItems').value || 80),
+    llmMaxTokens: Number($('llmMaxTokens').value || 1000),
   };
   const apiKey = $('llmApiKey').value.trim();
   if (apiKey) payload.llmApiKey = apiKey;

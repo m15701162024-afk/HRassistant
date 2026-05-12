@@ -194,7 +194,7 @@ code { background: #eef3f8; padding: 2px 5px; border-radius: 4px; }
 }
 
 .llm-grid {
-  grid-template-columns: 150px 190px 1.8fr 150px 1.6fr 1.2fr 100px 140px;
+  grid-template-columns: 150px 190px 1.8fr 150px 1.6fr 1.2fr 100px 140px 140px;
 }
 
 .job-form-grid {

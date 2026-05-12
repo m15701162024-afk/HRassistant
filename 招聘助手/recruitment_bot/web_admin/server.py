@@ -77,6 +77,7 @@ DEFAULT_LLM_CONFIG: dict[str, Any] = {
     "llmModel": "gpt-4o-mini",
     "llmTemperature": 0.2,
     "llmMaxContextItems": 80,
+    "llmMaxTokens": 1000,
 }
 
 
@@ -688,12 +689,25 @@ def call_llm_chat_completions(question: str, context: str, config: dict[str, Any
 
 def call_llm_responses(question: str, context: str, config: dict[str, Any]) -> str:
     url = f"{str(config['llmApiBase']).rstrip('/')}/responses"
+    user_text = f"{build_llm_system_prompt()}\n\n问题：{question}\n\n招聘历史数据：\n{context}"
     payload = {
         "model": config["llmModel"],
-        "temperature": config["llmTemperature"],
-        "instructions": build_llm_system_prompt(),
-        "input": f"问题：{question}\n\n招聘历史数据：\n{context}",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": user_text,
+                    }
+                ],
+            }
+        ],
+        "max_tokens": int(config.get("llmMaxTokens") or 1000),
     }
+    if config.get("llmProvider") != "gptsapi":
+        payload["instructions"] = build_llm_system_prompt()
+        payload["temperature"] = config["llmTemperature"]
     body = request_llm_json(url, payload, config)
     answer = extract_responses_answer(body)
     if not answer:
@@ -793,6 +807,7 @@ def get_llm_config(mask_key: bool = False) -> dict[str, Any]:
         "llmModel": str(settings.get("llmModel") or DEFAULT_LLM_CONFIG["llmModel"]),
         "llmTemperature": float(settings.get("llmTemperature", DEFAULT_LLM_CONFIG["llmTemperature"]) or 0.2),
         "llmMaxContextItems": int(settings.get("llmMaxContextItems", DEFAULT_LLM_CONFIG["llmMaxContextItems"]) or 80),
+        "llmMaxTokens": int(settings.get("llmMaxTokens", DEFAULT_LLM_CONFIG["llmMaxTokens"]) or 1000),
     }
     if mask_key and config.get("llmApiKey"):
         config["llmApiKey"] = "********"
@@ -814,6 +829,7 @@ def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
         "llmModel": str(payload.get("llmModel") or current["llmModel"]),
         "llmTemperature": max(0, min(float(payload.get("llmTemperature", current["llmTemperature"]) or 0.2), 2)),
         "llmMaxContextItems": max(10, min(int(payload.get("llmMaxContextItems", current["llmMaxContextItems"]) or 80), 500)),
+        "llmMaxTokens": max(100, min(int(payload.get("llmMaxTokens", current["llmMaxTokens"]) or 1000), 8000)),
     }
     api_key = str(payload.get("llmApiKey") or "").strip()
     if api_key and api_key != "********":
