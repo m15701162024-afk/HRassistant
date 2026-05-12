@@ -64,6 +64,7 @@ const processedResumeIds = new Set();
 const processedActionKeys = new Set();
 const processedBrowseKeys = new Set();
 let isBrowsingCandidates = false;
+let cachedJobRequirements = {};
 
 const RESUME_ACTIONS = {
   accept: {
@@ -119,9 +120,19 @@ let safetyState = {
 async function init() {
   console.log('[招聘助手] 插件已加载 (v2.0 安全增强版)');
   await loadSettings();
+  await loadJobRequirements();
   hideAutomationFingerprints();
   resetCountersIfNeeded();
   startObserving();
+}
+
+async function loadJobRequirements() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['jobRequirements'], (result) => {
+      cachedJobRequirements = result.jobRequirements || {};
+      resolve();
+    });
+  });
 }
 
 async function loadSettings() {
@@ -607,6 +618,7 @@ async function handleReceivePage() {
     if (settings.autoScrape) {
       resumeInfo = scrapeResumeInfo(card, resumeId);
       if (resumeInfo) {
+        await ensureJobRequirementForResume(card, resumeInfo);
         const saveResult = await saveResumeData(resumeInfo);
         if (saveResult.saved) {
           notifyPopup('resumeScraped', resumeInfo);
@@ -632,6 +644,69 @@ async function handleReceivePage() {
 
     processedResumeIds.add(resumeId);
   }
+}
+
+async function ensureJobRequirementForResume(card, resumeInfo) {
+  if (!resumeInfo?.role) return;
+  const key = normalizeRoleKey(resumeInfo.role);
+  if (cachedJobRequirements[key]?.requirement) {
+    resumeInfo.jobRequirement = cachedJobRequirements[key].requirement;
+    resumeInfo.evaluation = evaluateCandidate(resumeInfo);
+    return;
+  }
+
+  let requirement = extractJobRequirementFromPage(card, resumeInfo.role);
+  if (!requirement) {
+    requirement = await openJobDetailAndExtractRequirement(card, resumeInfo.role);
+  }
+  if (requirement) {
+    resumeInfo.jobRequirement = requirement;
+    cacheJobRequirement(resumeInfo.role, requirement, {
+      source: resumeInfo.source,
+      accountName: resumeInfo.accountName,
+      sourceUrl: resumeInfo.sourceUrl,
+    });
+    resumeInfo.evaluation = evaluateCandidate(resumeInfo);
+    notifyPopup('log', {
+      message: `已保存岗位要求：${resumeInfo.role}`,
+      type: 'success',
+    });
+  }
+}
+
+async function openJobDetailAndExtractRequirement(card, role) {
+  const trigger = findJobDetailTrigger(card, role);
+  if (!trigger || !canPerformOperation()) return '';
+  const previousText = normalizeText(document.body.textContent || '');
+  await simulateMouseMove(trigger);
+  await sleep(500 + Math.random() * 900);
+  simulateHumanClick(trigger);
+  await sleep(1800 + Math.random() * 2200);
+  const requirement = extractJobRequirementFromPage(document.body, role);
+  if (requirement && normalizeText(document.body.textContent || '') !== previousText) {
+    return requirement;
+  }
+  return '';
+}
+
+function findJobDetailTrigger(card, role) {
+  const selectors = [
+    'a[href*="job_detail"]',
+    'a[href*="/job_detail/"]',
+    'a[href*="job"]',
+    '[class*="job"] a',
+    '[class*="position"] a',
+    '[class*="job-name"]',
+    '[class*="position-name"]',
+  ];
+  for (const selector of selectors) {
+    const el = card.querySelector(selector);
+    if (el && isActionableElement(el)) return el;
+  }
+  const roleText = normalizeText(role || '');
+  if (!roleText) return null;
+  const elements = Array.from(card.querySelectorAll('a, button, span, div'));
+  return elements.find(el => isActionableElement(el) && normalizeText(el.textContent || '').includes(roleText)) || null;
 }
 
 // ============================================================
@@ -890,6 +965,15 @@ function scrapeResumeInfo(card, resumeId) {
       '[class*="job"]', '[class*="position"]',
       '[class*="expect"]', '[class*="intention"]',
     ]);
+    const roleKey = normalizeRoleKey(info.role);
+    info.jobRequirement = cachedJobRequirements[roleKey]?.requirement || extractJobRequirementFromPage(card, info.role);
+    if (info.role && info.jobRequirement) {
+      cacheJobRequirement(info.role, info.jobRequirement, {
+        source: info.source,
+        accountName: info.accountName,
+        sourceUrl: info.sourceUrl,
+      });
+    }
     info.education = extractText(card, [
       '[class*="edu"]', '[class*="degree"]', '[class*="education"]',
     ]);
@@ -935,6 +1019,75 @@ function scrapeResumeInfo(card, resumeId) {
     console.error('[招聘助手] 抓取简历信息失败:', err);
     return null;
   }
+}
+
+function normalizeRoleKey(role) {
+  return normalizeText(role || '').toLowerCase().replace(/\s+/g, '');
+}
+
+function cacheJobRequirement(role, requirement, meta = {}) {
+  const key = normalizeRoleKey(role);
+  if (!key || !requirement || requirement.length < 20) return;
+  const existing = cachedJobRequirements[key];
+  if (existing && existing.requirement && existing.requirement.length >= requirement.length) return;
+  const item = {
+    role,
+    requirement: requirement.slice(0, 12000),
+    source: meta.source || 'BOSS直聘',
+    accountName: meta.accountName || '',
+    sourceUrl: meta.sourceUrl || window.location.href,
+    updatedAt: new Date().toISOString(),
+  };
+  cachedJobRequirements[key] = item;
+  chrome.storage.local.set({ jobRequirements: cachedJobRequirements });
+  chrome.runtime.sendMessage({
+    action: 'syncJobRequirementToBackend',
+    jobRequirement: item,
+  }).catch(() => {});
+}
+
+function extractJobRequirementFromPage(card, role) {
+  const selectors = [
+    '[class*="job-detail"]',
+    '[class*="job-desc"]',
+    '[class*="job-require"]',
+    '[class*="requirement"]',
+    '[class*="position-detail"]',
+    '[class*="detail-content"]',
+    '[class*="jd"]',
+  ];
+  const scoped = extractTextLong(card, selectors);
+  if (looksLikeJobRequirement(scoped)) return scoped;
+
+  const bodyText = normalizeText(document.body.textContent || '');
+  const roleText = normalizeText(role || '');
+  if (!roleText || !bodyText.includes(roleText)) return '';
+  const roleIndex = bodyText.indexOf(roleText);
+  const windowText = bodyText.slice(Math.max(0, roleIndex - 500), roleIndex + 3500);
+  const markerMatch = windowText.match(/(岗位职责|职位描述|职位详情|任职要求|岗位要求|工作职责|工作内容)[\s\S]{80,2500}/);
+  if (markerMatch && looksLikeJobRequirement(markerMatch[0])) {
+    return markerMatch[0];
+  }
+  return '';
+}
+
+function extractTextLong(container, selectors) {
+  for (const selector of selectors) {
+    try {
+      const el = container.querySelector(selector) || document.querySelector(selector);
+      if (el) {
+        const text = normalizeText(el.textContent || '');
+        if (text && text.length >= 40 && text.length < 12000) {
+          return text;
+        }
+      }
+    } catch (e) {}
+  }
+  return '';
+}
+
+function looksLikeJobRequirement(text) {
+  return Boolean(text && text.length >= 40 && /(岗位职责|职位描述|任职要求|岗位要求|工作职责|工作内容|经验|学历|技能|熟悉|精通|负责)/.test(text));
 }
 
 function extractText(container, selectors) {
@@ -985,6 +1138,7 @@ function evaluateCandidate(info) {
     info.expectedSalary,
     info.currentCompany,
     info.summary,
+    info.jobRequirement,
     info.rawText,
   ].filter(Boolean).join(' ');
 
@@ -992,12 +1146,15 @@ function evaluateCandidate(info) {
   const skills = evaluateSkillMatch(info, text);
   const projects = evaluateProjectMatch(info, text);
   const salary = evaluateSalaryMatch(info, text);
-  const score = hard.score + skills.score + projects.score + salary.score;
+  const jd = evaluateJobRequirementMatch(info);
+  const baseScore = hard.score + skills.score + projects.score + salary.score;
+  const score = Math.max(0, Math.min(100, baseScore + jd.scoreAdjustment));
   const risks = [
     ...hard.risks,
     ...skills.risks,
     ...projects.risks,
     ...salary.risks,
+    ...jd.risks,
     ...detectGeneralRisks(text),
   ];
   const strengths = [
@@ -1005,6 +1162,7 @@ function evaluateCandidate(info) {
     ...skills.strengths,
     ...projects.strengths,
     ...salary.strengths,
+    ...jd.strengths,
   ];
 
   let recommendation = '不推荐';
@@ -1035,11 +1193,67 @@ function evaluateCandidate(info) {
       skills,
       projects,
       salary,
+      jd,
     },
     strengths: strengths.slice(0, 5),
     risks: risks.slice(0, 5),
+    rejectionReasons: buildRejectionReasons({ hard, skills, projects, salary, jd, risks }),
     generatedAt: new Date().toISOString(),
   };
+}
+
+function evaluateJobRequirementMatch(info) {
+  const jd = normalizeText(info.jobRequirement || '');
+  if (!jd) {
+    return {
+      scoreAdjustment: 0,
+      match: 'partial',
+      strengths: [],
+      risks: ['未抓取到岗位JD，当前评估未能按岗位专属要求校准'],
+      matched: [],
+      missing: [],
+    };
+  }
+  const resumeText = normalizeText([
+    info.education,
+    info.experience,
+    info.currentCompany,
+    info.summary,
+    info.rawText,
+  ].filter(Boolean).join(' '));
+  const requiredKeywords = extractRequirementKeywords(jd);
+  const matched = requiredKeywords.filter(keyword => resumeText.toLowerCase().includes(keyword.toLowerCase()));
+  const missing = requiredKeywords.filter(keyword => !matched.includes(keyword));
+  const ratio = requiredKeywords.length ? matched.length / requiredKeywords.length : 0;
+  const scoreAdjustment = ratio >= 0.6 ? 6 : ratio >= 0.35 ? 0 : -8;
+  return {
+    scoreAdjustment,
+    match: ratio >= 0.6 ? 'match' : ratio >= 0.35 ? 'partial' : 'weak',
+    strengths: matched.length ? [`岗位JD关键词匹配：${matched.slice(0, 8).join('、')}`] : [],
+    risks: missing.length ? [`岗位JD关键要求未体现：${missing.slice(0, 8).join('、')}`] : [],
+    matched,
+    missing,
+  };
+}
+
+function extractRequirementKeywords(jd) {
+  const keywords = [
+    ...SKILL_KEYWORDS,
+    '本科', '硕士', '博士', '统招', '计算机', '3年', '5年', '8年',
+    '管理', '团队', '架构设计', '高并发', '分布式', '云原生', 'AI', '大模型',
+    '数据分析', '项目管理', '沟通', '跨部门',
+  ];
+  return [...new Set(keywords.filter(keyword => jd.toLowerCase().includes(keyword.toLowerCase())))].slice(0, 16);
+}
+
+function buildRejectionReasons({ hard, skills, projects, salary, jd, risks }) {
+  const reasons = [];
+  if (hard.match === 'weak') reasons.push(`硬性条件不足：${hard.risks[0] || '学历、年限或专业信息未满足要求'}`);
+  if (skills.match === 'weak') reasons.push(`技能匹配不足：${skills.risks[0] || '核心技能关键词不足'}`);
+  if (projects.match === 'weak') reasons.push(`项目经验不足：${projects.risks[0] || '缺少相关项目职责或成果'}`);
+  if (salary.match === 'weak') reasons.push(`薪资匹配风险：${salary.risks[0] || '薪资期望需确认'}`);
+  if (jd.match === 'weak') reasons.push(`岗位JD匹配不足：${jd.risks[0] || '简历未体现岗位关键要求'}`);
+  return (reasons.length ? reasons : risks.slice(0, 3).map(item => `风险项：${item}`)).slice(0, 5);
 }
 
 function evaluateHardConditions(info, text) {
@@ -1661,6 +1875,8 @@ async function pushCandidateRecommendation(resumeInfo) {
       strengths: resumeInfo.evaluation.strengths,
       risks: resumeInfo.evaluation.risks,
       sourceUrl: resumeInfo.sourceUrl,
+      jobRequirement: resumeInfo.jobRequirement || '',
+      rejectionReasons: resumeInfo.evaluation.rejectionReasons || [],
       pushedAt: new Date().toISOString(),
     };
 
@@ -1716,6 +1932,7 @@ function buildCandidateReport(info) {
     `| 期望薪资 | ${info.expectedSalary || '未识别'} |`,
     `| 数据来源 | ${info.source || info.accountPlatform || 'BOSS直聘'} |`,
     `| 账号信息 | ${info.accountName || '未配置'} |`,
+    `| 岗位要求 | ${info.jobRequirement ? info.jobRequirement.slice(0, 120) : '未抓取到岗位JD'} |`,
     '',
     '### 匹配度分析',
     '| 要求项 | 权重 | 匹配情况 | 候选人条件 |',
@@ -1724,6 +1941,7 @@ function buildCandidateReport(info) {
     `| 技术栈 | 30% | ${mark[dimensions.skills?.match] || '⚠️'} | ${(dimensions.skills?.matchedKeywords || []).slice(0, 8).join('、') || '待确认'} |`,
     `| 项目经验 | 30% | ${mark[dimensions.projects?.match] || '⚠️'} | ${info.summary || '待确认项目深度'} |`,
     `| 薪资期望 | 20% | ${mark[dimensions.salary?.match] || '⚠️'} | ${info.expectedSalary || '待沟通'} |`,
+    `| 岗位JD匹配 | 校准项 | ${mark[dimensions.jd?.match] || '⚠️'} | 匹配：${(dimensions.jd?.matched || []).slice(0, 6).join('、') || '暂无'}；缺失：${(dimensions.jd?.missing || []).slice(0, 6).join('、') || '暂无'} |`,
     '',
     `**综合匹配度：${stars} (${evaluation.score}%)**`,
     '',
@@ -1735,6 +1953,11 @@ function buildCandidateReport(info) {
     '',
     '### 推荐意见',
     `**${evaluation.recommendation}**`,
+    ...(evaluation.recommendation === '不推荐' ? [
+      '',
+      '### 不推荐依据',
+      ...(evaluation.rejectionReasons?.length ? evaluation.rejectionReasons.map(item => `- ${item}`) : ['- 综合匹配度低于推荐阈值，且岗位关键要求体现不足']),
+    ] : []),
     '',
     '### 下一步行动建议',
     `- [ ] ${evaluation.nextStep}`,

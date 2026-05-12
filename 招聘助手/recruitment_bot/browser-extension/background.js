@@ -580,6 +580,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'syncJobRequirementToBackend') {
+    syncToBackend('/api/job-requirements', message.jobRequirement || {})
+      .then(sendResponse)
+      .catch(err => sendResponse({ success: false, message: err.message }));
+    return true;
+  }
+
   if (message.action === 'detectedAccountUpdated') {
     const accountInfo = message.accountInfo || {};
     chrome.storage.local.get(['settings'], ({ settings = DEFAULT_SETTINGS }) => {

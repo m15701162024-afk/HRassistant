@@ -257,6 +257,7 @@
       <div class="tabs">
         <button class="tab active" data-tab="recommendations">推荐候选人</button>
         <button class="tab" data-tab="candidates">候选人历史</button>
+        <button class="tab" data-tab="jobs">岗位要求库</button>
         <button class="tab" data-tab="reports">推荐报告</button>
       </div>
 
@@ -295,6 +296,7 @@
                 <th>推荐</th>
                 <th>来源</th>
                 <th>账号</th>
+                <th>详情</th>
               </tr>
             </thead>
             <tbody id="candidateRows"></tbody>
@@ -304,6 +306,10 @@
 
       <div id="reportsTab" class="tab-panel">
         <div id="reportList" class="reports"></div>
+      </div>
+
+      <div id="jobsTab" class="tab-panel">
+        <div id="jobRequirementList" class="reports"></div>
       </div>
     </section>
   </main>

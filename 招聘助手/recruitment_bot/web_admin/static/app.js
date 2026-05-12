@@ -6,6 +6,7 @@ const state = {
   candidates: [],
   recommendations: [],
   reports: [],
+  jobRequirements: [],
   conversations: [],
   behaviorPolicy: {},
   filters: {
@@ -248,17 +249,19 @@ async function toggleSchedule() {
 async function loadData() {
   const qs = queryString();
   const suffix = qs ? `&${qs}` : '';
-  const [stats, candidates, recommendations, reports] = await Promise.all([
+  const [stats, candidates, recommendations, reports, jobs] = await Promise.all([
     api('/api/stats'),
     api(`/api/candidates?limit=500${suffix}`),
     api(`/api/recommendations?limit=500${suffix}`),
     api(`/api/reports?limit=200${state.filters.q ? `&q=${encodeURIComponent(state.filters.q)}` : ''}`),
+    api(`/api/job-requirements?limit=200${state.filters.q ? `&q=${encodeURIComponent(state.filters.q)}` : ''}`),
   ]);
 
   state.stats = stats;
   state.candidates = candidates.items || [];
   state.recommendations = recommendations.items || [];
   state.reports = reports.items || [];
+  state.jobRequirements = jobs.items || [];
 
   renderStats();
   renderBreakdowns();
@@ -323,18 +326,21 @@ function renderBreakdown(items) {
 }
 
 function renderTables() {
-  $('candidateRows').innerHTML = state.candidates.map(item => row([
-    item.received_date,
-    item.name,
-    item.role,
-    item.education,
-    item.experience,
-    item.expected_salary,
-    `${item.score || 0}%`,
-    item.recommendation,
-    item.source,
-    item.account_name,
-  ])).join('') || row(['-', '暂无数据', '-', '-', '-', '-', '-', '-', '-', '-']);
+  $('candidateRows').innerHTML = state.candidates.map((item, index) => `
+    <tr>
+      <td>${escapeHtml(item.received_date)}</td>
+      <td>${escapeHtml(item.name)}</td>
+      <td>${escapeHtml(item.role)}</td>
+      <td>${escapeHtml(item.education)}</td>
+      <td>${escapeHtml(item.experience)}</td>
+      <td>${escapeHtml(item.expected_salary)}</td>
+      <td>${escapeHtml(`${item.score || 0}%`)}</td>
+      <td>${escapeHtml(item.recommendation)}</td>
+      <td>${escapeHtml(item.source)}</td>
+      <td>${escapeHtml(item.account_name)}</td>
+      <td><button class="secondary small" data-candidate-index="${index}">查看</button></td>
+    </tr>
+  `).join('') || row(['-', '暂无数据', '-', '-', '-', '-', '-', '-', '-', '-', '-']);
 
   $('recommendationRows').innerHTML = state.recommendations.map(item => row([
     item.name,
@@ -363,6 +369,62 @@ function renderTables() {
       openDialog(`${item.name || '候选人'} - ${item.role || '待确认'}`, item.report || '');
     });
   });
+
+  document.querySelectorAll('[data-candidate-index]').forEach(button => {
+    button.addEventListener('click', () => {
+      const item = state.candidates[Number(button.dataset.candidateIndex)];
+      openDialog(`${item.name || '候选人'} - ${item.role || '待确认'}`, buildCandidateDetail(item));
+    });
+  });
+
+  $('jobRequirementList').innerHTML = state.jobRequirements.slice(0, 100).map((item, index) => `
+    <article class="report">
+      <div>
+        <h3>${escapeHtml(item.role || '未识别岗位')}</h3>
+        <p>${escapeHtml(item.source || '')}｜${escapeHtml(item.account_name || '')}｜${escapeHtml(item.updated_at || '')}</p>
+      </div>
+      <button class="secondary small" data-job-index="${index}">查看要求</button>
+    </article>
+  `).join('') || '<p class="empty">暂无岗位要求。插件首次遇到新岗位时会尝试打开职位详情并保存。</p>';
+
+  document.querySelectorAll('[data-job-index]').forEach(button => {
+    button.addEventListener('click', () => {
+      const item = state.jobRequirements[Number(button.dataset.jobIndex)];
+      openDialog(`${item.role || '岗位要求'}`, item.requirement || '');
+    });
+  });
+}
+
+function buildCandidateDetail(item) {
+  let raw = {};
+  try {
+    raw = JSON.parse(item.raw_json || '{}');
+  } catch (err) {
+    raw = {};
+  }
+  const evaluation = raw.evaluation || {};
+  const dimensions = evaluation.dimensions || {};
+  const rejectionReasons = evaluation.rejectionReasons || [];
+  return [
+    `姓名：${item.name || '未识别'}`,
+    `岗位：${item.role || '待确认'}`,
+    `匹配度：${item.score || 0}%`,
+    `推荐意见：${item.recommendation || '待评估'}`,
+    `数据来源：${item.source || '未知'}｜账号：${item.account_name || '未识别'}`,
+    '',
+    '岗位要求：',
+    raw.jobRequirement || '未抓取到岗位JD',
+    '',
+    '不推荐/风险依据：',
+    ...(rejectionReasons.length ? rejectionReasons.map(item => `- ${item}`) : (evaluation.risks || []).map(item => `- ${item}`)),
+    '',
+    '评分维度：',
+    `- 硬性条件：${dimensions.hard?.score ?? '-'} / ${dimensions.hard?.max ?? '-'}`,
+    `- 技能匹配：${dimensions.skills?.score ?? '-'} / ${dimensions.skills?.max ?? '-'}`,
+    `- 项目经验：${dimensions.projects?.score ?? '-'} / ${dimensions.projects?.max ?? '-'}`,
+    `- 薪资匹配：${dimensions.salary?.score ?? '-'} / ${dimensions.salary?.max ?? '-'}`,
+    `- 岗位JD：${dimensions.jd?.match || '未评估'}，匹配 ${dimensions.jd?.matched?.join('、') || '暂无'}，缺失 ${dimensions.jd?.missing?.join('、') || '暂无'}`,
+  ].join('\n');
 }
 
 function applyFilters() {

@@ -23,6 +23,7 @@ import time
 import urllib.parse
 import urllib.request
 import threading
+import uuid
 from datetime import datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -148,6 +149,19 @@ def init_db() -> None:
                 raw_json TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS job_requirements (
+                id TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                normalized_role TEXT NOT NULL UNIQUE,
+                source TEXT,
+                account_name TEXT,
+                requirement TEXT NOT NULL,
+                source_url TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
 
@@ -226,6 +240,75 @@ def upsert_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "id": candidate_id}
 
 
+def normalize_role(role: str) -> str:
+    return "".join(str(role or "").lower().split())
+
+
+def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
+    role = str(payload.get("role") or "").strip()
+    requirement = str(payload.get("requirement") or payload.get("jobRequirement") or "").strip()
+    if not role:
+        return {"success": False, "message": "岗位名称不能为空"}
+    if not requirement or len(requirement) < 20:
+        return {"success": False, "message": "岗位要求内容过短，未保存"}
+    normalized = normalize_role(role)
+    item_id = hashlib.sha1(normalized.encode()).hexdigest()
+    now = now_iso()
+    with connect() as conn:
+        existing = conn.execute(
+            "SELECT created_at FROM job_requirements WHERE normalized_role = ?",
+            (normalized,),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO job_requirements
+            (id, role, normalized_role, source, account_name, requirement, source_url, raw_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item_id,
+                role,
+                normalized,
+                payload.get("source", ""),
+                payload.get("accountName", ""),
+                requirement[:12000],
+                payload.get("sourceUrl", ""),
+                json.dumps(payload, ensure_ascii=False),
+                existing["created_at"] if existing else now,
+                now,
+            ),
+        )
+    return {"success": True, "id": item_id}
+
+
+def get_job_requirement(role: str) -> dict[str, Any] | None:
+    normalized = normalize_role(role)
+    if not normalized:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM job_requirements WHERE normalized_role = ?",
+            (normalized,),
+        ).fetchone()
+        if row:
+            return dict(row)
+        loose = conn.execute(
+            "SELECT * FROM job_requirements WHERE normalized_role LIKE ? OR ? LIKE '%' || normalized_role || '%' ORDER BY updated_at DESC LIMIT 1",
+            (f"%{normalized}%", normalized),
+        ).fetchone()
+        return dict(loose) if loose else None
+
+
+def list_job_requirements(limit: int = 200) -> list[dict[str, Any]]:
+    with connect() as conn:
+        return [
+            dict(row) for row in conn.execute(
+                "SELECT * FROM job_requirements ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        ]
+
+
 def save_recommendation(candidate: dict[str, Any], report: str = "") -> dict[str, Any]:
     candidate_id = str(candidate.get("id") or candidate.get("candidate_id") or hashlib.sha1(json.dumps(candidate, ensure_ascii=False).encode()).hexdigest())
     rec_id = hashlib.sha1(f"{candidate_id}:{candidate.get('pushedAt') or now_iso()}".encode()).hexdigest()
@@ -270,7 +353,7 @@ def list_rows(
     date_value: str | None = None,
     filters: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    allowed = {"candidates", "recommendations", "reports"}
+    allowed = {"candidates", "recommendations", "reports", "job_requirements"}
     if table not in allowed:
         raise ValueError("invalid table")
     sql = f"SELECT * FROM {table}"
@@ -288,6 +371,7 @@ def list_rows(
             "candidates": ["name", "role", "education", "experience", "expected_salary", "recommendation", "raw_json"],
             "recommendations": ["name", "role", "recommendation", "next_step", "raw_json"],
             "reports": ["name", "role", "report"],
+            "job_requirements": ["role", "requirement", "source", "account_name"],
         }[table]
         where.append("(" + " OR ".join(f"{field} LIKE ?" for field in searchable) + ")")
         params.extend([f"%{q}%"] * len(searchable))
@@ -368,7 +452,7 @@ def save_agent_conversation(
     sender: str = "",
     raw: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    item_id = hashlib.sha1(f"{channel}:{sender}:{question}:{now_iso()}".encode()).hexdigest()
+    item_id = uuid.uuid4().hex
     with connect() as conn:
         conn.execute(
             """
@@ -403,6 +487,7 @@ def build_llm_history_context(question: str, max_items: int = 80) -> str:
     candidates = list_rows("candidates", limit=max_items)
     recommendations = list_rows("recommendations", limit=max_items)
     reports = list_rows("reports", limit=max(20, min(max_items, 80)))
+    job_requirements = list_job_requirements(limit=200)
     stats = get_stats()
     parts = [
         "【统计概览】",
@@ -426,6 +511,10 @@ def build_llm_history_context(question: str, max_items: int = 80) -> str:
     for idx, item in enumerate(reports[:30], 1):
         report = str(item.get("report") or "").replace("\n", " ")
         parts.append(f"{idx}. {item.get('name','')}｜{item.get('role','')}｜{report[:900]}")
+    parts.extend(["", "【岗位要求库】"])
+    for idx, item in enumerate(job_requirements[:80], 1):
+        requirement = str(item.get("requirement") or "").replace("\n", " ")
+        parts.append(f"{idx}. 岗位:{item.get('role','')}｜来源:{item.get('source','')}｜账号:{item.get('account_name','')}｜要求:{requirement[:900]}")
     return "\n".join(parts)[:24000]
 
 
@@ -461,8 +550,17 @@ def call_llm_chat(question: str, context: str) -> str:
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        body = json.loads(response.read().decode("utf-8") or "{}")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = json.loads(response.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        if exc.code == 403:
+            raise RuntimeError(
+                "大模型 API 返回 403 Forbidden。请检查 API Key 是否有权限、Base URL 是否正确、模型名是否在该服务开通。"
+                f" 服务返回：{detail}"
+            )
+        raise RuntimeError(f"大模型 API HTTP {exc.code}: {detail}")
     choices = body.get("choices") or []
     if not choices:
         raise RuntimeError("大模型 API 未返回 choices")
@@ -845,7 +943,19 @@ def answer_question_rules(question: str) -> str:
         f"{idx + 1}. {row.get('name','未识别')}｜{row.get('role','待确认')}｜{row.get('score',0)}%｜{row.get('recommendation','待评估')}｜{row.get('source','未知来源')}｜{row.get('account_name','未识别')}"
         for idx, row in enumerate(rows[:10])
     ]
-    return f"### 招聘助手答复\n\n查询范围：{scope_label}\n\n" + "\n".join(lines)
+    role_requirements = []
+    seen_roles = set()
+    for row in rows[:5]:
+        role = row.get("role") or ""
+        normalized = normalize_role(role)
+        if not normalized or normalized in seen_roles:
+            continue
+        seen_roles.add(normalized)
+        requirement = get_job_requirement(role)
+        if requirement:
+            role_requirements.append(f"- {role}：{str(requirement.get('requirement') or '')[:180]}")
+    requirement_text = "\n\n岗位要求依据：\n" + "\n".join(role_requirements) if role_requirements else ""
+    return f"### 招聘助手答复\n\n查询范围：{scope_label}\n\n" + "\n".join(lines) + requirement_text
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -891,6 +1001,14 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, {"items": list_rows("reports", int(query.get("limit", ["100"])[0]), filters={
                     "q": query.get("q", [""])[0],
                 })})
+            elif parsed.path == "/api/job-requirements":
+                role = query.get("role", [""])[0]
+                if role:
+                    json_response(self, {"item": get_job_requirement(role)})
+                else:
+                    json_response(self, {"items": list_rows("job_requirements", int(query.get("limit", ["200"])[0]), filters={
+                        "q": query.get("q", [""])[0],
+                    })})
             elif parsed.path == "/api/agent/conversations":
                 json_response(self, {"items": list_agent_conversations(int(query.get("limit", ["100"])[0]))})
             elif parsed.path == "/api/summary":
@@ -913,7 +1031,6 @@ class Handler(SimpleHTTPRequestHandler):
                     ("recommendation", "推荐意见"),
                     ("source", "数据来源"),
                     ("account_name", "账号信息"),
-                    ("source_url", "来源链接"),
                     ("created_at", "创建时间"),
                 ]), content_type="text/csv; charset=utf-8", filename="candidates.csv")
             elif parsed.path == "/api/export/recommendations.csv":
@@ -951,6 +1068,8 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, upsert_candidate(payload))
             elif parsed.path == "/api/recommendations":
                 json_response(self, save_recommendation(payload.get("candidate", payload), payload.get("report", "")))
+            elif parsed.path == "/api/job-requirements":
+                json_response(self, upsert_job_requirement(payload))
             elif parsed.path == "/api/agent/ask":
                 answer, agent_meta = answer_question_with_agent(str(payload.get("question", "")))
                 save_agent_conversation(
