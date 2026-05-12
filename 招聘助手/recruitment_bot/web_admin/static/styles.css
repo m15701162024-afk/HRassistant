@@ -45,6 +45,43 @@ main {
   padding: 0 18px;
 }
 
+.module-nav {
+  display: flex;
+  gap: 8px;
+  max-width: 1320px;
+  margin: 14px auto 0;
+  padding: 0 18px;
+  overflow-x: auto;
+}
+
+.module-tab {
+  background: #fff;
+  color: var(--text);
+  border-color: var(--line);
+}
+
+.module-tab.active {
+  background: var(--brand);
+  color: var(--brand-ink);
+  border-color: #111827;
+}
+
+.module-section {
+  display: none;
+}
+
+.module-section.active {
+  display: grid;
+}
+
+.panel.module-section.active {
+  display: block;
+}
+
+.toolbar.module-section.active {
+  display: grid;
+}
+
 button {
   border: 1px solid transparent;
   border-radius: 6px;

@@ -18,8 +18,16 @@
     </div>
   </header>
 
+  <nav class="module-nav" aria-label="后台模块">
+    <button class="module-tab active" data-module="overview">总览</button>
+    <button class="module-tab" data-module="data">候选人与岗位</button>
+    <button class="module-tab" data-module="automation">自动化策略</button>
+    <button class="module-tab" data-module="qa">问答 Agent</button>
+    <button class="module-tab" data-module="settings">系统配置</button>
+  </nav>
+
   <main>
-    <section class="toolbar">
+    <section class="toolbar module-section" data-module="data">
       <div class="search-box">
         <input id="searchInput" type="search" placeholder="搜索姓名、岗位、技能、推荐意见" />
         <input id="sourceFilter" type="search" placeholder="数据来源" />
@@ -33,7 +41,7 @@
       </div>
     </section>
 
-    <section class="panel connection-panel">
+    <section class="panel connection-panel module-section" data-module="settings">
       <div class="panel-title">
         <h2>后端连接</h2>
         <span id="apiBaseHint">自动识别</span>
@@ -46,7 +54,7 @@
       <p class="hint">如果你是直接打开 HTML 文件，请先启动 Web 后端，并将这里设置为 <code>http://127.0.0.1:8787</code>。</p>
     </section>
 
-    <section class="stats-grid">
+    <section class="stats-grid module-section active" data-module="overview">
       <article><span>历史候选人</span><strong id="candidateCount">0</strong></article>
       <article><span>今日新增</span><strong id="todayCount">0</strong></article>
       <article><span>昨日新增</span><strong id="yesterdayCount">0</strong></article>
@@ -55,7 +63,7 @@
       <article><span>报告数量</span><strong id="reportCount">0</strong></article>
     </section>
 
-    <section class="dashboard-grid">
+    <section class="dashboard-grid module-section active" data-module="overview">
       <article class="panel">
         <div class="panel-title">
           <h2>数据来源</h2>
@@ -81,7 +89,7 @@
       </article>
     </section>
 
-    <section class="panel">
+    <section class="panel module-section" data-module="settings">
       <div class="panel-title">
         <h2>钉钉与推送</h2>
         <span id="scheduleStatus" class="badge">未开启</span>
@@ -117,7 +125,7 @@
       <p class="hint">钉钉机器人回调地址：<code id="callbackUrl"></code></p>
     </section>
 
-    <section class="panel">
+    <section class="panel module-section" data-module="settings">
       <div class="panel-title">
         <h2>大模型 API</h2>
         <span id="llmStatus" class="badge">未启用</span>
@@ -185,7 +193,7 @@
       <p class="hint">OpenAI、千问、阿里云百炼、硅基流动、DeepSeek 使用 OpenAI-compatible Chat Completions；Claude 使用 Anthropic Messages。钉钉机器人提问时会检索历史数据后调用模型，调用失败时自动使用本地规则回答。</p>
     </section>
 
-    <section class="panel">
+    <section class="panel module-section" data-module="automation">
       <div class="panel-title">
         <h2>操作节奏策略</h2>
         <span id="behaviorStatus" class="badge">未加载</span>
@@ -281,7 +289,7 @@
       <p class="hint">该策略用于降低误操作和过快操作风险，插件会从后端同步随机间隔、停留时间、滚动节奏和操作上限。</p>
     </section>
 
-    <section class="panel">
+    <section class="panel module-section" data-module="qa">
       <div class="panel-title">
         <h2>问答 Agent</h2>
         <span>基于历史候选人、推荐和报告回答</span>
@@ -299,7 +307,7 @@
       <div id="conversationList" class="conversation-list"></div>
     </section>
 
-    <section class="panel">
+    <section class="panel module-section" data-module="data">
       <div class="tabs">
         <button class="tab active" data-tab="recommendations">推荐候选人</button>
         <button class="tab" data-tab="candidates">候选人历史</button>

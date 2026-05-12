@@ -594,6 +594,15 @@ function showTab(name) {
   });
 }
 
+function showModule(name) {
+  document.querySelectorAll('.module-tab').forEach(tab => {
+    tab.classList.toggle('active', tab.dataset.module === name);
+  });
+  document.querySelectorAll('.module-section').forEach(section => {
+    section.classList.toggle('active', section.dataset.module === name);
+  });
+}
+
 function showError(err) {
   toast(err.message || '操作失败', 'danger');
   $('answerBox').textContent = `操作失败：${err.message}`;
@@ -641,6 +650,9 @@ function bindEvents() {
   });
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => showTab(tab.dataset.tab));
+  });
+  document.querySelectorAll('.module-tab').forEach(tab => {
+    tab.addEventListener('click', () => showModule(tab.dataset.module));
   });
 }
 

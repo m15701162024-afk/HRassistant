@@ -549,6 +549,13 @@ async function getDashboard() {
 // ============================================================
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'startRecruitmentWorkflow') {
+    startRecruitmentWorkflowInBossTab(message.maxCandidates || 20)
+      .then(sendResponse)
+      .catch(err => sendResponse({ success: false, message: err.message }));
+    return true;
+  }
+
   if (message.action === 'showNotification') {
     showNotification(message.text);
     sendResponse({ success: true });
@@ -718,5 +725,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 });
+
+async function startRecruitmentWorkflowInBossTab(maxCandidates = 20) {
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tabs = [];
+  if (activeTab?.url && /^https:\/\/www\.(boss)?zhipin\.com\//.test(activeTab.url)) {
+    tabs.push(activeTab);
+  }
+  if (!tabs.length) {
+    tabs.push(...await chrome.tabs.query({
+      url: ['https://www.zhipin.com/*', 'https://www.bosszhipin.com/*'],
+    }));
+  }
+  const tab = tabs[0];
+  if (!tab?.id) throw new Error('请先打开 BOSS 直聘沟通页面');
+  await chrome.tabs.update(tab.id, { active: true });
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tab.id, {
+      action: 'startRecruitmentWorkflow',
+      maxCandidates,
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({ success: false, message: '招聘页面未加载插件脚本，请刷新 BOSS 页面后重试' });
+        return;
+      }
+      resolve(response || { success: false, message: '任务未返回结果' });
+    });
+  });
+}
 
 console.log('[招聘助手] 后台服务已启动');

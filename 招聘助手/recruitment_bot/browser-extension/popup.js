@@ -115,16 +115,14 @@ elements.btnStartTask.addEventListener('click', async () => {
   elements.btnStartTask.disabled = true;
   elements.btnStartTask.textContent = '任务执行中...';
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error('未找到当前招聘页面');
-    chrome.tabs.sendMessage(tab.id, {
+    chrome.runtime.sendMessage({
       action: 'startRecruitmentWorkflow',
       maxCandidates: 20,
     }, (response) => {
       elements.btnStartTask.disabled = false;
       elements.btnStartTask.textContent = '一键开始执行任务';
       if (chrome.runtime.lastError) {
-        elements.backendStatus.textContent = '请先打开 BOSS 招聘页面';
+        elements.backendStatus.textContent = chrome.runtime.lastError.message || '任务启动失败';
         elements.backendStatus.classList.remove('ok');
         return;
       }

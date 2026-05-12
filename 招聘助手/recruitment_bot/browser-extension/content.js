@@ -1845,6 +1845,10 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
     return { success: false, message: '任务流程正在执行中' };
   }
 
+  notifyPopup('log', {
+    message: '一键任务已启动，开始检查候选人对话',
+    type: 'info',
+  });
   isBrowsingCandidates = true;
   const summary = {
     success: true,
