@@ -18,6 +18,7 @@ import hmac
 import io
 import json
 import os
+import re
 import sqlite3
 import time
 import urllib.parse
@@ -256,7 +257,53 @@ def read_json(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
     return json.loads(raw or "{}")
 
 
+def normalize_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(candidate or {})
+    name = str(cleaned.get("name") or "").strip()
+    raw_text = " ".join(
+        str(cleaned.get(key) or "")
+        for key in ("rawText", "summary", "jobRequirement")
+    )
+    polluted = looks_like_polluted_candidate(cleaned, raw_text)
+    if is_generic_candidate_name(name):
+        cleaned["name"] = ""
+    if polluted:
+        evaluation = dict(cleaned.get("evaluation") or {})
+        evaluation["score"] = 0
+        evaluation["recommendation"] = "待复核"
+        evaluation["nextStep"] = "数据采集范围异常，请重新打开候选人详情后采集"
+        cleaned["evaluation"] = evaluation
+        cleaned["score"] = 0
+        cleaned["recommendation"] = "待复核"
+        cleaned["_invalidRecommendation"] = True
+        cleaned["_invalidReason"] = "候选人详情采集混入列表或整页文本，已阻止进入推荐报告"
+    return cleaned
+
+
+def is_generic_candidate_name(name: str) -> bool:
+    return name in {"候选人", "牛人", "求职者", "用户", "先生", "女士"}
+
+
+def looks_like_polluted_candidate(candidate: dict[str, Any], raw_text: str) -> bool:
+    name = str(candidate.get("name") or "").strip()
+    role = str(candidate.get("role") or "")
+    candidate_id = str(candidate.get("id") or candidate.get("candidate_id") or "")
+    text = raw_text or ""
+    if not text:
+        return is_generic_candidate_name(name) and candidate_id.startswith("chat_")
+    page_markers = sum(1 for marker in ["全部职位", "新招呼", "沟通中", "账号权益", "招聘规范", "职位管理"] if marker in text)
+    repeated_roles = len(set(re.findall(r"[\u4e00-\u9fa5A-Za-z/+-]+(?:工程师|分析|开发|产品|运营)[^\s，。|]{0,18}\(J\d+\)", text)))
+    if is_generic_candidate_name(name) and (page_markers >= 2 or repeated_roles >= 3):
+        return True
+    if is_generic_candidate_name(name) and candidate_id.startswith("chat_"):
+        return True
+    if role and repeated_roles >= 6 and page_markers >= 2:
+        return True
+    return False
+
+
 def upsert_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    candidate = normalize_candidate_payload(candidate)
     candidate_id = str(candidate.get("id") or hashlib.sha1(json.dumps(candidate, ensure_ascii=False).encode()).hexdigest())
     evaluation = candidate.get("evaluation") or {}
     with connect() as conn:
@@ -466,8 +513,12 @@ def match_candidates_with_job_requirements(role: str = "") -> dict[str, Any]:
 
 
 def save_recommendation(candidate: dict[str, Any], report: str = "") -> dict[str, Any]:
+    candidate = normalize_candidate_payload(candidate)
+    if candidate.get("_invalidRecommendation"):
+        return {"success": False, "message": candidate.get("_invalidReason", "候选人数据异常，已跳过推荐")}
     candidate_id = str(candidate.get("id") or candidate.get("candidate_id") or hashlib.sha1(json.dumps(candidate, ensure_ascii=False).encode()).hexdigest())
     rec_id = hashlib.sha1(f"{candidate_id}:{candidate.get('pushedAt') or now_iso()}".encode()).hexdigest()
+    created_at = candidate.get("pushedAt") or now_iso()
     with connect() as conn:
         conn.execute(
             """
@@ -486,7 +537,7 @@ def save_recommendation(candidate: dict[str, Any], report: str = "") -> dict[str
                 candidate.get("recommendation", ""),
                 candidate.get("nextStep", ""),
                 json.dumps(candidate, ensure_ascii=False),
-                candidate.get("pushedAt") or now_iso(),
+                created_at,
             ),
         )
         if report:
@@ -497,7 +548,7 @@ def save_recommendation(candidate: dict[str, Any], report: str = "") -> dict[str
                 (id, candidate_id, name, role, report, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (report_id, candidate_id, candidate.get("name", ""), candidate.get("role", ""), report, now_iso()),
+                (report_id, candidate_id, candidate.get("name", ""), candidate.get("role", ""), report, created_at),
             )
     return {"success": True, "id": rec_id}
 
@@ -543,6 +594,35 @@ def list_rows(
     params.append(limit)
     with connect() as conn:
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def list_recommendation_details(limit: int = 1000, date_value: str | None = None) -> list[dict[str, Any]]:
+    where = []
+    params: list[Any] = []
+    if date_value:
+        where.append("r.created_at LIKE ?")
+        params.append(f"{date_value}%")
+    sql = """
+        SELECT
+            r.*,
+            COALESCE(NULLIF(c.education, ''), '') AS education,
+            COALESCE(NULLIF(c.experience, ''), '') AS experience,
+            COALESCE(NULLIF(c.expected_salary, ''), '') AS expected_salary,
+            COALESCE(NULLIF(c.source, ''), r.source) AS merged_source,
+            COALESCE(NULLIF(c.account_name, ''), r.account_name) AS merged_account_name
+        FROM recommendations r
+        LEFT JOIN candidates c ON c.id = r.candidate_id
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY r.score DESC, r.created_at DESC LIMIT ?"
+    params.append(limit)
+    with connect() as conn:
+        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+    for row in rows:
+        row["source"] = row.get("merged_source") or row.get("source") or ""
+        row["account_name"] = row.get("merged_account_name") or row.get("account_name") or ""
+    return rows
 
 
 def get_stats() -> dict[str, Any]:
@@ -1130,10 +1210,11 @@ def markdown_cell(value: Any) -> str:
 def build_summary(scope: str = "all") -> str:
     target_date = date_str(-1) if scope == "yesterday" else None
     candidates = list_rows("candidates", limit=1000, date_field="received_date", date_value=target_date)
-    recommendations = list_rows("recommendations", limit=1000, date_field="created_at", date_value=target_date)
+    recommendations = list_recommendation_details(limit=1000, date_value=target_date)
     title_date = target_date or "全部历史"
+    period_label = "昨日" if target_date else "历史"
     recommended_candidates = [
-        item for item in candidates
+        item for item in recommendations
         if int(item.get("score") or 0) >= 60 or str(item.get("recommendation") or "") in {"推荐", "强烈推荐"}
     ]
     account_names = sorted({
@@ -1168,13 +1249,13 @@ def build_summary(scope: str = "all") -> str:
             f"### {title_date} 招聘数据汇总",
             "",
             "#### 定时推送",
-            f"昨日新增：全部 {len(candidates)}",
-            *account_lines(candidates, "昨日新增"),
+            f"{period_label}新增：全部 {len(candidates)}",
+            *account_lines(candidates, f"{period_label}新增"),
             "",
-            f"昨日收到简历数量：全部 {len(received_candidates)}",
-            *account_lines(received_candidates, "昨日收到简历数量"),
+            f"{period_label}收到简历数量：全部 {len(received_candidates)}",
+            *account_lines(received_candidates, f"{period_label}收到简历数量"),
             "",
-            f"昨日推荐候选人：全部 {len(recommended_candidates)}",
+            f"{period_label}推荐候选人：全部 {len(recommended_candidates)}",
             *account_lines(recommended_candidates, "推荐候选人"),
             "",
             f"数据来源：{source_text}",

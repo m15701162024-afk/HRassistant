@@ -1163,7 +1163,7 @@ function extractJobRequirementFromPage(card, role) {
     '[class*="detail-content"]',
     '[class*="jd"]',
   ];
-  const scoped = extractTextLong(card, selectors);
+  const scoped = extractTextLong(card, selectors, { includeDocumentFallback: card === document.body || card === document });
   if (looksLikeJobRequirement(scoped)) return scoped;
 
   const bodyText = normalizeText(document.body.textContent || '');
@@ -1171,6 +1171,9 @@ function extractJobRequirementFromPage(card, role) {
   if (!roleText || !bodyText.includes(roleText)) return '';
   const roleIndex = bodyText.indexOf(roleText);
   const windowText = bodyText.slice(Math.max(0, roleIndex - 500), roleIndex + 3500);
+  if (/新招呼|沟通中|全部职位|账号权益|招聘规范/.test(windowText) && !/(岗位职责|职位描述|职位详情|任职要求|岗位要求|工作职责|工作内容)/.test(windowText)) {
+    return '';
+  }
   const markerMatch = windowText.match(/(岗位职责|职位描述|职位详情|任职要求|岗位要求|工作职责|工作内容)[\s\S]{80,2500}/);
   if (markerMatch && looksLikeJobRequirement(markerMatch[0])) {
     return markerMatch[0];
@@ -1178,10 +1181,11 @@ function extractJobRequirementFromPage(card, role) {
   return '';
 }
 
-function extractTextLong(container, selectors) {
+function extractTextLong(container, selectors, options = {}) {
   for (const selector of selectors) {
     try {
-      const el = container.querySelector(selector) || document.querySelector(selector);
+      const scoped = container?.querySelector ? container.querySelector(selector) : null;
+      const el = scoped || (options.includeDocumentFallback ? document.querySelector(selector) : null);
       if (el) {
         const text = normalizeText(el.textContent || '');
         if (text && text.length >= 40 && text.length < 12000) {
@@ -1194,7 +1198,11 @@ function extractTextLong(container, selectors) {
 }
 
 function looksLikeJobRequirement(text) {
-  return Boolean(text && text.length >= 40 && /(岗位职责|职位描述|任职要求|岗位要求|工作职责|工作内容|经验|学历|技能|熟悉|精通|负责)/.test(text));
+  if (!text || text.length < 40) return false;
+  if (/新招呼|沟通中|账号权益|招聘规范/.test(text) && !/(岗位职责|职位描述|任职要求|岗位要求|工作职责|工作内容)/.test(text)) {
+    return false;
+  }
+  return /(岗位职责|职位描述|任职要求|岗位要求|工作职责|工作内容|经验|学历|技能|熟悉|精通|负责)/.test(text);
 }
 
 function extractText(container, selectors) {
@@ -2112,12 +2120,13 @@ async function openCurrentCandidateDetailFromSummary() {
 }
 
 async function scrapeChatCandidateInfo() {
-  const panel = findCandidateSummaryPanel() || document.body;
+  const panel = findCandidateSummaryPanel();
+  if (!panel) return null;
   const text = normalizeText(panel.textContent || '');
   const bodyText = normalizeText(document.body.textContent || '');
   const role = extractCommunicationRole(bodyText);
   const name = extractChatCandidateName(text, bodyText);
-  if (!name && !role) return null;
+  if (!name || !role) return null;
 
   const resumeInfo = {
     id: `chat_${hashString(`${window.location.pathname}|${name}|${role}|${bodyText.slice(0, 500)}`)}`,
@@ -2130,12 +2139,12 @@ async function scrapeChatCandidateInfo() {
     scrapedAt: new Date().toISOString(),
     accountName: settings.accountName || detectRecruiterAccountInfo().name || '',
     accountPlatform: settings.accountPlatform || 'BOSS直聘',
-    rawText: bodyText.slice(0, 5000),
-    education: extractEducationFromText(text) || extractEducationFromText(bodyText),
-    experience: extractExperienceFromText(text) || extractExperienceFromText(bodyText),
-    expectedSalary: extractExpectedSalaryFromText(bodyText),
+    rawText: text.slice(0, 2500),
+    education: extractEducationFromText(text),
+    experience: extractExperienceFromText(text),
+    expectedSalary: extractExpectedSalaryFromText(text) || extractExpectedSalaryFromText(extractCommunicationRoleContext(bodyText, role)),
     ageGender: extractAgeFromText(text),
-    summary: extractLatestCandidateMessage(bodyText),
+    summary: extractLatestCandidateMessage(bodyText, name),
   };
 
   await ensureChatJobRequirement(resumeInfo);
@@ -2156,6 +2165,7 @@ function findCandidateSummaryPanel() {
     .filter(({ text, rect }) => {
       if (!text || text.length < 12 || text.length > 900) return false;
       if (rect.width < 180 || rect.height < 45) return false;
+      if (/全部职位|新招呼|沟通中|账号权益|招聘规范|职位管理|推荐牛人/.test(text)) return false;
       return /(牛人分析器|在线|岁|年|本科|大专|硕士|博士)/.test(text) && /(J\d+|沟通职位|本科|大专|硕士|博士|年)/.test(text);
     })
     .sort((a, b) => (a.text.length - b.text.length) || (b.rect.width * b.rect.height - a.rect.width * a.rect.height));
@@ -2167,6 +2177,15 @@ function extractCommunicationRole(text) {
   return match ? match[1].trim() : '';
 }
 
+function extractCommunicationRoleContext(text, role) {
+  const normalized = normalizeText(text || '');
+  const roleText = normalizeText(role || '');
+  if (!roleText) return '';
+  const index = normalized.indexOf(roleText);
+  if (index < 0) return '';
+  return normalized.slice(Math.max(0, index - 80), index + 220);
+}
+
 function extractExpectedRole(text) {
   const match = normalizeText(text || '').match(/期望[:：]?\s*([^\s|，,。]+工程师|[^\s|，,。]+分析师|[^\s|，,。]+开发|[^\s|，,。]+运营|[^\s|，,。]+产品)/);
   return match ? match[1].trim() : '';
@@ -2175,9 +2194,15 @@ function extractExpectedRole(text) {
 function extractChatCandidateName(panelText, bodyText) {
   const text = panelText || bodyText || '';
   const match = text.match(/^([\u4e00-\u9fa5]{2,4})\s*(?:[·•]|在线|离线|\d{2}岁)/);
-  if (match) return match[1];
+  if (match && !isGenericCandidateName(match[1])) return match[1];
+  const compactMatch = text.match(/^([\u4e00-\u9fa5]{2,4})\s*(?:[红绿]点|[·•]|\s+)?\s*(?:在线|离线|\d{2}岁)/);
+  if (compactMatch && !isGenericCandidateName(compactMatch[1])) return compactMatch[1];
   const fallback = bodyText.match(/([\u4e00-\u9fa5]{2,4})\s+(?:在线|离线)\s+\d{2}岁/);
-  return fallback ? fallback[1] : '';
+  return fallback && !isGenericCandidateName(fallback[1]) ? fallback[1] : '';
+}
+
+function isGenericCandidateName(name) {
+  return /^(候选人|牛人|求职者|用户|女士|先生)$/.test(normalizeText(name || ''));
 }
 
 function extractEducationFromText(text) {
@@ -2200,8 +2225,15 @@ function extractAgeFromText(text) {
   return match ? match[1].replace(/\s+/g, '') : '';
 }
 
-function extractLatestCandidateMessage(text) {
+function extractLatestCandidateMessage(text, name = '') {
   const normalized = normalizeText(text || '');
+  const nameText = normalizeText(name || '');
+  if (nameText) {
+    const nameIndex = normalized.indexOf(nameText);
+    const scoped = nameIndex >= 0 ? normalized.slice(nameIndex, nameIndex + 900) : normalized;
+    const scopedMatch = scoped.match(/您好[，,][\s\S]{10,260}/);
+    if (scopedMatch) return scopedMatch[0].slice(0, 260);
+  }
   const match = normalized.match(/您好[，,][\s\S]{10,260}/);
   return match ? match[0].slice(0, 260) : '';
 }
