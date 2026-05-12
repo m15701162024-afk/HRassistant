@@ -71,13 +71,58 @@ DEFAULT_BEHAVIOR_POLICY: dict[str, Any] = {
 
 DEFAULT_LLM_CONFIG: dict[str, Any] = {
     "llmEnabled": False,
-    "llmProvider": "openai-compatible",
-    "llmEndpointMode": "auto",
+    "llmProvider": "openai",
+    "llmProtocol": "openai-chat",
     "llmApiBase": "https://api.openai.com/v1",
     "llmModel": "gpt-4o-mini",
     "llmTemperature": 0.2,
     "llmMaxContextItems": 80,
     "llmMaxTokens": 1000,
+}
+
+LLM_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
+    "openai": {
+        "label": "OpenAI",
+        "protocol": "openai-chat",
+        "apiBase": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+    },
+    "claude": {
+        "label": "Claude",
+        "protocol": "anthropic-messages",
+        "apiBase": "https://api.anthropic.com/v1",
+        "model": "claude-opus-4-1-20250805",
+    },
+    "qwen": {
+        "label": "通义千问",
+        "protocol": "openai-chat",
+        "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+    },
+    "aliyun": {
+        "label": "阿里云百炼",
+        "protocol": "openai-chat",
+        "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+    },
+    "siliconflow": {
+        "label": "硅基流动",
+        "protocol": "openai-chat",
+        "apiBase": "https://api.siliconflow.cn/v1",
+        "model": "Qwen/Qwen2.5-72B-Instruct",
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "protocol": "openai-chat",
+        "apiBase": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+    },
+    "custom": {
+        "label": "自定义 OpenAI-compatible",
+        "protocol": "openai-chat",
+        "apiBase": "https://api.openai.com/v1",
+        "model": "",
+    },
 }
 
 
@@ -638,13 +683,13 @@ def build_llm_system_prompt() -> str:
     )
 
 
-def request_llm_json(url: str, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+def request_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {config['llmApiKey']}",
+            **headers,
         },
         method="POST",
     )
@@ -652,30 +697,26 @@ def request_llm_json(url: str, payload: dict[str, Any], config: dict[str, Any]) 
         return json.loads(response.read().decode("utf-8") or "{}")
 
 
-def extract_responses_answer(body: dict[str, Any]) -> str:
-    if body.get("output_text"):
-        return str(body["output_text"]).strip()
+def request_llm_json(url: str, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    return request_json(url, payload, {"Authorization": f"Bearer {config['llmApiKey']}"})
+
+
+def extract_anthropic_answer(body: dict[str, Any]) -> str:
     parts: list[str] = []
-    for item in body.get("output", []) or []:
-        for content in item.get("content", []) or []:
-            content_type = str(content.get("type") or "")
-            if content_type in {"output_text", "text"} and content.get("text"):
-                parts.append(str(content["text"]))
-            elif not content_type and content.get("text"):
-                parts.append(str(content["text"]))
+    for content in body.get("content", []) or []:
+        if content.get("type") == "text" and content.get("text"):
+            parts.append(str(content["text"]))
     return "\n".join(parts).strip()
 
 
 def call_llm_chat_completions(question: str, context: str, config: dict[str, Any]) -> str:
     url = f"{str(config['llmApiBase']).rstrip('/')}/chat/completions"
-    system_prompt = (
-        build_llm_system_prompt()
-    )
     payload = {
         "model": config["llmModel"],
         "temperature": config["llmTemperature"],
+        "max_tokens": int(config.get("llmMaxTokens") or 1000),
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": build_llm_system_prompt()},
             {"role": "user", "content": f"问题：{question}\n\n招聘历史数据：\n{context}"},
         ],
     }
@@ -690,31 +731,30 @@ def call_llm_chat_completions(question: str, context: str, config: dict[str, Any
     return answer[:18000]
 
 
-def call_llm_responses(question: str, context: str, config: dict[str, Any]) -> str:
-    url = f"{str(config['llmApiBase']).rstrip('/')}/responses"
-    user_text = f"{build_llm_system_prompt()}\n\n问题：{question}\n\n招聘历史数据：\n{context}"
+def call_llm_anthropic_messages(question: str, context: str, config: dict[str, Any]) -> str:
+    url = f"{str(config['llmApiBase']).rstrip('/')}/messages"
     payload = {
         "model": config["llmModel"],
-        "input": [
+        "max_tokens": int(config.get("llmMaxTokens") or 1000),
+        "system": build_llm_system_prompt(),
+        "messages": [
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": user_text,
-                    }
-                ],
+                "content": f"问题：{question}\n\n招聘历史数据：\n{context}",
             }
         ],
-        "max_tokens": int(config.get("llmMaxTokens") or 1000),
     }
-    if config.get("llmProvider") != "gptsapi":
-        payload["instructions"] = build_llm_system_prompt()
-        payload["temperature"] = config["llmTemperature"]
-    body = request_llm_json(url, payload, config)
-    answer = extract_responses_answer(body)
+    body = request_json(
+        url,
+        payload,
+        {
+            "x-api-key": str(config["llmApiKey"]),
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    answer = extract_anthropic_answer(body)
     if not answer:
-        raise RuntimeError("大模型 Responses API 返回空答案")
+        raise RuntimeError("Claude Messages API 返回空答案")
     return answer[:18000]
 
 
@@ -725,39 +765,22 @@ def call_llm_chat(question: str, context: str) -> str:
     if not config.get("llmApiKey"):
         raise RuntimeError("大模型 API Key 未配置")
 
-    mode = str(config.get("llmEndpointMode") or "auto")
-    preferred = "responses" if (
-        mode == "responses" or
-        (mode == "auto" and config.get("llmProvider") == "gptsapi" and str(config.get("llmModel", "")).startswith("gpt-5"))
-    ) else "chat"
-    attempts = [preferred]
-    if mode == "auto":
-        attempts.append("responses" if preferred == "chat" else "chat")
-
-    errors: list[str] = []
-    for attempt in attempts:
-        try:
-            if attempt == "responses":
-                return call_llm_responses(question, context, config)
-            return call_llm_chat_completions(question, context, config)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:1200]
-            errors.append(f"{attempt}: HTTP {exc.code} {detail}")
-            if exc.code == 403:
-                break
-        except Exception as exc:
-            errors.append(f"{attempt}: {exc}")
-
-    message = "；".join(errors) or "未知错误"
-    if "HTTP 403" in message:
-        raise RuntimeError(
-            "大模型 API 返回 403 Forbidden。请检查 API Key 是否有效、账户额度/模型权限是否开通、Base URL 是否为 https://api.gptsapi.net/v1。"
-            f" 服务返回：{message}"
-        )
-    raise RuntimeError(
-        "大模型 API 调用失败。已尝试 Chat Completions/Responses 兼容模式，请检查模型名和接口模式。"
-        f" 详情：{message}"
-    )
+    try:
+        if config.get("llmProtocol") == "anthropic-messages":
+            return call_llm_anthropic_messages(question, context, config)
+        return call_llm_chat_completions(question, context, config)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        if exc.code == 403:
+            raise RuntimeError(
+                "大模型 API 返回 403 Forbidden。请检查 API Key 是否有效、账户额度/模型权限是否开通、Base URL 是否正确。"
+                f" 服务返回：{detail}"
+            )
+        raise RuntimeError(f"大模型 API HTTP {exc.code}: {detail}")
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"大模型 API 网络连接失败：{exc}")
+    except Exception:
+        raise
 
 
 def answer_question_with_agent(question: str) -> tuple[str, dict[str, Any]]:
@@ -800,14 +823,16 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
 def get_llm_config(mask_key: bool = False) -> dict[str, Any]:
     settings = get_settings()
+    provider = str(settings.get("llmProvider") or DEFAULT_LLM_CONFIG["llmProvider"])
+    preset = LLM_PROVIDER_PRESETS.get(provider, LLM_PROVIDER_PRESETS["custom"])
     config = {
         **DEFAULT_LLM_CONFIG,
         "llmEnabled": bool(settings.get("llmEnabled", DEFAULT_LLM_CONFIG["llmEnabled"])),
-        "llmProvider": str(settings.get("llmProvider") or DEFAULT_LLM_CONFIG["llmProvider"]),
-        "llmEndpointMode": str(settings.get("llmEndpointMode") or DEFAULT_LLM_CONFIG["llmEndpointMode"]),
-        "llmApiBase": str(settings.get("llmApiBase") or DEFAULT_LLM_CONFIG["llmApiBase"]).rstrip("/"),
+        "llmProvider": provider,
+        "llmProtocol": str(settings.get("llmProtocol") or preset["protocol"]),
+        "llmApiBase": str(settings.get("llmApiBase") or preset["apiBase"]).rstrip("/"),
         "llmApiKey": str(settings.get("llmApiKey") or ""),
-        "llmModel": str(settings.get("llmModel") or DEFAULT_LLM_CONFIG["llmModel"]),
+        "llmModel": str(settings.get("llmModel") or preset["model"] or DEFAULT_LLM_CONFIG["llmModel"]),
         "llmTemperature": float(settings.get("llmTemperature", DEFAULT_LLM_CONFIG["llmTemperature"]) or 0.2),
         "llmMaxContextItems": int(settings.get("llmMaxContextItems", DEFAULT_LLM_CONFIG["llmMaxContextItems"]) or 80),
         "llmMaxTokens": int(settings.get("llmMaxTokens", DEFAULT_LLM_CONFIG["llmMaxTokens"]) or 1000),
@@ -822,14 +847,16 @@ def get_llm_config(mask_key: bool = False) -> dict[str, Any]:
 
 def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
     current = get_llm_config(mask_key=False)
-    provider = str(payload.get("llmProvider") or current["llmProvider"] or "openai-compatible")
-    default_base = "https://api.gptsapi.net/v1" if provider == "gptsapi" else current["llmApiBase"]
+    provider = str(payload.get("llmProvider") or current["llmProvider"] or "openai")
+    preset = LLM_PROVIDER_PRESETS.get(provider, LLM_PROVIDER_PRESETS["custom"])
+    api_base = str(payload.get("llmApiBase") or preset["apiBase"] or current["llmApiBase"]).rstrip("/")
+    model = str(payload.get("llmModel") or preset["model"] or current["llmModel"])
     config: dict[str, Any] = {
         "llmEnabled": bool(payload.get("llmEnabled", current["llmEnabled"])),
         "llmProvider": provider,
-        "llmEndpointMode": str(payload.get("llmEndpointMode") or current["llmEndpointMode"] or "auto"),
-        "llmApiBase": str(payload.get("llmApiBase") or default_base).rstrip("/"),
-        "llmModel": str(payload.get("llmModel") or current["llmModel"]),
+        "llmProtocol": preset["protocol"],
+        "llmApiBase": api_base,
+        "llmModel": model,
         "llmTemperature": max(0, min(float(payload.get("llmTemperature", current["llmTemperature"]) or 0.2), 2)),
         "llmMaxContextItems": max(10, min(int(payload.get("llmMaxContextItems", current["llmMaxContextItems"]) or 80), 500)),
         "llmMaxTokens": max(100, min(int(payload.get("llmMaxTokens", current["llmMaxTokens"]) or 1000), 8000)),
@@ -842,6 +869,21 @@ def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         config["llmApiKey"] = ""
     save_settings(config)
+    return {"success": True, "llm": get_llm_config(mask_key=True)}
+
+
+def reset_llm_config() -> dict[str, Any]:
+    save_settings({
+        "llmEnabled": DEFAULT_LLM_CONFIG["llmEnabled"],
+        "llmProvider": DEFAULT_LLM_CONFIG["llmProvider"],
+        "llmProtocol": DEFAULT_LLM_CONFIG["llmProtocol"],
+        "llmApiBase": DEFAULT_LLM_CONFIG["llmApiBase"],
+        "llmApiKey": "",
+        "llmModel": DEFAULT_LLM_CONFIG["llmModel"],
+        "llmTemperature": DEFAULT_LLM_CONFIG["llmTemperature"],
+        "llmMaxContextItems": DEFAULT_LLM_CONFIG["llmMaxContextItems"],
+        "llmMaxTokens": DEFAULT_LLM_CONFIG["llmMaxTokens"],
+    })
     return {"success": True, "llm": get_llm_config(mask_key=True)}
 
 
@@ -1269,6 +1311,8 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, save_settings(payload))
             elif parsed.path == "/api/llm/config":
                 json_response(self, save_llm_config(payload))
+            elif parsed.path == "/api/llm/config/reset":
+                json_response(self, reset_llm_config())
             elif parsed.path == "/api/behavior-policy":
                 json_response(self, save_behavior_policy(payload))
             elif parsed.path == "/api/candidates":

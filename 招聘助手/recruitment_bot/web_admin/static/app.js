@@ -18,13 +18,33 @@ const state = {
 
 const API_BASE_STORAGE_KEY = 'recruitmentAdminApiBase';
 const LLM_PROVIDER_DEFAULTS = {
-  'openai-compatible': {
+  openai: {
     apiBase: 'https://api.openai.com/v1',
     model: 'gpt-4o-mini',
   },
-  gptsapi: {
-    apiBase: 'https://api.gptsapi.net/v1',
-    model: 'gpt-5.2',
+  claude: {
+    apiBase: 'https://api.anthropic.com/v1',
+    model: 'claude-opus-4-1-20250805',
+  },
+  qwen: {
+    apiBase: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen-plus',
+  },
+  aliyun: {
+    apiBase: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen-plus',
+  },
+  siliconflow: {
+    apiBase: 'https://api.siliconflow.cn/v1',
+    model: 'Qwen/Qwen2.5-72B-Instruct',
+  },
+  deepseek: {
+    apiBase: 'https://api.deepseek.com/v1',
+    model: 'deepseek-chat',
+  },
+  custom: {
+    apiBase: 'https://api.openai.com/v1',
+    model: '',
   },
 };
 
@@ -128,9 +148,8 @@ async function loadSettings() {
   if ($('jobSourceInput') && !$('jobSourceInput').value) $('jobSourceInput').value = settings.accountPlatform || settings.detectedAccount?.platform || '手动录入';
   $('scheduledPushTime').value = settings.scheduledPushTime || '10:00';
   $('llmEnabled').value = settings.llmEnabled ? 'true' : 'false';
-  $('llmProvider').value = settings.llmProvider || 'openai-compatible';
+  $('llmProvider').value = settings.llmProvider || 'openai';
   $('llmApiBase').value = settings.llmApiBase || 'https://api.openai.com/v1';
-  $('llmEndpointMode').value = settings.llmEndpointMode || 'auto';
   $('llmApiKey').value = '';
   $('llmApiKey').placeholder = settings.llmApiKeyConfigured ? '已配置，留空则保留原 Key' : '请输入 API Key';
   $('llmModel').value = settings.llmModel || 'gpt-4o-mini';
@@ -153,9 +172,8 @@ async function loadSettings() {
 async function saveLlmConfig(showToast = true) {
   const payload = {
     llmEnabled: $('llmEnabled').value === 'true',
-    llmProvider: $('llmProvider').value || 'openai-compatible',
+    llmProvider: $('llmProvider').value || 'openai',
     llmApiBase: $('llmApiBase').value.trim() || 'https://api.openai.com/v1',
-    llmEndpointMode: $('llmEndpointMode').value || 'auto',
     llmModel: $('llmModel').value.trim() || 'gpt-4o-mini',
     llmTemperature: Number($('llmTemperature').value || 0.2),
     llmMaxContextItems: Number($('llmMaxContextItems').value || 80),
@@ -172,14 +190,23 @@ async function saveLlmConfig(showToast = true) {
 }
 
 function applyLlmProviderPreset(force = false) {
-  const provider = $('llmProvider').value || 'openai-compatible';
-  const preset = LLM_PROVIDER_DEFAULTS[provider] || LLM_PROVIDER_DEFAULTS['openai-compatible'];
+  const provider = $('llmProvider').value || 'openai';
+  const preset = LLM_PROVIDER_DEFAULTS[provider] || LLM_PROVIDER_DEFAULTS.openai;
   if (force || !$('llmApiBase').value.trim()) {
     $('llmApiBase').value = preset.apiBase;
   }
   if (force || !$('llmModel').value.trim()) {
     $('llmModel').value = preset.model;
   }
+}
+
+async function resetLlmConfig() {
+  await api('/api/llm/config/reset', {
+    method: 'POST',
+    body: '{}',
+  });
+  await loadSettings();
+  toast('大模型配置已清空');
 }
 
 async function testLlm() {
@@ -575,6 +602,7 @@ function bindEvents() {
   $('saveSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
   $('saveLlmBtn').addEventListener('click', () => saveLlmConfig().catch(showError));
   $('testLlmBtn').addEventListener('click', () => testLlm().catch(showError));
+  $('resetLlmBtn').addEventListener('click', () => resetLlmConfig().catch(showError));
   $('llmProvider').addEventListener('change', () => applyLlmProviderPreset(true));
   $('toggleScheduleBtn').addEventListener('click', () => toggleSchedule().catch(showError));
   $('testDingTalkBtn').addEventListener('click', () => testDingTalk().catch(showError));
