@@ -658,7 +658,10 @@ def extract_responses_answer(body: dict[str, Any]) -> str:
     parts: list[str] = []
     for item in body.get("output", []) or []:
         for content in item.get("content", []) or []:
-            if content.get("text"):
+            content_type = str(content.get("type") or "")
+            if content_type in {"output_text", "text"} and content.get("text"):
+                parts.append(str(content["text"]))
+            elif not content_type and content.get("text"):
                 parts.append(str(content["text"]))
     return "\n".join(parts).strip()
 
