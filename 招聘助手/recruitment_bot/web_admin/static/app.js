@@ -19,31 +19,31 @@ const state = {
 const API_BASE_STORAGE_KEY = 'recruitmentAdminApiBase';
 const LLM_PROVIDER_DEFAULTS = {
   openai: {
-    apiBase: 'https://api.openai.com/v1',
-    model: 'gpt-4o-mini',
+    apiBase: '',
+    model: '',
   },
   claude: {
     apiBase: 'https://api.anthropic.com/v1',
-    model: 'claude-opus-4-1-20250805',
+    model: '',
   },
   qwen: {
     apiBase: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    model: 'qwen-plus',
+    model: '',
   },
   aliyun: {
     apiBase: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    model: 'qwen-plus',
+    model: '',
   },
   siliconflow: {
     apiBase: 'https://api.siliconflow.cn/v1',
-    model: 'Qwen/Qwen2.5-72B-Instruct',
+    model: '',
   },
   deepseek: {
     apiBase: 'https://api.deepseek.com/v1',
-    model: 'deepseek-chat',
+    model: '',
   },
   custom: {
-    apiBase: 'https://api.openai.com/v1',
+    apiBase: '',
     model: '',
   },
 };
@@ -149,10 +149,10 @@ async function loadSettings() {
   $('scheduledPushTime').value = settings.scheduledPushTime || '10:00';
   $('llmEnabled').value = settings.llmEnabled ? 'true' : 'false';
   $('llmProvider').value = settings.llmProvider || 'openai';
-  $('llmApiBase').value = settings.llmApiBase || 'https://api.openai.com/v1';
+  $('llmApiBase').value = settings.llmApiBase || '';
   $('llmApiKey').value = '';
   $('llmApiKey').placeholder = settings.llmApiKeyConfigured ? '已配置，留空则保留原 Key' : '请输入 API Key';
-  $('llmModel').value = settings.llmModel || 'gpt-4o-mini';
+  $('llmModel').value = settings.llmModel || '';
   $('llmTemperature').value = settings.llmTemperature ?? 0.2;
   $('llmMaxContextItems').value = settings.llmMaxContextItems ?? 80;
   $('llmMaxTokens').value = settings.llmMaxTokens ?? 1000;
@@ -173,8 +173,8 @@ async function saveLlmConfig(showToast = true) {
   const payload = {
     llmEnabled: $('llmEnabled').value === 'true',
     llmProvider: $('llmProvider').value || 'openai',
-    llmApiBase: $('llmApiBase').value.trim() || 'https://api.openai.com/v1',
-    llmModel: $('llmModel').value.trim() || 'gpt-4o-mini',
+    llmApiBase: $('llmApiBase').value.trim(),
+    llmModel: $('llmModel').value.trim(),
     llmTemperature: Number($('llmTemperature').value || 0.2),
     llmMaxContextItems: Number($('llmMaxContextItems').value || 80),
     llmMaxTokens: Number($('llmMaxTokens').value || 1000),

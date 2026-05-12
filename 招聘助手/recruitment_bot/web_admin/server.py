@@ -73,8 +73,8 @@ DEFAULT_LLM_CONFIG: dict[str, Any] = {
     "llmEnabled": False,
     "llmProvider": "openai",
     "llmProtocol": "openai-chat",
-    "llmApiBase": "https://api.openai.com/v1",
-    "llmModel": "gpt-4o-mini",
+    "llmApiBase": "",
+    "llmModel": "",
     "llmTemperature": 0.2,
     "llmMaxContextItems": 80,
     "llmMaxTokens": 1000,
@@ -84,43 +84,43 @@ LLM_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     "openai": {
         "label": "OpenAI",
         "protocol": "openai-chat",
-        "apiBase": "https://api.openai.com/v1",
-        "model": "gpt-4o-mini",
+        "apiBase": "",
+        "model": "",
     },
     "claude": {
         "label": "Claude",
         "protocol": "anthropic-messages",
         "apiBase": "https://api.anthropic.com/v1",
-        "model": "claude-opus-4-1-20250805",
+        "model": "",
     },
     "qwen": {
         "label": "通义千问",
         "protocol": "openai-chat",
         "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model": "qwen-plus",
+        "model": "",
     },
     "aliyun": {
         "label": "阿里云百炼",
         "protocol": "openai-chat",
         "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model": "qwen-plus",
+        "model": "",
     },
     "siliconflow": {
         "label": "硅基流动",
         "protocol": "openai-chat",
         "apiBase": "https://api.siliconflow.cn/v1",
-        "model": "Qwen/Qwen2.5-72B-Instruct",
+        "model": "",
     },
     "deepseek": {
         "label": "DeepSeek",
         "protocol": "openai-chat",
         "apiBase": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "model": "",
     },
     "custom": {
         "label": "自定义 OpenAI-compatible",
         "protocol": "openai-chat",
-        "apiBase": "https://api.openai.com/v1",
+        "apiBase": "",
         "model": "",
     },
 }
@@ -764,6 +764,10 @@ def call_llm_chat(question: str, context: str) -> str:
         raise RuntimeError("大模型问答未启用")
     if not config.get("llmApiKey"):
         raise RuntimeError("大模型 API Key 未配置")
+    if not config.get("llmApiBase"):
+        raise RuntimeError("大模型 API Base URL 未配置")
+    if not config.get("llmModel"):
+        raise RuntimeError("大模型模型名未配置")
 
     try:
         if config.get("llmProtocol") == "anthropic-messages":
@@ -830,9 +834,9 @@ def get_llm_config(mask_key: bool = False) -> dict[str, Any]:
         "llmEnabled": bool(settings.get("llmEnabled", DEFAULT_LLM_CONFIG["llmEnabled"])),
         "llmProvider": provider,
         "llmProtocol": str(settings.get("llmProtocol") or preset["protocol"]),
-        "llmApiBase": str(settings.get("llmApiBase") or preset["apiBase"]).rstrip("/"),
+        "llmApiBase": str(settings.get("llmApiBase") or "").rstrip("/"),
         "llmApiKey": str(settings.get("llmApiKey") or ""),
-        "llmModel": str(settings.get("llmModel") or preset["model"] or DEFAULT_LLM_CONFIG["llmModel"]),
+        "llmModel": str(settings.get("llmModel") or ""),
         "llmTemperature": float(settings.get("llmTemperature", DEFAULT_LLM_CONFIG["llmTemperature"]) or 0.2),
         "llmMaxContextItems": int(settings.get("llmMaxContextItems", DEFAULT_LLM_CONFIG["llmMaxContextItems"]) or 80),
         "llmMaxTokens": int(settings.get("llmMaxTokens", DEFAULT_LLM_CONFIG["llmMaxTokens"]) or 1000),
@@ -849,8 +853,8 @@ def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
     current = get_llm_config(mask_key=False)
     provider = str(payload.get("llmProvider") or current["llmProvider"] or "openai")
     preset = LLM_PROVIDER_PRESETS.get(provider, LLM_PROVIDER_PRESETS["custom"])
-    api_base = str(payload.get("llmApiBase") or preset["apiBase"] or current["llmApiBase"]).rstrip("/")
-    model = str(payload.get("llmModel") or preset["model"] or current["llmModel"])
+    api_base = str(payload.get("llmApiBase") or "").rstrip("/")
+    model = str(payload.get("llmModel") or "")
     config: dict[str, Any] = {
         "llmEnabled": bool(payload.get("llmEnabled", current["llmEnabled"])),
         "llmProvider": provider,
