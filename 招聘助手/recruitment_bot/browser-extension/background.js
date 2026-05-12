@@ -598,6 +598,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'detectedAccountUpdated') {
     const accountInfo = message.accountInfo || {};
     chrome.storage.local.get(['settings'], ({ settings = DEFAULT_SETTINGS }) => {
+      if (settings.accountNameManual) {
+        chrome.storage.local.set({ detectedAccount: accountInfo });
+        sendResponse({ success: true, accountInfo, manualOverride: true });
+        return;
+      }
       const mergedSettings = {
         ...DEFAULT_SETTINGS,
         ...settings,
@@ -611,6 +616,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         detectedAccount: accountInfo,
       }).catch(() => {});
       sendResponse({ success: true, accountInfo });
+    });
+    return true;
+  }
+
+  if (message.action === 'manualAccountUpdated') {
+    const accountName = String(message.accountName || '').trim();
+    const accountPlatform = String(message.accountPlatform || 'BOSS直聘').trim() || 'BOSS直聘';
+    chrome.storage.local.get(['settings'], ({ settings = DEFAULT_SETTINGS }) => {
+      const mergedSettings = {
+        ...DEFAULT_SETTINGS,
+        ...settings,
+        accountName,
+        accountPlatform,
+        accountNameManual: Boolean(accountName),
+      };
+      chrome.storage.local.set({ settings: mergedSettings });
+      syncToBackend('/api/settings', {
+        accountName,
+        accountPlatform,
+        accountNameManual: Boolean(accountName),
+      }).catch(() => {});
+      sendResponse({ success: true, settings: mergedSettings });
     });
     return true;
   }

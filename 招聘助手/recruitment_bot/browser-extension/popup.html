@@ -102,6 +102,24 @@
       cursor: pointer;
     }
     .btn:hover { background: #f8fafc; }
+    .field {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .field label {
+      color: #64748b;
+      font-size: 12px;
+    }
+    .field input {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid #d8e0ea;
+      border-radius: 7px;
+      padding: 7px 9px;
+      font: inherit;
+      color: #111827;
+    }
     .log-body {
       max-height: 150px;
       overflow-y: auto;
@@ -145,6 +163,11 @@
       <span class="label">账号信息</span>
       <span class="value" id="accountName">打开招聘页面后自动识别</span>
     </div>
+    <div class="field">
+      <label for="accountNameInput">手动账号信息</label>
+      <input id="accountNameInput" type="text" placeholder="填写 BOSS 招聘账号姓名" />
+    </div>
+    <button class="btn" id="btnSaveAccount">保存账号信息</button>
     <div class="row">
       <span class="label">Web 后台</span>
       <span class="value" id="backendStatus">未检测</span>

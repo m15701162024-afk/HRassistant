@@ -1481,37 +1481,6 @@ function detectRecruiterAccountInfo() {
     return benefitRightInfo;
   }
 
-  const selectors = [
-    '[class*="recruiter"] [class*="name"]',
-    '[class*="hr"] [class*="name"]',
-    '[class*="boss"] [class*="name"]',
-    '[class*="user-info"]',
-    '[class*="account-info"]',
-    '[class*="user"] [class*="name"]',
-    '[class*="account"] [class*="name"]',
-    '[class*="avatar"] + *',
-    '[class*="profile"] [class*="name"]',
-    '.user-name',
-    '.name',
-  ];
-  for (const selector of selectors) {
-    const element = document.querySelector(selector);
-    const text = sanitizeAccountText(element?.textContent || '');
-    if (isLikelyRecruiterName(text, element)) {
-      const info = buildAccountInfo(text, 'selector', element);
-      persistDetectedAccount(info);
-      return info;
-    }
-  }
-
-  const bodyText = normalizeText(document.body.textContent || '');
-  const match = bodyText.match(/(?:招聘者|当前账号|我的账号|账号)[:：\s]*([\u4e00-\u9fa5A-Za-z0-9_-]{2,20})/);
-  if (match && isLikelyRecruiterName(match[1])) {
-    const info = buildAccountInfo(match[1], 'body-regex', null);
-    persistDetectedAccount(info);
-    return info;
-  }
-
   return { name: '', platform: 'BOSS直聘', detectedAt: new Date().toISOString() };
 }
 
@@ -1650,8 +1619,16 @@ function buildAccountInfo(name, source, element) {
 function persistDetectedAccount(info) {
   chrome.storage.local.set({ detectedAccount: info }, () => {
     chrome.storage.local.get(['settings'], (result) => {
+      const currentSettings = result.settings || {};
+      if (currentSettings.accountNameManual) {
+        chrome.runtime.sendMessage({
+          action: 'detectedAccountUpdated',
+          accountInfo: info,
+        }).catch(() => {});
+        return;
+      }
       const nextSettings = {
-        ...(result.settings || {}),
+        ...currentSettings,
         accountName: info.name,
         accountPlatform: info.platform || 'BOSS直聘',
       };

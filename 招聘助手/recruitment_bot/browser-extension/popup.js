@@ -1,11 +1,13 @@
 const elements = {
   safetyStatus: document.getElementById('safetyStatus'),
   accountName: document.getElementById('accountName'),
+  accountNameInput: document.getElementById('accountNameInput'),
   backendStatus: document.getElementById('backendStatus'),
   totalResumes: document.getElementById('totalResumes'),
   todayResumes: document.getElementById('todayResumes'),
   recommendedCount: document.getElementById('recommendedCount'),
   btnOpenWebAdmin: document.getElementById('btnOpenWebAdmin'),
+  btnSaveAccount: document.getElementById('btnSaveAccount'),
   logBody: document.getElementById('logBody'),
   logCount: document.getElementById('logCount'),
 };
@@ -94,6 +96,7 @@ async function updatePopup() {
   elements.safetyStatus.textContent = safetyState.isDegraded ? '已降级' : '正常';
   elements.safetyStatus.classList.toggle('ok', !safetyState.isDegraded);
   elements.accountName.textContent = detectedAccount.name || mergedSettings.accountName || '打开招聘页面后自动识别';
+  elements.accountNameInput.value = mergedSettings.accountName || '';
   elements.totalResumes.textContent = dashboard.totalCount ?? 0;
   elements.todayResumes.textContent = dashboard.todayCount ?? 0;
   elements.recommendedCount.textContent = dashboard.recommendedCount ?? 0;
@@ -105,6 +108,15 @@ elements.btnOpenWebAdmin.addEventListener('click', async () => {
   const settings = await getSettings();
   const url = (settings.backendUrl || DEFAULT_SETTINGS.backendUrl).replace(/\/+$/, '');
   chrome.tabs.create({ url });
+});
+
+elements.btnSaveAccount.addEventListener('click', async () => {
+  const accountName = elements.accountNameInput.value.trim();
+  chrome.runtime.sendMessage({
+    action: 'manualAccountUpdated',
+    accountName,
+    accountPlatform: 'BOSS直聘',
+  }, () => updatePopup());
 });
 
 chrome.runtime.onMessage.addListener((message) => {

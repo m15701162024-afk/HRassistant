@@ -1127,28 +1127,55 @@ def build_summary(scope: str = "all") -> str:
     target_date = date_str(-1) if scope == "yesterday" else None
     candidates = list_rows("candidates", limit=1000, date_field="received_date", date_value=target_date)
     recommendations = list_rows("recommendations", limit=1000, date_field="created_at", date_value=target_date)
-    settings = get_settings()
+    title_date = target_date or "全部历史"
+    recommended_candidates = [
+        item for item in candidates
+        if int(item.get("score") or 0) >= 60 or str(item.get("recommendation") or "") in {"推荐", "强烈推荐"}
+    ]
+    account_names = sorted({
+        str(item.get("account_name") or "未识别") for item in [*candidates, *recommendations, *recommended_candidates]
+    })
+
+    def account_count(rows: list[dict[str, Any]], account: str) -> int:
+        return sum(1 for item in rows if str(item.get("account_name") or "未识别") == account)
+
+    def account_lines(rows: list[dict[str, Any]], empty: str = "暂无") -> list[str]:
+        if not rows:
+            return [empty]
+        return [f"{account}丨{account_count(rows, account)}" for account in account_names if account_count(rows, account) > 0] or [empty]
+
+    received_candidates = [item for item in candidates if item.get("raw_json")]
     source_counts: dict[str, int] = {}
     for item in candidates:
         source = item.get("source") or "未知来源"
         source_counts[source] = source_counts.get(source, 0) + 1
     source_text = "，".join(f"{k} {v}份" for k, v in source_counts.items()) or "暂无"
-    rows = [
-        f"| {idx + 1} | {item.get('name','')} | {item.get('role','')} | {item.get('score',0)}% | {item.get('recommendation','')} | {item.get('source','')} | {item.get('account_name') or settings.get('accountName','未识别')} | {item.get('next_step','')} |"
-        for idx, item in enumerate(recommendations[:30])
+
+    detail_rows = [
+        f"| {item.get('name','')} | {item.get('role','')} | {item.get('education','')} | {item.get('experience','')} | {item.get('score',0)}% | {item.get('source','')} | {item.get('account_name') or '未识别'} |"
+        for item in recommended_candidates[:50]
     ]
-    title_date = target_date or "全部历史"
     return "\n".join(
         [
             f"### {title_date} 招聘数据汇总",
             "",
-            f"- 数据来源：{source_text}",
-            f"- 候选人数量：{len(candidates)}",
-            f"- 推荐候选人：{len(recommendations)}",
+            "#### 定时推送",
+            f"昨日新增：{len(candidates)}",
+            *account_lines(candidates),
             "",
-            "| 序号 | 姓名 | 申请职位 | 匹配度 | 推荐意见 | 数据来源 | 账号信息 | 下一步 |",
-            "|------|------|----------|--------|----------|----------|----------|--------|",
-            *(rows or ["| - | 暂无 | - | - | - | - | - | - |"]),
+            f"昨日收到简历数量：{len(received_candidates)}",
+            *account_lines(received_candidates),
+            "",
+            f"昨日推荐候选人：{len(recommended_candidates)}",
+            *account_lines(recommended_candidates),
+            "",
+            f"数据来源：{source_text}",
+            "",
+            "#### 建议继续推进候选人详情",
+            "",
+            "| 姓名 | 岗位 | 学历 | 经验 | 匹配度 | 来源 | 账号 |",
+            "|------|------|------|------|--------|------|------|",
+            *(detail_rows or ["| 暂无 | - | - | - | - | - | - |"]),
         ]
     )
 
