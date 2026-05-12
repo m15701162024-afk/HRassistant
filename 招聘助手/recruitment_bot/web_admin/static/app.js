@@ -17,6 +17,16 @@ const state = {
 };
 
 const API_BASE_STORAGE_KEY = 'recruitmentAdminApiBase';
+const LLM_PROVIDER_DEFAULTS = {
+  'openai-compatible': {
+    apiBase: 'https://api.openai.com/v1',
+    model: 'gpt-4o-mini',
+  },
+  gptsapi: {
+    apiBase: 'https://api.gptsapi.net/v1',
+    model: 'gpt-4o-mini',
+  },
+};
 
 function defaultApiBase() {
   if (location.protocol === 'file:') return 'http://127.0.0.1:8787';
@@ -114,8 +124,11 @@ async function loadSettings() {
   $('dingtalkSecret').value = settings.dingtalkSecret || '';
   $('accountName').value = settings.accountName || settings.detectedAccount?.name || '';
   $('accountPlatform').value = settings.accountPlatform || settings.detectedAccount?.platform || 'BOSS直聘';
+  if ($('jobAccountInput')) $('jobAccountInput').value = settings.accountName || settings.detectedAccount?.name || '';
+  if ($('jobSourceInput') && !$('jobSourceInput').value) $('jobSourceInput').value = settings.accountPlatform || settings.detectedAccount?.platform || '手动录入';
   $('scheduledPushTime').value = settings.scheduledPushTime || '10:00';
   $('llmEnabled').value = settings.llmEnabled ? 'true' : 'false';
+  $('llmProvider').value = settings.llmProvider || 'openai-compatible';
   $('llmApiBase').value = settings.llmApiBase || 'https://api.openai.com/v1';
   $('llmApiKey').value = '';
   $('llmApiKey').placeholder = settings.llmApiKeyConfigured ? '已配置，留空则保留原 Key' : '请输入 API Key';
@@ -138,6 +151,7 @@ async function loadSettings() {
 async function saveLlmConfig(showToast = true) {
   const payload = {
     llmEnabled: $('llmEnabled').value === 'true',
+    llmProvider: $('llmProvider').value || 'openai-compatible',
     llmApiBase: $('llmApiBase').value.trim() || 'https://api.openai.com/v1',
     llmModel: $('llmModel').value.trim() || 'gpt-4o-mini',
     llmTemperature: Number($('llmTemperature').value || 0.2),
@@ -151,6 +165,17 @@ async function saveLlmConfig(showToast = true) {
   });
   await loadSettings();
   if (showToast) toast('大模型配置已保存');
+}
+
+function applyLlmProviderPreset(force = false) {
+  const provider = $('llmProvider').value || 'openai-compatible';
+  const preset = LLM_PROVIDER_DEFAULTS[provider] || LLM_PROVIDER_DEFAULTS['openai-compatible'];
+  if (force || !$('llmApiBase').value.trim()) {
+    $('llmApiBase').value = preset.apiBase;
+  }
+  if (force || !$('llmModel').value.trim()) {
+    $('llmModel').value = preset.model;
+  }
 }
 
 async function testLlm() {
@@ -167,6 +192,10 @@ async function testLlm() {
 async function loadBehaviorPolicy() {
   const policy = await api('/api/behavior-policy');
   state.behaviorPolicy = policy;
+  $('workTimeEnabled').value = policy.workTimeEnabled ? 'true' : 'false';
+  $('workStartTime').value = policy.workStartTime || '09:00';
+  $('workEndTime').value = policy.workEndTime || '18:00';
+  $('workDays').value = (policy.workDays || [1, 2, 3, 4, 5]).join(',');
   $('requestDelayMin').value = policy.requestDelayMin ?? 5000;
   $('requestDelayMax').value = policy.requestDelayMax ?? 15000;
   $('detailDwellMin').value = policy.detailDwellMin ?? 10000;
@@ -188,6 +217,10 @@ async function loadBehaviorPolicy() {
 async function saveBehaviorPolicy() {
   const payload = {
     behaviorPolicyEnabled: true,
+    workTimeEnabled: $('workTimeEnabled').value === 'true',
+    workStartTime: $('workStartTime').value || '09:00',
+    workEndTime: $('workEndTime').value || '18:00',
+    workDays: $('workDays').value.split(/[,\s，]+/).map(item => Number(item)).filter(item => item >= 1 && item <= 7),
     requestDelayMin: Number($('requestDelayMin').value || 5000),
     requestDelayMax: Number($('requestDelayMax').value || 15000),
     detailDwellMin: Number($('detailDwellMin').value || 10000),
@@ -478,6 +511,36 @@ async function pushYesterday() {
   toast(result.success ? '昨日汇总已推送' : result.message, result.success ? 'success' : 'warning');
 }
 
+async function saveJobRequirement() {
+  const payload = {
+    role: $('jobRoleInput').value.trim(),
+    source: $('jobSourceInput').value.trim() || '手动录入',
+    accountName: $('jobAccountInput').value.trim() || $('accountName').value.trim(),
+    requirement: $('jobRequirementInput').value.trim(),
+  };
+  if (!payload.role || !payload.requirement) {
+    toast('请填写岗位名称和岗位要求', 'warning');
+    return;
+  }
+  const result = await api('/api/job-requirements', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  $('jobRoleInput').value = '';
+  $('jobRequirementInput').value = '';
+  await loadData();
+  toast(`岗位要求已保存，已匹配 ${result.matchedCandidates || 0} 位候选人`);
+}
+
+async function matchAllJobRequirements() {
+  const result = await api('/api/job-requirements/match-candidates', {
+    method: 'POST',
+    body: '{}',
+  });
+  await loadData();
+  toast(`已重新匹配 ${result.updated || 0} 位候选人，跳过 ${result.skipped || 0} 位`);
+}
+
 async function previewSummary() {
   const result = await api('/api/summary?scope=yesterday');
   openDialog('昨日招聘数据汇总预览', result.markdown || '');
@@ -508,11 +571,14 @@ function bindEvents() {
   $('saveSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
   $('saveLlmBtn').addEventListener('click', () => saveLlmConfig().catch(showError));
   $('testLlmBtn').addEventListener('click', () => testLlm().catch(showError));
+  $('llmProvider').addEventListener('change', () => applyLlmProviderPreset(true));
   $('toggleScheduleBtn').addEventListener('click', () => toggleSchedule().catch(showError));
   $('testDingTalkBtn').addEventListener('click', () => testDingTalk().catch(showError));
   $('pushYesterdayBtn').addEventListener('click', () => pushYesterday().catch(showError));
   $('saveBehaviorBtn').addEventListener('click', () => saveBehaviorPolicy().catch(showError));
   $('loadBehaviorBtn').addEventListener('click', () => loadBehaviorPolicy().catch(showError));
+  $('saveJobRequirementBtn').addEventListener('click', () => saveJobRequirement().catch(showError));
+  $('matchJobsBtn').addEventListener('click', () => matchAllJobRequirements().catch(showError));
   $('previewSummaryBtn').addEventListener('click', () => previewSummary().catch(showError));
   $('askBtn').addEventListener('click', () => ask(false).catch(showError));
   $('askAndPushBtn').addEventListener('click', () => ask(true).catch(showError));

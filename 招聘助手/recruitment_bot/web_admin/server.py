@@ -38,6 +38,10 @@ PORT = int(os.environ.get("RECRUITMENT_PORT", "8787"))
 
 DEFAULT_BEHAVIOR_POLICY: dict[str, Any] = {
     "behaviorPolicyEnabled": True,
+    "workTimeEnabled": False,
+    "workStartTime": "09:00",
+    "workEndTime": "18:00",
+    "workDays": [1, 2, 3, 4, 5],
     "requestDelayMin": 5000,
     "requestDelayMax": 15000,
     "detailDwellMin": 10000,
@@ -67,6 +71,7 @@ DEFAULT_BEHAVIOR_POLICY: dict[str, Any] = {
 
 DEFAULT_LLM_CONFIG: dict[str, Any] = {
     "llmEnabled": False,
+    "llmProvider": "openai-compatible",
     "llmApiBase": "https://api.openai.com/v1",
     "llmModel": "gpt-4o-mini",
     "llmTemperature": 0.2,
@@ -278,7 +283,8 @@ def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
                 now,
             ),
         )
-    return {"success": True, "id": item_id}
+    matched = match_candidates_with_job_requirements()
+    return {"success": True, "id": item_id, "matchedCandidates": matched["updated"]}
 
 
 def get_job_requirement(role: str) -> dict[str, Any] | None:
@@ -307,6 +313,109 @@ def list_job_requirements(limit: int = 200) -> list[dict[str, Any]]:
                 (limit,),
             ).fetchall()
         ]
+
+
+def extract_requirement_keywords_backend(text: str) -> list[str]:
+    normalized = str(text or "").lower()
+    keywords = [
+        "java", "spring", "springboot", "mysql", "redis", "python", "django", "flask",
+        "go", "golang", "react", "vue", "typescript", "javascript", "node", "测试",
+        "自动化", "selenium", "playwright", "性能", "运维", "kubernetes", "docker",
+        "算法", "数据", "产品", "项目管理", "招聘", "销售", "客服", "运营",
+    ]
+    return [item for item in keywords if item in normalized]
+
+
+def match_candidate_with_requirement(candidate: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    raw: dict[str, Any]
+    try:
+        raw = json.loads(candidate.get("raw_json") or "{}")
+    except Exception:
+        raw = {}
+
+    requirement = str(job.get("requirement") or "")
+    resume_text = " ".join(
+        str(value or "") for value in [
+            candidate.get("name"), candidate.get("role"), candidate.get("education"),
+            candidate.get("experience"), candidate.get("expected_salary"),
+            raw.get("skills"), raw.get("summary"), raw.get("workExperience"), raw.get("projects"),
+            raw.get("rawText"), raw.get("description"),
+        ]
+    ).lower()
+    keywords = extract_requirement_keywords_backend(requirement)
+    matched = [item for item in keywords if item in resume_text]
+    missing = [item for item in keywords if item not in resume_text]
+    ratio = 1.0 if not keywords else len(matched) / len(keywords)
+    if ratio >= 0.68:
+        verdict = "匹配"
+        adjustment = 6
+    elif ratio >= 0.38:
+        verdict = "部分匹配"
+        adjustment = 0
+    else:
+        verdict = "不匹配"
+        adjustment = -8
+
+    evaluation = raw.get("evaluation") if isinstance(raw.get("evaluation"), dict) else {}
+    dimensions = evaluation.get("dimensions") if isinstance(evaluation.get("dimensions"), dict) else {}
+    dimensions["jd"] = {
+        "match": verdict,
+        "ratio": round(ratio, 2),
+        "matched": matched[:12],
+        "missing": missing[:12],
+        "source": "岗位要求库",
+    }
+    evaluation["dimensions"] = dimensions
+    reasons = evaluation.get("rejectionReasons") if isinstance(evaluation.get("rejectionReasons"), list) else []
+    if verdict == "不匹配" and missing:
+        reasons = [f"岗位要求缺失：{', '.join(missing[:6])}", *reasons]
+    evaluation["rejectionReasons"] = reasons[:12]
+    raw["evaluation"] = evaluation
+    raw["jobRequirement"] = requirement
+    raw["jobRequirementRole"] = job.get("role") or candidate.get("role")
+
+    base_score = int(candidate.get("score") or evaluation.get("score") or 0)
+    next_score = max(0, min(100, base_score + adjustment))
+    recommendation = str(candidate.get("recommendation") or evaluation.get("recommendation") or "待评估")
+    if verdict == "不匹配" and next_score < 60:
+        recommendation = "不推荐"
+    elif verdict == "部分匹配" and recommendation == "推荐":
+        recommendation = "待定"
+    evaluation["score"] = next_score
+    evaluation["recommendation"] = recommendation
+
+    return {
+        "raw_json": json.dumps(raw, ensure_ascii=False),
+        "score": next_score,
+        "recommendation": recommendation,
+    }
+
+
+def match_candidates_with_job_requirements(role: str = "") -> dict[str, Any]:
+    updated = 0
+    skipped = 0
+    with connect() as conn:
+        candidates = conn.execute(
+            "SELECT * FROM candidates WHERE role = ? ORDER BY updated_at DESC" if role else "SELECT * FROM candidates ORDER BY updated_at DESC",
+            (role,) if role else (),
+        ).fetchall()
+        for row in candidates:
+            candidate = dict(row)
+            job = get_job_requirement(candidate.get("role", ""))
+            if not job:
+                skipped += 1
+                continue
+            result = match_candidate_with_requirement(candidate, job)
+            conn.execute(
+                """
+                UPDATE candidates
+                SET raw_json = ?, score = ?, recommendation = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (result["raw_json"], result["score"], result["recommendation"], now_iso(), candidate["id"]),
+            )
+            updated += 1
+    return {"success": True, "updated": updated, "skipped": skipped}
 
 
 def save_recommendation(candidate: dict[str, Any], report: str = "") -> dict[str, Any]:
@@ -614,6 +723,7 @@ def get_llm_config(mask_key: bool = False) -> dict[str, Any]:
     config = {
         **DEFAULT_LLM_CONFIG,
         "llmEnabled": bool(settings.get("llmEnabled", DEFAULT_LLM_CONFIG["llmEnabled"])),
+        "llmProvider": str(settings.get("llmProvider") or DEFAULT_LLM_CONFIG["llmProvider"]),
         "llmApiBase": str(settings.get("llmApiBase") or DEFAULT_LLM_CONFIG["llmApiBase"]).rstrip("/"),
         "llmApiKey": str(settings.get("llmApiKey") or ""),
         "llmModel": str(settings.get("llmModel") or DEFAULT_LLM_CONFIG["llmModel"]),
@@ -630,9 +740,12 @@ def get_llm_config(mask_key: bool = False) -> dict[str, Any]:
 
 def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
     current = get_llm_config(mask_key=False)
+    provider = str(payload.get("llmProvider") or current["llmProvider"] or "openai-compatible")
+    default_base = "https://api.gptsapi.net/v1" if provider == "gptsapi" else current["llmApiBase"]
     config: dict[str, Any] = {
         "llmEnabled": bool(payload.get("llmEnabled", current["llmEnabled"])),
-        "llmApiBase": str(payload.get("llmApiBase") or current["llmApiBase"]).rstrip("/"),
+        "llmProvider": provider,
+        "llmApiBase": str(payload.get("llmApiBase") or default_base).rstrip("/"),
         "llmModel": str(payload.get("llmModel") or current["llmModel"]),
         "llmTemperature": max(0, min(float(payload.get("llmTemperature", current["llmTemperature"]) or 0.2), 2)),
         "llmMaxContextItems": max(10, min(int(payload.get("llmMaxContextItems", current["llmMaxContextItems"]) or 80), 500)),
@@ -697,6 +810,16 @@ def save_behavior_policy(payload: dict[str, Any]) -> dict[str, Any]:
         next_policy["searchKeywordPool"] = [
             item.strip() for item in payload["searchKeywordPool"].replace("，", "\n").splitlines() if item.strip()
         ][:30]
+    next_policy["workTimeEnabled"] = bool(payload.get("workTimeEnabled", next_policy.get("workTimeEnabled")))
+    for field in ("workStartTime", "workEndTime"):
+        value = str(payload.get(field) or next_policy.get(field) or "").strip()
+        if len(value) >= 5 and value[2] == ":":
+            next_policy[field] = value[:5]
+    if isinstance(payload.get("workDays"), list):
+        next_policy["workDays"] = [
+            day for day in [int(item) for item in payload["workDays"] if str(item).isdigit()]
+            if 1 <= day <= 7
+        ] or DEFAULT_BEHAVIOR_POLICY["workDays"]
 
     save_settings({"behaviorPolicy": next_policy})
     return {"success": True, "behaviorPolicy": next_policy}
@@ -1070,6 +1193,8 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, save_recommendation(payload.get("candidate", payload), payload.get("report", "")))
             elif parsed.path == "/api/job-requirements":
                 json_response(self, upsert_job_requirement(payload))
+            elif parsed.path == "/api/job-requirements/match-candidates":
+                json_response(self, match_candidates_with_job_requirements(str(payload.get("role", ""))))
             elif parsed.path == "/api/agent/ask":
                 answer, agent_meta = answer_question_with_agent(str(payload.get("question", "")))
                 save_agent_conversation(

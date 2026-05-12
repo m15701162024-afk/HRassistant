@@ -45,6 +45,10 @@ let settings = {
   detailDwellMin: 10000,
   detailDwellMax: 30000,
   behaviorPolicyEnabled: true,
+  workTimeEnabled: false,
+  workStartTime: '09:00',
+  workEndTime: '18:00',
+  workDays: [1, 2, 3, 4, 5],
   scrollMode: 'mixed',
   interactionModes: {
     manualPage: 40,
@@ -437,6 +441,15 @@ function sleep(ms) {
 function canPerformOperation() {
   resetCountersIfNeeded();
 
+  if (!isWithinConfiguredWorkTime()) {
+    console.warn('[招聘助手] 当前不在配置的工作时间段内，暂停自动操作');
+    notifyPopup('log', {
+      message: `⏸ 当前不在工作时间 ${settings.workStartTime || '09:00'}-${settings.workEndTime || '18:00'}，自动操作已暂停`,
+      type: 'warning',
+    });
+    return false;
+  }
+
   // 检查每日上限
   if (operationCount.today >= settings.dailyLimit) {
     console.warn(`[招聘助手] 已达到每日操作上限 (${settings.dailyLimit})，暂停自动操作`);
@@ -474,6 +487,30 @@ function canPerformOperation() {
   }
 
   return true;
+}
+
+function parseTimeToMinutes(value, fallback) {
+  const match = String(value || fallback || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+  const hour = Math.max(0, Math.min(23, Number(match[1])));
+  const minute = Math.max(0, Math.min(59, Number(match[2])));
+  return hour * 60 + minute;
+}
+
+function isWithinConfiguredWorkTime(now = new Date()) {
+  if (!settings.workTimeEnabled) return true;
+  const jsDay = now.getDay();
+  const day = jsDay === 0 ? 7 : jsDay;
+  const allowedDays = Array.isArray(settings.workDays) && settings.workDays.length
+    ? settings.workDays.map(Number)
+    : [1, 2, 3, 4, 5];
+  if (!allowedDays.includes(day)) return false;
+  const start = parseTimeToMinutes(settings.workStartTime, '09:00');
+  const end = parseTimeToMinutes(settings.workEndTime, '18:00');
+  if (start == null || end == null || start === end) return true;
+  const current = now.getHours() * 60 + now.getMinutes();
+  if (start < end) return current >= start && current <= end;
+  return current >= start || current <= end;
 }
 
 /**

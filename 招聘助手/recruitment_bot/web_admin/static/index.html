@@ -131,6 +131,13 @@
           </select>
         </label>
         <label>
+          模型平台
+          <select id="llmProvider">
+            <option value="openai-compatible">OpenAI-compatible / 自定义</option>
+            <option value="gptsapi">gptsapi.net</option>
+          </select>
+        </label>
+        <label>
           API Base URL
           <input id="llmApiBase" type="url" placeholder="https://api.openai.com/v1" />
         </label>
@@ -155,7 +162,7 @@
         <button id="saveLlmBtn">保存大模型配置</button>
         <button id="testLlmBtn" class="secondary">测试问答</button>
       </div>
-      <p class="hint">支持 OpenAI-compatible Chat Completions 接口。钉钉机器人提问时会检索所有历史候选人、推荐和报告，再调用模型生成回答；未启用或调用失败时自动使用本地规则回答。</p>
+      <p class="hint">支持 OpenAI-compatible Chat Completions 接口，已内置 gptsapi.net 预设。钉钉机器人提问时会检索所有历史候选人、推荐和报告，再调用模型生成回答；未启用或调用失败时自动使用本地规则回答。</p>
     </section>
 
     <section class="panel">
@@ -164,6 +171,21 @@
         <span id="behaviorStatus" class="badge">未加载</span>
       </div>
       <div class="form-grid behavior-grid">
+        <label>
+          工作时间限制
+          <select id="workTimeEnabled">
+            <option value="false">关闭</option>
+            <option value="true">开启</option>
+          </select>
+        </label>
+        <label>
+          工作开始时间
+          <input id="workStartTime" type="time" value="09:00" />
+        </label>
+        <label>
+          工作结束时间
+          <input id="workEndTime" type="time" value="18:00" />
+        </label>
         <label>
           随机请求最小间隔(ms)
           <input id="requestDelayMin" type="number" min="1000" step="1000" />
@@ -224,6 +246,10 @@
           <input id="filterReviewWeight" type="number" min="0" max="100" />
         </label>
       </div>
+      <label class="textarea-field">
+        允许工作的星期
+        <input id="workDays" type="text" placeholder="1,2,3,4,5 表示周一到周五；7 表示周日" />
+      </label>
       <label class="textarea-field">
         搜索关键词分散池
         <textarea id="searchKeywordPool" rows="5" placeholder="每行一个关键词组合，例如：Java开发 北京 25-35K"></textarea>
@@ -309,6 +335,30 @@
       </div>
 
       <div id="jobsTab" class="tab-panel">
+        <div class="job-editor">
+          <div class="form-grid job-form-grid">
+            <label>
+              岗位名称
+              <input id="jobRoleInput" type="text" placeholder="例如：Java开发工程师" />
+            </label>
+            <label>
+              来源
+              <input id="jobSourceInput" type="text" placeholder="手动录入 / BOSS直聘" />
+            </label>
+            <label>
+              账号
+              <input id="jobAccountInput" type="text" placeholder="默认使用系统账号信息" />
+            </label>
+          </div>
+          <label class="textarea-field">
+            岗位要求
+            <textarea id="jobRequirementInput" rows="7" placeholder="粘贴或录入老职位/新职位的完整岗位要求，保存后会自动匹配历史候选人"></textarea>
+          </label>
+          <div class="actions">
+            <button id="saveJobRequirementBtn">保存岗位要求</button>
+            <button id="matchJobsBtn" class="secondary">重新匹配所有候选人</button>
+          </div>
+        </div>
         <div id="jobRequirementList" class="reports"></div>
       </div>
     </section>
