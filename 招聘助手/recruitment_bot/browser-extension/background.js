@@ -595,6 +595,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'getJobRequirementFromBackend') {
+    const role = encodeURIComponent(message.role || '');
+    fetchFromBackend(`/api/job-requirements?role=${role}`)
+      .then(sendResponse)
+      .catch(err => sendResponse({ success: false, message: err.message }));
+    return true;
+  }
+
   if (message.action === 'detectedAccountUpdated') {
     const accountInfo = message.accountInfo || {};
     chrome.storage.local.get(['settings'], ({ settings = DEFAULT_SETTINGS }) => {

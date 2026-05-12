@@ -67,6 +67,7 @@ let settings = {
 const processedResumeIds = new Set();
 const processedActionKeys = new Set();
 const processedBrowseKeys = new Set();
+const workflowProcessedKeys = new Set();
 let isBrowsingCandidates = false;
 let cachedJobRequirements = {};
 
@@ -78,7 +79,7 @@ const RESUME_ACTIONS = {
   },
   request: {
     label: '索要简历',
-    keywords: ['索要简历', '请求简历', '要简历', '获取简历', '请求发送简历', '请发简历', '让TA发简历', '让他发简历', '让她发简历'],
+    keywords: ['索要简历', '求简历', '请求简历', '要简历', '获取简历', '请求发送简历', '请发简历', '让TA发简历', '让他发简历', '让她发简历'],
     blockedKeywords: ['已索要', '已请求', '已发送', '已获取', '等待对方'],
   },
 };
@@ -720,6 +721,18 @@ async function ensureChatJobRequirement(resumeInfo) {
     return;
   }
 
+  const backendRequirement = await fetchJobRequirementFromBackend(resumeInfo.role);
+  if (backendRequirement?.requirement) {
+    cacheJobRequirement(resumeInfo.role, backendRequirement.requirement, {
+      source: backendRequirement.source || resumeInfo.source,
+      accountName: backendRequirement.account_name || backendRequirement.accountName || resumeInfo.accountName,
+      sourceUrl: backendRequirement.source_url || resumeInfo.sourceUrl,
+    });
+    resumeInfo.jobRequirement = backendRequirement.requirement;
+    resumeInfo.evaluation = evaluateCandidate(resumeInfo);
+    return;
+  }
+
   let requirement = extractJobRequirementFromPage(document.body, resumeInfo.role);
   if (!requirement) {
     const trigger = findCommunicationJobTrigger(resumeInfo.role);
@@ -741,6 +754,19 @@ async function ensureChatJobRequirement(resumeInfo) {
       sourceUrl: resumeInfo.sourceUrl,
     });
     resumeInfo.evaluation = evaluateCandidate(resumeInfo);
+  }
+}
+
+async function fetchJobRequirementFromBackend(role) {
+  if (!role) return null;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      action: 'getJobRequirementFromBackend',
+      role,
+    });
+    return response?.item || null;
+  } catch (err) {
+    return null;
   }
 }
 
@@ -1814,6 +1840,179 @@ async function browseCandidatesAndRunActions({
   return summary;
 }
 
+async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
+  if (isBrowsingCandidates) {
+    return { success: false, message: '任务流程正在执行中' };
+  }
+
+  isBrowsingCandidates = true;
+  const summary = {
+    success: true,
+    processed: 0,
+    requested: 0,
+    accepted: 0,
+    skipped: 0,
+    savedJobs: 0,
+    blockedBySafety: false,
+    details: [],
+  };
+
+  try {
+    for (let index = 0; index < maxCandidates; index++) {
+      if (!canPerformOperation()) {
+        summary.blockedBySafety = true;
+        break;
+      }
+
+      const target = findNextWorkflowCandidateTarget();
+      if (target) {
+        await openWorkflowCandidate(target, index);
+      } else if (index > 0) {
+        break;
+      }
+
+      const accepted = await acceptAttachmentResumeIfPresent(`候选人${index + 1}`);
+      if (accepted.executed > 0) summary.accepted += accepted.executed;
+
+      await openCurrentCandidateDetailFromSummary();
+      const candidate = await scrapeChatCandidateInfo();
+      if (!candidate) {
+        summary.skipped++;
+        summary.details.push({ name: target?.name || '候选人', reason: '未识别候选人信息' });
+        workflowProcessedKeys.add(target?.key || `current_${index}`);
+        continue;
+      }
+
+      const beforeRequirement = Boolean(candidate.jobRequirement);
+      await ensureChatJobRequirement(candidate);
+      if (!beforeRequirement && candidate.jobRequirement) summary.savedJobs++;
+
+      await openOnlineResumeIfPresent();
+      const refreshed = await scrapeChatCandidateInfo();
+      const finalCandidate = refreshed || candidate;
+      if (!finalCandidate.evaluation) finalCandidate.evaluation = evaluateCandidate(finalCandidate);
+      await saveResumeData(finalCandidate);
+
+      const score = Number(finalCandidate.evaluation?.score || 0);
+      if (score >= AGENTS_EVALUATION_RULES.recommendThreshold) {
+        const requestResult = await clickResumeActionType('request', finalCandidate.name || target?.name || '候选人');
+        summary.requested += requestResult.executed;
+        if (!requestResult.executed) summary.skipped++;
+      } else {
+        summary.skipped++;
+      }
+
+      summary.processed++;
+      summary.details.push({
+        name: finalCandidate.name || target?.name || '候选人',
+        role: finalCandidate.role || '',
+        score,
+        requested: score >= AGENTS_EVALUATION_RULES.recommendThreshold,
+      });
+      workflowProcessedKeys.add(target?.key || getCurrentWorkflowKey(finalCandidate));
+      await maybeTakeLongBreak(summary.processed);
+    }
+  } finally {
+    isBrowsingCandidates = false;
+  }
+
+  notifyPopup('log', {
+    message: `一键任务完成：处理 ${summary.processed} 位，求简历 ${summary.requested} 次，同意附件 ${summary.accepted} 次`,
+    type: 'success',
+  });
+  return summary;
+}
+
+function findNextWorkflowCandidateTarget() {
+  const targets = findCandidateNavigationTargets();
+  const unread = targets.filter(target => {
+    const text = normalizeText(target.card?.textContent || '');
+    return /未读|\d+\s*$|新招呼|红点/.test(text) || target.card?.querySelector?.('[class*="red"], [class*="badge"], [class*="unread"]');
+  });
+  return [...unread, ...targets].find(target => !workflowProcessedKeys.has(target.key)) || null;
+}
+
+async function openWorkflowCandidate(target, index = 0) {
+  const previousUrl = window.location.href;
+  const previousText = normalizeText(document.body.textContent || '').slice(0, 500);
+  const delay = humanDelay() + (index * (2500 + Math.random() * 4000));
+  await sleep(delay);
+  await simulateHumanScroll();
+  await simulateMouseMove(target.clickable);
+  await sleep(800 + Math.random() * 1200);
+  const clicked = simulateHumanClick(target.clickable);
+  if (clicked) {
+    recordOperation();
+    notifyPopup('candidateBrowsed', { name: target.name });
+    await waitForCommunicationInterface(previousUrl, previousText);
+    await simulateCandidateDwell();
+  }
+  return clicked;
+}
+
+async function acceptAttachmentResumeIfPresent(contextName = '候选人') {
+  const bodyText = normalizeText(document.body.textContent || '');
+  if (!/(附件简历|发送附件简历|是否同意|想发送附件简历)/.test(bodyText)) {
+    return { executed: 0 };
+  }
+  return clickResumeActionType('accept', contextName);
+}
+
+async function clickResumeActionType(type, contextName = '候选人') {
+  const target = findActionTargets(document).find(item => item.type === type && !processedActionKeys.has(item.key));
+  const summary = { executed: 0, skipped: 0 };
+  if (!target) return summary;
+  if (!canPerformOperation()) return { ...summary, blockedBySafety: true };
+
+  await sleep(humanDelay());
+  await simulateHumanScroll();
+  await simulateActionDwell();
+  await simulateMouseMove(target.button);
+  await sleep(700 + Math.random() * 1000);
+  const success = simulateHumanClick(target.button);
+  processedActionKeys.add(target.key);
+  if (success) {
+    recordOperation();
+    summary.executed = 1;
+    notifyPopup('resumeActionExecuted', {
+      name: contextName,
+      actionType: target.type,
+      actionLabel: target.label,
+    });
+    await simulateActionDwell();
+  } else {
+    summary.skipped = 1;
+  }
+  return summary;
+}
+
+async function openOnlineResumeIfPresent() {
+  const target = findClickableByText(['在线简历', '查看在线简历', '简历详情']);
+  if (!target || !canPerformOperation()) return false;
+  await simulateMouseMove(target);
+  await sleep(700 + Math.random() * 1000);
+  const before = normalizeText(document.body.textContent || '').slice(0, 800);
+  const clicked = simulateHumanClick(target);
+  if (!clicked) return false;
+  recordOperation();
+  await sleep(1800 + Math.random() * 2600);
+  return normalizeText(document.body.textContent || '').slice(0, 800) !== before;
+}
+
+function findClickableByText(keywords) {
+  const elements = Array.from(document.querySelectorAll('button, a, [role="button"], span, div'));
+  return elements.find(element => {
+    if (!isActionableElement(element)) return false;
+    const text = getClickableText(element);
+    if (!text || text.length > 40) return false;
+    return keywords.some(keyword => text.includes(keyword));
+  }) || null;
+}
+
+function getCurrentWorkflowKey(candidate) {
+  return `workflow_${hashString(`${window.location.pathname}|${candidate?.name || ''}|${candidate?.role || ''}`)}`;
+}
+
 async function scanCurrentPage({ notify = false } = {}) {
   const resumeCards = findResumeCards();
   const results = [];
@@ -2192,6 +2391,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     browseCandidatesAndRunActions({
       manual: true,
       maxCandidates: message.maxCandidates || 10,
+    }).then(sendResponse);
+    return true;
+  }
+
+  if (message.action === 'startRecruitmentWorkflow') {
+    startRecruitmentWorkflow({
+      maxCandidates: message.maxCandidates || settings.maxCandidatesPerRun || 20,
     }).then(sendResponse);
     return true;
   }

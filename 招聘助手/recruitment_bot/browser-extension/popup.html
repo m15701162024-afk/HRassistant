@@ -102,6 +102,13 @@
       cursor: pointer;
     }
     .btn:hover { background: #f8fafc; }
+    .btn.primary {
+      background: #ffee00;
+      border-color: #111827;
+      color: #111827;
+      margin-bottom: 10px;
+    }
+    .btn.primary:hover { background: #e6d600; }
     .field {
       display: grid;
       gap: 6px;
@@ -175,7 +182,7 @@
   </div>
 
   <div class="notice">
-    所有连接、推送、问答、定时任务和行为节奏均在 Web 管理后台配置。插件会自动同步配置并执行。
+    点击一键开始后，插件会按岗位要求库评估候选人，匹配度达标再求简历。连接、推送、问答、定时任务和行为节奏在 Web 管理后台配置。
   </div>
 
   <div class="stats-grid">
@@ -194,6 +201,7 @@
   </div>
 
   <div class="panel">
+    <button class="btn primary" id="btnStartTask">一键开始执行任务</button>
     <button class="btn" id="btnOpenWebAdmin">打开 Web 管理后台</button>
   </div>
 

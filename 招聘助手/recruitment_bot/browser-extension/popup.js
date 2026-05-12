@@ -7,6 +7,7 @@ const elements = {
   todayResumes: document.getElementById('todayResumes'),
   recommendedCount: document.getElementById('recommendedCount'),
   btnOpenWebAdmin: document.getElementById('btnOpenWebAdmin'),
+  btnStartTask: document.getElementById('btnStartTask'),
   btnSaveAccount: document.getElementById('btnSaveAccount'),
   logBody: document.getElementById('logBody'),
   logCount: document.getElementById('logCount'),
@@ -109,6 +110,38 @@ elements.btnOpenWebAdmin.addEventListener('click', async () => {
   const url = (settings.backendUrl || DEFAULT_SETTINGS.backendUrl).replace(/\/+$/, '');
   chrome.tabs.create({ url });
 });
+
+elements.btnStartTask.addEventListener('click', async () => {
+  elements.btnStartTask.disabled = true;
+  elements.btnStartTask.textContent = '任务执行中...';
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error('未找到当前招聘页面');
+    chrome.tabs.sendMessage(tab.id, {
+      action: 'startRecruitmentWorkflow',
+      maxCandidates: 20,
+    }, (response) => {
+      elements.btnStartTask.disabled = false;
+      elements.btnStartTask.textContent = '一键开始执行任务';
+      if (chrome.runtime.lastError) {
+        elements.backendStatus.textContent = '请先打开 BOSS 招聘页面';
+        elements.backendStatus.classList.remove('ok');
+        return;
+      }
+      if (!response?.success) {
+        elements.backendStatus.textContent = response?.message || '任务启动失败';
+        elements.backendStatus.classList.remove('ok');
+      }
+      updatePopup();
+    });
+  } catch (err) {
+    elements.btnStartTask.disabled = false;
+    elements.btnStartTask.textContent = '一键开始执行任务';
+    elements.backendStatus.textContent = err.message || '任务启动失败';
+    elements.backendStatus.classList.remove('ok');
+  }
+});
+
 
 elements.btnSaveAccount.addEventListener('click', async () => {
   const accountName = elements.accountNameInput.value.trim();
