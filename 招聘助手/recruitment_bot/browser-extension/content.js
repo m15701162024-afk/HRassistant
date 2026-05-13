@@ -1062,9 +1062,13 @@ function scrapeResumeInfo(card, resumeId) {
       accountName: settings.accountName || detectRecruiterAccountInfo().name || '',
       accountPlatform: settings.accountPlatform || 'BOSS直聘',
       hasResume: true,
-      resumeStatus: '已识别简历详情',
+      hasAttachmentResume: false,
+      resumeAttachmentType: 'none',
+      resumeStatus: '无附件简历（在线简历）',
     };
-    info.rawText = normalizeText(card.textContent || '').slice(0, 3000);
+    const topLevelText = extractCandidateTopLevelText(card) || cleanCandidateTopLevelText(card.textContent || '');
+    info.topLevelText = topLevelText;
+    info.rawText = topLevelText;
 
     info.name = extractText(card, [
       '[class*="name"]', '[class*="title"]', '[class*="geek-name"]',
@@ -1085,28 +1089,28 @@ function scrapeResumeInfo(card, resumeId) {
     }
     info.education = extractText(card, [
       '[class*="edu"]', '[class*="degree"]', '[class*="education"]',
-    ]);
+    ]) || extractEducationFromText(topLevelText);
     info.experience = extractText(card, [
       '[class*="exp"]', '[class*="experience"]', '[class*="work"]',
-    ]);
+    ]) || extractExperienceFromText(topLevelText);
     info.ageGender = extractText(card, [
       '[class*="age"]', '[class*="gender"]', '[class*="basic"]',
-    ]);
+    ]) || extractAgeFromText(topLevelText);
     info.currentCompany = extractText(card, [
       '[class*="company"]', '[class*="corp"]',
     ]);
     info.expectedSalary = extractText(card, [
       '[class*="salary"]', '[class*="pay"]',
-    ]);
+    ]) || extractExpectedSalaryFromText(topLevelText);
     info.status = extractText(card, [
       '[class*="status"]', '[class*="active"]', '[class*="state"]',
     ]);
     info.summary = extractText(card, [
       '[class*="summary"]', '[class*="desc"]',
       '[class*="intro"]', '[class*="self"]',
-    ]);
-    info.email = extractByRegex(card.textContent || '', /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-    info.phone = extractByRegex(card.textContent || '', /(?:\+?86[-\s]?)?1[3-9]\d{9}/);
+    ]) || topLevelText;
+    info.email = extractByRegex(topLevelText, /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    info.phone = extractByRegex(topLevelText, /(?:\+?86[-\s]?)?1[3-9]\d{9}/);
     info.qualityScore = calculateResumeQuality(info);
     info.evaluation = evaluateCandidate(info);
 
@@ -1228,7 +1232,68 @@ function extractByRegex(text, regex) {
 }
 
 function normalizeText(text) {
-  return text.replace(/\s+/g, ' ').trim();
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function cleanCandidateTopLevelText(text) {
+  let normalized = normalizeText(text || '');
+  const stopMarkers = [
+    '工作经历', '项目经历', '教育经历', '资格证书', '证书', '求职期望',
+    '沟通记录', '聊天记录', '全部职位', '新招呼', '沟通中', '账号权益',
+    '招聘规范', '职位管理', '推荐牛人', '批量',
+  ];
+  for (const marker of stopMarkers) {
+    const index = normalized.indexOf(marker);
+    if (index > 8) normalized = normalized.slice(0, index);
+  }
+  return normalized.slice(0, 900).trim();
+}
+
+function isPollutedCandidateText(text) {
+  const normalized = normalizeText(text || '');
+  const pageMarkers = ['全部职位', '新招呼', '沟通中', '账号权益', '招聘规范', '职位管理']
+    .filter(marker => normalized.includes(marker)).length;
+  const repeatedRoles = new Set(normalized.match(/[\u4e00-\u9fa5A-Za-z/+-]+(?:工程师|分析|开发|产品|运营)[^\s，。|]{0,18}\(J\d+\)/g) || []).size;
+  return pageMarkers >= 2 || repeatedRoles >= 3 || normalized.length > 1200;
+}
+
+function scoreCandidateTopLevelText(text, rect, nameText = '') {
+  let score = 0;
+  if (nameText && text.includes(nameText)) score += 12;
+  if (/本科|大专|硕士|博士/.test(text)) score += 8;
+  if (/\d{1,2}\s*年|应届|实习/.test(text)) score += 6;
+  if (/\d{2}\s*岁/.test(text)) score += 4;
+  if (/J\d+|沟通职位|期望/.test(text)) score += 4;
+  if (rect.width >= 300) score += 3;
+  if (text.length >= 80 && text.length <= 420) score += 3;
+  return score;
+}
+
+function extractCandidateTopLevelText(scope = document, candidateName = '') {
+  const roots = scope === document
+    ? Array.from(document.querySelectorAll('header, section, article, [class*="resume"], [class*="geek"], [class*="profile"], [class*="user"], [class*="detail"], [class*="card"], [class*="drawer"], [class*="modal"]'))
+    : [scope, ...Array.from(scope.querySelectorAll?.('header, section, article, [class*="resume"], [class*="geek"], [class*="profile"], [class*="user"], [class*="detail"], [class*="card"]') || [])];
+  const nameText = normalizeText(candidateName || '');
+  const candidates = roots
+    .filter(isActionableElement)
+    .map(element => {
+      const text = cleanCandidateTopLevelText(element.textContent || '');
+      const rect = element.getBoundingClientRect();
+      return { element, text, rect, score: scoreCandidateTopLevelText(text, rect, nameText) };
+    })
+    .filter(({ text, rect }) => {
+      if (!text || text.length < 12 || text.length > 900) return false;
+      if (rect.width < 160 || rect.height < 35) return false;
+      if (isPollutedCandidateText(text)) return false;
+      if (nameText && !text.includes(nameText) && scope === document) return false;
+      return /(在线|离线|岁|年|本科|大专|硕士|博士|J\d+|沟通职位)/.test(text);
+    })
+    .sort((a, b) => {
+      const aName = nameText && a.text.includes(nameText) ? 0 : 1;
+      const bName = nameText && b.text.includes(nameText) ? 0 : 1;
+      return (aName - bName) || (b.score - a.score) || (a.text.length - b.text.length) || (a.rect.top - b.rect.top);
+    });
+  return candidates[0]?.text || '';
 }
 
 function hashString(text) {
@@ -1903,13 +1968,24 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
 
       const acceptedResume = accepted.executed > 0;
       const openedOnlineResume = await openOnlineResumeIfPresent();
-      const refreshed = await scrapeChatCandidateInfo();
+      const refreshed = openedOnlineResume
+        ? await scrapeVisibleOnlineResumeInfo(candidate)
+        : await scrapeChatCandidateInfo();
       const finalCandidate = refreshed || candidate;
-      if (acceptedResume || openedOnlineResume) {
+      if (acceptedResume) {
         finalCandidate.hasResume = true;
-        finalCandidate.resumeStatus = acceptedResume ? '已同意接收附件简历' : '已打开在线简历';
-        finalCandidate.resumeEvidence = acceptedResume ? 'attachmentAccepted' : 'onlineResumeOpened';
-        finalCandidate.id = `resume_${hashString(`${finalCandidate.name || ''}|${finalCandidate.role || ''}|${finalCandidate.resumeStatus}|${Date.now()}`)}`;
+        finalCandidate.hasAttachmentResume = true;
+        finalCandidate.resumeAttachmentType = 'attachment';
+        finalCandidate.resumeStatus = '有附件简历（已同意接收）';
+        finalCandidate.resumeEvidence = 'attachmentAccepted';
+        finalCandidate.id = `resume_${hashString(`${finalCandidate.name || ''}|${finalCandidate.role || ''}|attachment|${finalCandidate.receivedDate || ''}`)}`;
+      } else if (openedOnlineResume) {
+        finalCandidate.hasResume = true;
+        finalCandidate.hasAttachmentResume = false;
+        finalCandidate.resumeAttachmentType = 'none';
+        finalCandidate.resumeStatus = '无附件简历（在线简历）';
+        finalCandidate.resumeEvidence = 'onlineResumeOpened';
+        finalCandidate.id = `resume_${hashString(`${finalCandidate.name || ''}|${finalCandidate.role || ''}|online|${finalCandidate.receivedDate || ''}`)}`;
       }
       if (!finalCandidate.evaluation) finalCandidate.evaluation = evaluateCandidate(finalCandidate);
       await saveResumeData(finalCandidate);
@@ -2018,6 +2094,44 @@ async function openOnlineResumeIfPresent() {
   recordOperation();
   await sleep(1800 + Math.random() * 2600);
   return normalizeText(document.body.textContent || '').slice(0, 800) !== before;
+}
+
+async function scrapeVisibleOnlineResumeInfo(baseCandidate = {}) {
+  const topLevelText = extractCandidateTopLevelText(document, baseCandidate.name) ||
+                       cleanCandidateTopLevelText(findCandidateSummaryPanel()?.textContent || '');
+  if (!topLevelText) return null;
+  const resumeInfo = {
+    ...baseCandidate,
+    source: baseCandidate.source || 'BOSS直聘',
+    sourceUrl: window.location.href,
+    receivedDate: baseCandidate.receivedDate || new Date().toISOString().split('T')[0],
+    receivedTime: baseCandidate.receivedTime || new Date().toISOString(),
+    scrapedAt: new Date().toISOString(),
+    accountName: baseCandidate.accountName || settings.accountName || detectRecruiterAccountInfo().name || '',
+    accountPlatform: baseCandidate.accountPlatform || settings.accountPlatform || 'BOSS直聘',
+    hasResume: true,
+    hasAttachmentResume: false,
+    resumeAttachmentType: 'none',
+    resumeStatus: '无附件简历（在线简历）',
+    resumeEvidence: 'onlineResumeOpened',
+    topLevelText,
+    rawText: topLevelText,
+    education: extractEducationFromText(topLevelText) || baseCandidate.education || '',
+    experience: extractExperienceFromText(topLevelText) || baseCandidate.experience || '',
+    expectedSalary: extractExpectedSalaryFromText(topLevelText) || baseCandidate.expectedSalary || '',
+    ageGender: extractAgeFromText(topLevelText) || baseCandidate.ageGender || '',
+    summary: topLevelText,
+  };
+  if (!resumeInfo.role) {
+    resumeInfo.role = extractCommunicationRole(topLevelText) || extractExpectedRole(topLevelText) || '';
+  }
+  if (!resumeInfo.name) {
+    resumeInfo.name = extractChatCandidateName(topLevelText, topLevelText);
+  }
+  await ensureChatJobRequirement(resumeInfo);
+  resumeInfo.qualityScore = calculateResumeQuality(resumeInfo);
+  resumeInfo.evaluation = evaluateCandidate(resumeInfo);
+  return resumeInfo.name && resumeInfo.role ? resumeInfo : null;
 }
 
 function findClickableByText(keywords) {
@@ -2131,7 +2245,7 @@ async function openCurrentCandidateDetailFromSummary() {
 async function scrapeChatCandidateInfo() {
   const panel = findCandidateSummaryPanel();
   if (!panel) return null;
-  const text = normalizeText(panel.textContent || '');
+  const text = extractCandidateTopLevelText(panel) || cleanCandidateTopLevelText(panel.textContent || '');
   const bodyText = normalizeText(document.body.textContent || '');
   const role = extractCommunicationRole(bodyText);
   const name = extractChatCandidateName(text, bodyText);
@@ -2149,13 +2263,16 @@ async function scrapeChatCandidateInfo() {
     accountName: settings.accountName || detectRecruiterAccountInfo().name || '',
     accountPlatform: settings.accountPlatform || 'BOSS直聘',
     hasResume: false,
+    hasAttachmentResume: false,
+    resumeAttachmentType: 'none',
     resumeStatus: '仅沟通信息',
-    rawText: text.slice(0, 2500),
+    topLevelText: text,
+    rawText: text,
     education: extractEducationFromText(text),
     experience: extractExperienceFromText(text),
     expectedSalary: extractExpectedSalaryFromText(text) || extractExpectedSalaryFromText(extractCommunicationRoleContext(bodyText, role)),
     ageGender: extractAgeFromText(text),
-    summary: extractLatestCandidateMessage(bodyText, name),
+    summary: text,
   };
 
   await ensureChatJobRequirement(resumeInfo);
@@ -2353,6 +2470,7 @@ function hasCandidateResumeEvidence(info) {
   return Boolean(
     info.hasResume ||
     info.resumeStatus ||
+    info.topLevelText ||
     info.education ||
     info.experience ||
     info.summary ||

@@ -111,6 +111,20 @@ function row(cells) {
   return `<tr>${cells.map(cell => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`;
 }
 
+function cleanCandidateSnapshot(value) {
+  let text = String(value || '').replace(/\s+/g, ' ').trim();
+  const stopMarkers = [
+    '工作经历', '项目经历', '教育经历', '资格证书', '求职期望',
+    '沟通记录', '聊天记录', '全部职位', '新招呼', '沟通中',
+    '账号权益', '招聘规范', '职位管理', '推荐牛人', '批量',
+  ];
+  for (const marker of stopMarkers) {
+    const index = text.indexOf(marker);
+    if (index > 8) text = text.slice(0, index).trim();
+  }
+  return text.slice(0, 900);
+}
+
 function toast(message, type = 'success') {
   const el = $('toast');
   el.textContent = message;
@@ -512,15 +526,24 @@ function buildCandidateDetail(item) {
   const evaluation = raw.evaluation || {};
   const dimensions = evaluation.dimensions || {};
   const rejectionReasons = evaluation.rejectionReasons || [];
+  const topLevelText = cleanCandidateSnapshot(raw.topLevelText || raw.rawText || raw.summary || '');
+  const resumeType = raw.hasAttachmentResume || raw.resumeAttachmentType === 'attachment' || raw.resumeEvidence === 'attachmentAccepted'
+    ? '有附件简历'
+    : (raw.hasResume ? '无附件简历' : '未获取简历');
   return [
     `姓名：${item.name || '未识别'}`,
     `岗位：${item.role || '待确认'}`,
+    `简历类型：${resumeType}`,
+    `简历状态：${raw.resumeStatus || '未记录'}`,
+    `学历：${item.education || raw.education || '未识别'}`,
+    `经验：${item.experience || raw.experience || '未识别'}`,
+    `薪资：${item.expected_salary || raw.expectedSalary || '未识别'}`,
     `匹配度：${item.score || 0}%`,
     `推荐意见：${item.recommendation || '待评估'}`,
     `数据来源：${item.source || '未知'}｜账号：${item.account_name || '未识别'}`,
     '',
-    '岗位要求：',
-    raw.jobRequirement || '未抓取到岗位JD',
+    '候选人顶层信息：',
+    topLevelText || '未采集到候选人顶层简历信息',
     '',
     '不推荐/风险依据：',
     ...(rejectionReasons.length ? rejectionReasons.map(item => `- ${item}`) : (evaluation.risks || []).map(item => `- ${item}`)),

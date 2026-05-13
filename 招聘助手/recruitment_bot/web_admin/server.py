@@ -288,6 +288,10 @@ def read_json(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
 def normalize_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(candidate or {})
     name = str(cleaned.get("name") or "").strip()
+    top_level_text = sanitize_candidate_snapshot(cleaned.get("topLevelText") or cleaned.get("rawText") or "")
+    if top_level_text:
+        cleaned["topLevelText"] = top_level_text
+        cleaned["rawText"] = top_level_text
     raw_text = " ".join(
         str(cleaned.get(key) or "")
         for key in ("rawText", "summary", "jobRequirement")
@@ -306,6 +310,22 @@ def normalize_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
         cleaned["_invalidRecommendation"] = True
         cleaned["_invalidReason"] = "候选人详情采集混入列表或整页文本，已阻止进入推荐报告"
     return cleaned
+
+
+def sanitize_candidate_snapshot(text: Any) -> str:
+    normalized = " ".join(str(text or "").split()).strip()
+    if not normalized:
+        return ""
+    stop_markers = [
+        "工作经历", "项目经历", "教育经历", "资格证书", "求职期望",
+        "沟通记录", "聊天记录", "全部职位", "新招呼", "沟通中",
+        "账号权益", "招聘规范", "职位管理", "推荐牛人", "批量",
+    ]
+    for marker in stop_markers:
+        index = normalized.find(marker)
+        if index > 8:
+            normalized = normalized[:index].strip()
+    return normalized[:900]
 
 
 def is_generic_candidate_name(name: str) -> bool:
@@ -1694,6 +1714,15 @@ def raw_value(row: dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def has_attachment_resume(row: dict[str, Any]) -> bool:
+    raw = raw_payload(row)
+    return bool(
+        raw.get("hasAttachmentResume")
+        or raw.get("resumeAttachmentType") == "attachment"
+        or raw.get("resumeEvidence") == "attachmentAccepted"
+    )
+
+
 def account_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for row in rows:
@@ -1703,13 +1732,7 @@ def account_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def attachment_resume_count(rows: list[dict[str, Any]]) -> int:
-    total = 0
-    for row in rows:
-        raw = raw_payload(row)
-        text = " ".join(str(raw.get(key) or "") for key in ("resumeStatus", "summary", "rawText", "nextStep"))
-        if "附件简历" in text or "附件" in text:
-            total += 1
-    return total
+    return sum(1 for row in rows if has_attachment_resume(row))
 
 
 def create_recommendation_excel(scope: str = "configured", start: str | None = None, end: str | None = None) -> tuple[Path, dict[str, Any]]:
