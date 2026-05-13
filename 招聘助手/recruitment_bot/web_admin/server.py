@@ -1528,7 +1528,8 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
         answer = "### 招聘助手\n\n我没有收到有效问题。你可以问：昨天推荐了谁？React候选人有哪些？匹配度最高的是谁？"
         agent_meta = {"mode": "empty"}
     else:
-        answer, agent_meta = answer_question_with_agent(question)
+        answer = answer_question_rules(question)
+        agent_meta = {"mode": "rules-fast-callback"}
 
     save_agent_conversation(
         question=question or "(empty)",
@@ -1538,22 +1539,7 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
         raw=message.get("raw", {}),
     )
 
-    webhook = message.get("sessionWebhook")
-    if webhook:
-        push_result = send_dingtalk_markdown_to_webhook(
-            webhook,
-            "招聘助手问答",
-            answer,
-            "",
-        )
-    else:
-        settings = get_settings()
-        push_result = {"success": False, "skipped": True, "message": "使用钉钉回调直接回复"}
-        if settings.get("dingtalkWebhook"):
-            try:
-                push_result = send_dingtalk_markdown("招聘助手问答", answer)
-            except Exception as exc:
-                push_result = {"success": False, "message": str(exc)}
+    push_result = {"success": True, "skipped": True, "message": "使用钉钉回调直接回复"}
 
     return {
         "success": True,
