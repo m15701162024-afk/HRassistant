@@ -1204,22 +1204,30 @@ def scheduled_push_loop() -> None:
         time.sleep(60)
 
 
-def export_url(path: Path) -> str:
+def request_base_url(handler: SimpleHTTPRequestHandler) -> str:
+    forwarded_proto = handler.headers.get("X-Forwarded-Proto")
+    forwarded_host = handler.headers.get("X-Forwarded-Host")
+    proto = forwarded_proto or ("https" if handler.headers.get("X-Forwarded-Ssl") == "on" else "http")
+    host = forwarded_host or handler.headers.get("Host", "")
+    return f"{proto}://{host}".rstrip("/") if host else ""
+
+
+def export_url(path: Path, base_url: str | None = None) -> str:
     settings = get_settings()
-    base = str(settings.get("publicBaseUrl") or "").strip().rstrip("/")
+    base = str(base_url or settings.get("publicBaseUrl") or os.environ.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
     if not base:
         base = str(settings.get("adminBaseUrl") or "").strip().rstrip("/")
     filename = urllib.parse.quote(path.name)
     return f"{base}/exports/{filename}" if base else f"/exports/{filename}"
 
 
-def build_push_markdown(scope: str, dataset: dict[str, Any], excel_path: Path) -> str:
+def build_push_markdown(scope: str, dataset: dict[str, Any], excel_path: Path, base_url: str | None = None) -> str:
     summary = build_summary(
         "custom",
         dataset["start"].isoformat(timespec="minutes"),
         dataset["end"].isoformat(timespec="minutes"),
     )
-    link = export_url(excel_path)
+    link = export_url(excel_path, base_url)
     excel_section = "\n".join([
         "#### Excel 推荐表",
         f"- 文件：[{excel_path.name}]({link})",
@@ -1403,6 +1411,9 @@ def build_summary(scope: str = "yesterday", start: str | None = None, end: str |
             if account_count(rows, account) > 0
         ] or [empty]
 
+    def metric_line(rows: list[dict[str, Any]], label: str) -> str:
+        return " ".join([f"{label}：全部 {len(rows)}", *account_lines(rows, label)])
+
     source_counts: dict[str, int] = {}
     for item in candidates:
         source = item.get("source") or "未知来源"
@@ -1413,14 +1424,9 @@ def build_summary(scope: str = "yesterday", start: str | None = None, end: str |
             f"### {title_date} 招聘数据汇总",
             "",
             "#### 定时推送",
-            f"新增候选人：全部 {len(candidates)}",
-            *account_lines(candidates, "新增候选人"),
-            "",
-            f"收到简历数量：全部 {len(received_candidates)}",
-            *account_lines(received_candidates, "收到简历数量"),
-            "",
-            f"推荐候选人：全部 {len(recommended_candidates)}",
-            *account_lines(recommended_candidates, "推荐候选人"),
+            metric_line(candidates, "新增候选人"),
+            metric_line(received_candidates, "收到简历数量"),
+            metric_line(recommended_candidates, "推荐候选人"),
             "",
             f"数据来源：{source_text}",
         ]
@@ -1780,16 +1786,20 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/summary/push":
                 query = urllib.parse.parse_qs(parsed.query)
                 scope = query.get("scope", ["configured"])[0]
+                base_url = request_base_url(self)
+                settings = get_settings()
+                if not str(settings.get("publicBaseUrl") or "").strip() and base_url:
+                    save_settings({"adminBaseUrl": base_url})
                 output_path, dataset = create_recommendation_excel(
                     scope,
                     query.get("start", [""])[0] or None,
                     query.get("end", [""])[0] or None,
                 )
-                markdown = build_push_markdown(scope, dataset, output_path)
+                markdown = build_push_markdown(scope, dataset, output_path, base_url)
                 result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
                 result.update({
                     "excel": output_path.name,
-                    "excelUrl": export_url(output_path),
+                    "excelUrl": export_url(output_path, base_url),
                     "range": {
                         "label": dataset["label"],
                         "start": dataset["start"].isoformat(timespec="seconds"),
