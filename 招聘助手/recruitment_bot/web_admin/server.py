@@ -228,7 +228,7 @@ def json_response(handler: SimpleHTTPRequestHandler, payload: Any, status: int =
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.send_header("Access-Control-Allow-Headers", "Content-Type")
-    handler.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+    handler.send_header("Access-Control-Allow-Methods", "GET,HEAD,POST,OPTIONS")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -257,6 +257,7 @@ def binary_response(
     data: bytes,
     content_type: str,
     filename: str | None = None,
+    head_only: bool = False,
 ) -> None:
     handler.send_response(200)
     handler.send_header("Content-Type", content_type)
@@ -266,7 +267,8 @@ def binary_response(
         handler.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quoted}")
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
-    handler.wfile.write(data)
+    if not head_only:
+        handler.wfile.write(data)
 
 
 def read_json(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
@@ -1249,15 +1251,26 @@ def export_url(path: Path, base_url: str | None = None) -> str:
     return f"{base}/exports/{filename}" if base else f"/exports/{filename}"
 
 
+def is_public_http_url(value: str) -> bool:
+    parsed = urllib.parse.urlparse(str(value or ""))
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def build_push_markdown(scope: str, dataset: dict[str, Any], excel_path: Path, base_url: str | None = None) -> str:
     summary = build_summary(
         "custom",
         dataset["start"].isoformat(timespec="minutes"),
         dataset["end"].isoformat(timespec="minutes"),
     )
+    excel_link = export_url(excel_path, base_url)
+    file_line = (
+        f"- 文件：[{excel_path.name}]({excel_link})"
+        if is_public_http_url(excel_link)
+        else f"- 文件：{excel_path.name}"
+    )
     excel_section = "\n".join([
         "#### Excel 推荐表",
-        f"- 文件：{excel_path.name}",
+        file_line,
         f"- 范围：{dataset['label']}（{dataset['start']:%Y-%m-%d %H:%M} 至 {dataset['end']:%Y-%m-%d %H:%M}）",
         "- 口径：仅推荐已识别到简历证据且匹配度达标的候选人；未获取简历的沟通记录已排除。",
     ])
@@ -1793,8 +1806,30 @@ class Handler(SimpleHTTPRequestHandler):
             return str(STATIC_DIR / "index.html")
         return str(STATIC_DIR / parsed.path.lstrip("/"))
 
+    def serve_export(self, path_value: str, head_only: bool = False) -> bool:
+        filename = Path(urllib.parse.unquote(path_value.split("/exports/", 1)[1])).name
+        path = EXPORT_DIR / filename
+        if not path.exists() or not path.is_file():
+            json_response(self, {"success": False, "message": "文件不存在"}, 404)
+            return True
+        binary_response(
+            self,
+            path.read_bytes(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            path.name,
+            head_only=head_only,
+        )
+        return True
+
     def do_OPTIONS(self) -> None:
         json_response(self, {"success": True})
+
+    def do_HEAD(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.startswith("/exports/"):
+            self.serve_export(parsed.path, head_only=True)
+            return
+        super().do_HEAD()
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -1872,17 +1907,7 @@ class Handler(SimpleHTTPRequestHandler):
                     output_path.name,
                 )
             elif parsed.path.startswith("/exports/"):
-                filename = Path(urllib.parse.unquote(parsed.path.split("/exports/", 1)[1])).name
-                path = EXPORT_DIR / filename
-                if not path.exists() or not path.is_file():
-                    json_response(self, {"success": False, "message": "文件不存在"}, 404)
-                else:
-                    binary_response(
-                        self,
-                        path.read_bytes(),
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        path.name,
-                    )
+                self.serve_export(parsed.path)
             elif parsed.path == "/api/export/candidates.csv":
                 rows = list_rows("candidates", 10000, filters={
                     "q": query.get("q", [""])[0],
@@ -1974,12 +1999,18 @@ class Handler(SimpleHTTPRequestHandler):
                 markdown = build_push_markdown(scope, dataset, output_path, base_url)
                 result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
                 file_result = send_dingtalk_file(output_path)
-                if not file_result.get("success"):
+                excel_url = export_url(output_path, base_url)
+                if not file_result.get("success") and not is_public_http_url(excel_url):
                     result["success"] = False
                     result["message"] = f"正文已发送，但 Excel 文件未发送：{file_result.get('message') or file_result.get('body') or '未知错误'}"
+                elif not file_result.get("success"):
+                    result["excelDelivery"] = "downloadLink"
+                    result["message"] = f"Excel 已通过群消息下载链接发送；直发文件待捕获群会话后自动启用：{file_result.get('message') or file_result.get('body') or '未知错误'}"
+                else:
+                    result["excelDelivery"] = "dingtalkFile"
                 result.update({
                     "excel": output_path.name,
-                    "excelUrl": export_url(output_path, base_url),
+                    "excelUrl": excel_url,
                     "excelFile": file_result,
                     "range": {
                         "label": dataset["label"],
