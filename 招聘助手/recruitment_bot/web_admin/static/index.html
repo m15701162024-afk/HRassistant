@@ -112,8 +112,16 @@
           <input id="dingtalkAppSecret" type="password" placeholder="用于上传 Excel 文件" />
         </label>
         <label>
-          钉钉群 ChatId
-          <input id="dingtalkChatId" type="text" placeholder="用于直接发送 Excel 文件到群" />
+          钉钉 RobotCode
+          <input id="dingtalkRobotCode" type="text" placeholder="应用机器人 robotCode，可不填则默认 AppKey" />
+        </label>
+        <label>
+          OpenConversationId
+          <input id="dingtalkOpenConversationId" type="text" placeholder="群会话 openConversationId，优先用于发送 Excel" />
+        </label>
+        <label>
+          钉钉群 ChatId（可选）
+          <input id="dingtalkChatId" type="text" placeholder="兼容旧接口，找不到可不填" />
         </label>
         <label>
           自动识别账号
@@ -156,7 +164,7 @@
         <button id="pushYesterdayBtn" class="secondary">按范围推送汇总</button>
         <button id="exportSummaryExcelBtn" class="secondary">导出推荐 Excel</button>
       </div>
-      <p class="hint">钉钉机器人回调地址：<code id="callbackUrl"></code>。配置 AppKey、AppSecret、ChatId 后会直接发送 Excel 文件；仅配置 Webhook 时只发送正文。</p>
+      <p class="hint">钉钉机器人回调地址：<code id="callbackUrl"></code>。配置 AppKey、AppSecret、OpenConversationId 后会直接发送 Excel 文件；ChatId 仅作为旧接口兜底。</p>
     </section>
 
     <section class="panel module-section" data-module="settings">

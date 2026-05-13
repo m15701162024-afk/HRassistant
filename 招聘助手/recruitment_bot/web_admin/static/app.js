@@ -155,6 +155,8 @@ async function loadSettings() {
   $('dingtalkAppKey').placeholder = settings.dingtalkAppKeyConfigured ? '已配置，留空则保留' : '用于直接发送 Excel 文件';
   $('dingtalkAppSecret').value = '';
   $('dingtalkAppSecret').placeholder = settings.dingtalkAppSecretConfigured ? '已配置，留空则保留' : '用于上传 Excel 文件';
+  $('dingtalkRobotCode').value = settings.dingtalkRobotCode || '';
+  $('dingtalkOpenConversationId').value = settings.dingtalkOpenConversationId || '';
   $('dingtalkChatId').value = settings.dingtalkChatId || '';
   $('accountName').value = settings.accountName || settings.detectedAccount?.name || '';
   $('accountPlatform').value = settings.accountPlatform || settings.detectedAccount?.platform || 'BOSS直聘';
@@ -304,6 +306,8 @@ async function saveSettings(showToast = true) {
       dingtalkSecret: $('dingtalkSecret').value.trim(),
       dingtalkAppKey: $('dingtalkAppKey').value.trim(),
       dingtalkAppSecret: $('dingtalkAppSecret').value.trim(),
+      dingtalkRobotCode: $('dingtalkRobotCode').value.trim(),
+      dingtalkOpenConversationId: $('dingtalkOpenConversationId').value.trim(),
       dingtalkChatId: $('dingtalkChatId').value.trim(),
       accountName: $('accountName').value.trim(),
       accountPlatform: $('accountPlatform').value.trim() || 'BOSS直聘',
@@ -328,6 +332,8 @@ async function toggleSchedule() {
       dingtalkSecret: $('dingtalkSecret').value.trim(),
       dingtalkAppKey: $('dingtalkAppKey').value.trim(),
       dingtalkAppSecret: $('dingtalkAppSecret').value.trim(),
+      dingtalkRobotCode: $('dingtalkRobotCode').value.trim(),
+      dingtalkOpenConversationId: $('dingtalkOpenConversationId').value.trim(),
       dingtalkChatId: $('dingtalkChatId').value.trim(),
       accountName: $('accountName').value.trim(),
       accountPlatform: $('accountPlatform').value.trim() || 'BOSS直聘',

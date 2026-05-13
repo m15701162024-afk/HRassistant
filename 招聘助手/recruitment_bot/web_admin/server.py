@@ -1356,13 +1356,40 @@ def upload_dingtalk_file(access_token: str, file_path: Path) -> str:
 
 def send_dingtalk_file(file_path: Path) -> dict[str, Any]:
     settings = get_settings()
-    chat_id = str(settings.get("dingtalkChatId") or "").strip()
-    if not chat_id:
-        return {"success": False, "skipped": True, "message": "未配置钉钉 chatId，无法直接发送文件"}
     access_token = get_dingtalk_access_token(settings)
     if not access_token:
         return {"success": False, "skipped": True, "message": "未配置钉钉 AppKey/AppSecret，无法直接发送文件"}
     media_id = upload_dingtalk_file(access_token, file_path)
+    open_conversation_id = str(settings.get("dingtalkOpenConversationId") or "").strip()
+    robot_code = str(settings.get("dingtalkRobotCode") or settings.get("dingtalkAppKey") or "").strip()
+    if open_conversation_id and robot_code:
+        payload = {
+            "robotCode": robot_code,
+            "openConversationId": open_conversation_id,
+            "msgKey": "sampleFile",
+            "msgParam": json.dumps({
+                "mediaId": media_id,
+                "fileName": file_path.name,
+                "fileType": "xlsx",
+            }, ensure_ascii=False),
+        }
+        request = urllib.request.Request(
+            "https://api.dingtalk.com/v1.0/robot/groupMessages/send",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "x-acs-dingtalk-access-token": access_token,
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = json.loads(response.read().decode("utf-8") or "{}")
+        success = not body.get("code") and body.get("processQueryKey") is not None
+        return {"success": success, "body": body, "mediaId": media_id, "target": "openConversationId"}
+
+    chat_id = str(settings.get("dingtalkChatId") or "").strip()
+    if not chat_id:
+        return {"success": False, "skipped": True, "message": "未配置 openConversationId/robotCode 或 chatId，无法直接发送文件"}
     payload = {
         "chatid": chat_id,
         "msg": {
