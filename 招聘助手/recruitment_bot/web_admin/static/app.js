@@ -61,6 +61,15 @@ function normalizeApiBase(value) {
   return String(value || '').trim().replace(/\/+$/, '');
 }
 
+function isPlaceholderUrl(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === 'hr.example.com' || host === 'example.com' || host.endsWith('.example.com');
+  } catch (error) {
+    return false;
+  }
+}
+
 function apiUrl(path) {
   const base = normalizeApiBase(getApiBase());
   if (/^https?:\/\//i.test(path)) return path;
@@ -150,7 +159,7 @@ async function loadSettings() {
   $('scheduledPushRangeMode').value = settings.scheduledPushRangeMode || 'yesterday';
   $('scheduledPushStart').value = settings.scheduledPushStart || '';
   $('scheduledPushEnd').value = settings.scheduledPushEnd || '';
-  $('publicBaseUrl').value = settings.publicBaseUrl || '';
+  $('publicBaseUrl').value = isPlaceholderUrl(settings.publicBaseUrl) ? '' : (settings.publicBaseUrl || '');
   $('llmEnabled').value = settings.llmEnabled ? 'true' : 'false';
   $('llmProvider').value = settings.llmProvider || 'openai';
   $('llmApiBase').value = settings.llmApiBase || '';

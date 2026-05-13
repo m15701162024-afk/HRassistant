@@ -738,15 +738,17 @@ def has_resume_evidence(row: dict[str, Any]) -> bool:
 
 
 def get_range_dataset(scope: str = "configured", start: str | None = None, end: str | None = None) -> dict[str, Any]:
-    start_dt, end_dt, label = resolve_push_range(scope, start, end)
+    settings = get_settings()
+    report_account = str(settings.get("accountName") or "").strip()
+    start_dt, end_dt, label = resolve_push_range(scope, start, end, settings)
     candidates_all = list_rows("candidates", limit=10000)
     recommendations_all = list_recommendation_details(limit=10000)
     candidates = [
-        item for item in candidates_all
+        normalize_report_account(item, report_account) for item in candidates_all
         if in_time_range(item, start_dt, end_dt, "created_at", "updated_at")
     ]
     recommendations = [
-        item for item in recommendations_all
+        normalize_report_account(item, report_account) for item in recommendations_all
         if in_time_range(item, start_dt, end_dt, "created_at")
     ]
     resume_candidates = [item for item in candidates if has_resume_evidence(item)]
@@ -772,6 +774,13 @@ def get_range_dataset(scope: str = "configured", start: str | None = None, end: 
         "recommendations": recommendations,
         "recommendedCandidates": recommended_candidates,
     }
+
+
+def normalize_report_account(row: dict[str, Any], report_account: str = "") -> dict[str, Any]:
+    item = dict(row)
+    if report_account:
+        item["account_name"] = report_account
+    return item
 
 
 def get_stats() -> dict[str, Any]:
@@ -1212,11 +1221,26 @@ def request_base_url(handler: SimpleHTTPRequestHandler) -> str:
     return f"{proto}://{host}".rstrip("/") if host else ""
 
 
+def usable_base_url(value: Any) -> str:
+    base = str(value or "").strip().rstrip("/")
+    if not base:
+        return ""
+    parsed = urllib.parse.urlparse(base)
+    host = (parsed.hostname or "").lower()
+    if host in {"hr.example.com", "example.com"} or host.endswith(".example.com"):
+        return ""
+    return base if parsed.scheme in {"http", "https"} and parsed.netloc else ""
+
+
 def export_url(path: Path, base_url: str | None = None) -> str:
     settings = get_settings()
-    base = str(settings.get("publicBaseUrl") or os.environ.get("PUBLIC_BASE_URL") or base_url or "").strip().rstrip("/")
+    base = (
+        usable_base_url(settings.get("publicBaseUrl"))
+        or usable_base_url(os.environ.get("PUBLIC_BASE_URL"))
+        or usable_base_url(base_url)
+    )
     if not base:
-        base = str(settings.get("adminBaseUrl") or "").strip().rstrip("/")
+        base = usable_base_url(settings.get("adminBaseUrl"))
     filename = urllib.parse.quote(path.name)
     return f"{base}/exports/{filename}" if base else f"/exports/{filename}"
 
@@ -1785,7 +1809,9 @@ class Handler(SimpleHTTPRequestHandler):
                 scope = query.get("scope", ["configured"])[0]
                 base_url = request_base_url(self)
                 settings = get_settings()
-                if not str(settings.get("publicBaseUrl") or "").strip() and base_url:
+                if usable_base_url(settings.get("publicBaseUrl")) != str(settings.get("publicBaseUrl") or "").strip().rstrip("/"):
+                    save_settings({"publicBaseUrl": ""})
+                if not usable_base_url(settings.get("publicBaseUrl")) and usable_base_url(base_url):
                     save_settings({"adminBaseUrl": base_url})
                 output_path, dataset = create_recommendation_excel(
                     scope,
