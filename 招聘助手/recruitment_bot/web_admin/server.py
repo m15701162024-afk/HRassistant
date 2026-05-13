@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import socket
 import sqlite3
 import time
 import urllib.parse
@@ -39,6 +40,10 @@ RECOMMENDATION_TEMPLATE = TEMPLATE_DIR / "定时推送候选人推荐表模板.x
 DB_PATH = Path(os.environ.get("RECRUITMENT_DB", ROOT / "recruitment_history.db"))
 HOST = os.environ.get("RECRUITMENT_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RECRUITMENT_PORT", "8787"))
+DEFAULT_PUBLIC_BASE_URL = os.environ.get(
+    "RECRUITMENT_PUBLIC_BASE_URL",
+    "https://unconfuted-superbusily-ryan.ngrok-free.dev",
+).rstrip("/")
 
 DEFAULT_BEHAVIOR_POLICY: dict[str, Any] = {
     "behaviorPolicyEnabled": True,
@@ -82,6 +87,7 @@ DEFAULT_LLM_CONFIG: dict[str, Any] = {
     "llmTemperature": 0.2,
     "llmMaxContextItems": 80,
     "llmMaxTokens": 1000,
+    "llmTimeoutSeconds": 90,
 }
 
 LLM_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
@@ -923,7 +929,13 @@ def build_llm_system_prompt() -> str:
     )
 
 
-def request_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+def request_json(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: int = 30,
+    retries: int = 0,
+) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -933,12 +945,36 @@ def request_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> 
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8") or "{}")
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8") or "{}")
+        except (TimeoutError, socket.timeout) as exc:
+            last_error = exc
+            if attempt >= retries:
+                raise TimeoutError(f"请求读取超时（{timeout}秒）") from exc
+            time.sleep(1.5 * (attempt + 1))
+        except urllib.error.URLError as exc:
+            last_error = exc
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                if attempt >= retries:
+                    raise TimeoutError(f"请求读取超时（{timeout}秒）") from exc
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+    raise RuntimeError(str(last_error or "请求失败"))
 
 
 def request_llm_json(url: str, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-    return request_json(url, payload, {"Authorization": f"Bearer {config['llmApiKey']}"})
+    timeout = max(30, min(int(config.get("llmTimeoutSeconds") or 90), 180))
+    return request_json(
+        url,
+        payload,
+        {"Authorization": f"Bearer {config['llmApiKey']}"},
+        timeout=timeout,
+        retries=1,
+    )
 
 
 def extract_anthropic_answer(body: dict[str, Any]) -> str:
@@ -991,6 +1027,8 @@ def call_llm_anthropic_messages(question: str, context: str, config: dict[str, A
             "x-api-key": str(config["llmApiKey"]),
             "anthropic-version": "2023-06-01",
         },
+        timeout=max(30, min(int(config.get("llmTimeoutSeconds") or 90), 180)),
+        retries=1,
     )
     answer = extract_anthropic_answer(body)
     if not answer:
@@ -1023,6 +1061,10 @@ def call_llm_chat(question: str, context: str) -> str:
         raise RuntimeError(f"大模型 API HTTP {exc.code}: {detail}")
     except urllib.error.URLError as exc:
         raise RuntimeError(f"大模型 API 网络连接失败：{exc}")
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"大模型 API 读取超时：{exc}。当前模型或平台响应较慢，请稍后重试，或在 Web 后台调低历史上下文条数/最大输出 tokens。"
+        )
     except Exception:
         raise
 
@@ -1083,6 +1125,7 @@ def get_llm_config(mask_key: bool = False) -> dict[str, Any]:
         "llmTemperature": float(settings.get("llmTemperature", DEFAULT_LLM_CONFIG["llmTemperature"]) or 0.2),
         "llmMaxContextItems": int(settings.get("llmMaxContextItems", DEFAULT_LLM_CONFIG["llmMaxContextItems"]) or 80),
         "llmMaxTokens": int(settings.get("llmMaxTokens", DEFAULT_LLM_CONFIG["llmMaxTokens"]) or 1000),
+        "llmTimeoutSeconds": int(settings.get("llmTimeoutSeconds", DEFAULT_LLM_CONFIG["llmTimeoutSeconds"]) or 90),
     }
     if mask_key and config.get("llmApiKey"):
         config["llmApiKey"] = "********"
@@ -1107,6 +1150,7 @@ def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
         "llmTemperature": max(0, min(float(payload.get("llmTemperature", current["llmTemperature"]) or 0.2), 2)),
         "llmMaxContextItems": max(10, min(int(payload.get("llmMaxContextItems", current["llmMaxContextItems"]) or 80), 500)),
         "llmMaxTokens": max(100, min(int(payload.get("llmMaxTokens", current["llmMaxTokens"]) or 1000), 8000)),
+        "llmTimeoutSeconds": max(30, min(int(payload.get("llmTimeoutSeconds", current.get("llmTimeoutSeconds", 90)) or 90), 180)),
     }
     api_key = str(payload.get("llmApiKey") or "").strip()
     if api_key and api_key != "********":
@@ -1130,6 +1174,7 @@ def reset_llm_config() -> dict[str, Any]:
         "llmTemperature": DEFAULT_LLM_CONFIG["llmTemperature"],
         "llmMaxContextItems": DEFAULT_LLM_CONFIG["llmMaxContextItems"],
         "llmMaxTokens": DEFAULT_LLM_CONFIG["llmMaxTokens"],
+        "llmTimeoutSeconds": DEFAULT_LLM_CONFIG["llmTimeoutSeconds"],
     })
     return {"success": True, "llm": get_llm_config(mask_key=True)}
 
@@ -1246,7 +1291,10 @@ def export_url(path: Path, base_url: str | None = None) -> str:
         or usable_base_url(base_url)
     )
     if not base:
-        base = usable_base_url(settings.get("adminBaseUrl"))
+        base = (
+            usable_base_url(DEFAULT_PUBLIC_BASE_URL)
+            or usable_base_url(settings.get("adminBaseUrl"))
+        )
     filename = urllib.parse.quote(path.name)
     return f"{base}/exports/{filename}" if base else f"/exports/{filename}"
 
@@ -1847,6 +1895,10 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, get_stats())
             elif parsed.path == "/api/settings":
                 settings = get_settings()
+                if not usable_base_url(settings.get("publicBaseUrl")):
+                    settings["publicBaseUrl"] = DEFAULT_PUBLIC_BASE_URL
+                if not usable_base_url(settings.get("adminBaseUrl")):
+                    settings["adminBaseUrl"] = DEFAULT_PUBLIC_BASE_URL
                 llm_config = get_llm_config(mask_key=True)
                 settings.update(llm_config)
                 if settings.get("dingtalkAppKey"):
@@ -1989,8 +2041,10 @@ class Handler(SimpleHTTPRequestHandler):
                 settings = get_settings()
                 if usable_base_url(settings.get("publicBaseUrl")) != str(settings.get("publicBaseUrl") or "").strip().rstrip("/"):
                     save_settings({"publicBaseUrl": ""})
-                if not usable_base_url(settings.get("publicBaseUrl")) and usable_base_url(base_url):
-                    save_settings({"adminBaseUrl": base_url})
+                if not usable_base_url(settings.get("publicBaseUrl")):
+                    save_settings({"publicBaseUrl": DEFAULT_PUBLIC_BASE_URL})
+                if not usable_base_url(settings.get("adminBaseUrl")):
+                    save_settings({"adminBaseUrl": DEFAULT_PUBLIC_BASE_URL})
                 output_path, dataset = create_recommendation_excel(
                     scope,
                     query.get("start", [""])[0] or None,

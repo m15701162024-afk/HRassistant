@@ -17,6 +17,7 @@ const state = {
 };
 
 const API_BASE_STORAGE_KEY = 'recruitmentAdminApiBase';
+const DEFAULT_PUBLIC_BASE_URL = 'https://unconfuted-superbusily-ryan.ngrok-free.dev';
 const LLM_PROVIDER_DEFAULTS = {
   openai: {
     apiBase: '',
@@ -49,7 +50,7 @@ const LLM_PROVIDER_DEFAULTS = {
 };
 
 function defaultApiBase() {
-  if (location.protocol === 'file:') return 'http://127.0.0.1:8787';
+  if (location.protocol === 'file:') return DEFAULT_PUBLIC_BASE_URL;
   return '';
 }
 
@@ -176,6 +177,7 @@ async function loadSettings() {
   $('llmTemperature').value = settings.llmTemperature ?? 0.2;
   $('llmMaxContextItems').value = settings.llmMaxContextItems ?? 80;
   $('llmMaxTokens').value = settings.llmMaxTokens ?? 1000;
+  if ($('llmTimeoutSeconds')) $('llmTimeoutSeconds').value = settings.llmTimeoutSeconds ?? 90;
   $('llmStatus').textContent = settings.llmEnabled
     ? `已启用 ${settings.llmModel || '模型'}`
     : '未启用';
@@ -198,6 +200,7 @@ async function saveLlmConfig(showToast = true) {
     llmTemperature: Number($('llmTemperature').value || 0.2),
     llmMaxContextItems: Number($('llmMaxContextItems').value || 80),
     llmMaxTokens: Number($('llmMaxTokens').value || 1000),
+    llmTimeoutSeconds: Number(($('llmTimeoutSeconds')?.value || 90)),
   };
   const apiKey = $('llmApiKey').value.trim();
   if (apiKey) payload.llmApiKey = apiKey;
