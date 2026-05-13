@@ -1220,13 +1220,14 @@ def build_push_markdown(scope: str, dataset: dict[str, Any], excel_path: Path) -
         dataset["end"].isoformat(timespec="minutes"),
     )
     link = export_url(excel_path)
-    return "\n\n".join([
-        summary,
+    excel_section = "\n".join([
         "#### Excel 推荐表",
-        f"- 推送时间范围：{dataset['label']}（{dataset['start']:%Y-%m-%d %H:%M} 至 {dataset['end']:%Y-%m-%d %H:%M}）",
-        f"- 已按模板生成候选人推荐表：[{excel_path.name}]({link})",
-        "- 推荐候选人仅包含已识别到简历证据的候选人；未获取简历的沟通候选人不进入推荐表。",
+        f"- 文件：[{excel_path.name}]({link})",
+        f"- 范围：{dataset['label']}（{dataset['start']:%Y-%m-%d %H:%M} 至 {dataset['end']:%Y-%m-%d %H:%M}）",
+        "- 口径：仅推荐已识别到简历证据且匹配度达标的候选人；未获取简历的沟通记录已排除。",
+        "- 明细：候选人姓名、学历、学校、经验、附件简历、来源、账号、投递岗位、匹配度、匹配度依据。",
     ])
+    return f"{summary}\n\n{excel_section}"
 
 
 def dingtalk_signed_url(webhook: str, secret: str = "") -> str:
@@ -1379,10 +1380,6 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def markdown_cell(value: Any) -> str:
-    return str(value or "").replace("|", "｜").replace("\n", " ").strip()
-
-
 def build_summary(scope: str = "yesterday", start: str | None = None, end: str | None = None) -> str:
     dataset = get_range_dataset(scope, start, end)
     candidates = dataset["candidates"]
@@ -1411,11 +1408,6 @@ def build_summary(scope: str = "yesterday", start: str | None = None, end: str |
         source = item.get("source") or "未知来源"
         source_counts[source] = source_counts.get(source, 0) + 1
     source_text = "，".join(f"{k} {v}份" for k, v in source_counts.items()) or "暂无"
-
-    detail_rows = [
-        f"| {markdown_cell(item.get('name',''))} | {markdown_cell(item.get('role',''))} | {markdown_cell(item.get('education',''))} | {markdown_cell(item.get('experience',''))} | {item.get('score',0)}% | {markdown_cell(item.get('source',''))} | {markdown_cell(item.get('account_name') or '未识别')} |"
-        for item in sorted(recommended_candidates, key=lambda row: int(row.get("score") or 0), reverse=True)[:50]
-    ]
     return "\n".join(
         [
             f"### {title_date} 招聘数据汇总",
@@ -1431,12 +1423,6 @@ def build_summary(scope: str = "yesterday", start: str | None = None, end: str |
             *account_lines(recommended_candidates, "推荐候选人"),
             "",
             f"数据来源：{source_text}",
-            "",
-            "#### 建议继续推进候选人详情",
-            "",
-            "| 姓名 | 岗位 | 学历 | 经验 | 匹配度 | 来源 | 账号 |",
-            "|------|------|------|------|--------|------|------|",
-            *(detail_rows or ["| 暂无 | - | - | - | - | - | - |"]),
         ]
     )
 
