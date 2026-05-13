@@ -1815,7 +1815,13 @@ class Handler(SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         try:
             if parsed.path == "/api/health":
-                json_response(self, {"success": True, "time": now_iso()})
+                settings = get_settings()
+                json_response(self, {
+                    "success": True,
+                    "time": now_iso(),
+                    "callback": "/api/dingtalk/callback",
+                    "dingtalkTargetConfigured": bool(settings.get("dingtalkOpenConversationId") or settings.get("dingtalkChatId")),
+                })
             elif parsed.path == "/api/stats":
                 json_response(self, get_stats())
             elif parsed.path == "/api/settings":
