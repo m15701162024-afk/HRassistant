@@ -1061,6 +1061,8 @@ function scrapeResumeInfo(card, resumeId) {
       scrapedAt: new Date().toISOString(),
       accountName: settings.accountName || detectRecruiterAccountInfo().name || '',
       accountPlatform: settings.accountPlatform || 'BOSS直聘',
+      hasResume: true,
+      resumeStatus: '已识别简历详情',
     };
     info.rawText = normalizeText(card.textContent || '').slice(0, 3000);
 
@@ -2139,6 +2141,8 @@ async function scrapeChatCandidateInfo() {
     scrapedAt: new Date().toISOString(),
     accountName: settings.accountName || detectRecruiterAccountInfo().name || '',
     accountPlatform: settings.accountPlatform || 'BOSS直聘',
+    hasResume: false,
+    resumeStatus: '仅沟通信息',
     rawText: text.slice(0, 2500),
     education: extractEducationFromText(text),
     experience: extractExperienceFromText(text),
@@ -2260,7 +2264,7 @@ async function saveResumeData(resumeInfo) {
           action: 'syncCandidateToBackend',
           candidate: resumeInfo,
         }).catch(() => {});
-        if (resumeInfo.evaluation?.suitable) {
+        if (resumeInfo.evaluation?.suitable && hasCandidateResumeEvidence(resumeInfo)) {
           pushCandidateRecommendation(resumeInfo);
         }
         resolve({ saved: true, duplicate: false });
@@ -2270,6 +2274,13 @@ async function saveResumeData(resumeInfo) {
 }
 
 async function pushCandidateRecommendation(resumeInfo) {
+  if (!hasCandidateResumeEvidence(resumeInfo)) {
+    notifyPopup('log', {
+      message: `已跳过推荐：${resumeInfo.name || '候选人'} 尚未获取简历`,
+      type: 'warning',
+    });
+    return;
+  }
   const report = buildCandidateReport(resumeInfo);
   chrome.storage.local.get(['recommendedCandidates', 'candidateReports'], (result) => {
     const recommendedCandidates = result.recommendedCandidates || [];
@@ -2287,6 +2298,8 @@ async function pushCandidateRecommendation(resumeInfo) {
       source: resumeInfo.source || resumeInfo.accountPlatform || 'BOSS直聘',
       accountName: resumeInfo.accountName || '',
       accountPlatform: resumeInfo.accountPlatform || 'BOSS直聘',
+      hasResume: true,
+      resumeStatus: resumeInfo.resumeStatus || '已识别简历详情',
       score: resumeInfo.evaluation.score,
       recommendation: resumeInfo.evaluation.recommendation,
       nextStep: resumeInfo.evaluation.nextStep,
@@ -2324,6 +2337,20 @@ async function pushCandidateRecommendation(resumeInfo) {
       notifyPopup('candidateRecommended', summary);
     });
   });
+}
+
+function hasCandidateResumeEvidence(info) {
+  if (!info || info.hasResume === false || info.resumeStatus === '仅沟通信息') return false;
+  const id = String(info.id || '');
+  if (id.startsWith('chat_')) return false;
+  return Boolean(
+    info.hasResume ||
+    info.resumeStatus ||
+    info.education ||
+    info.experience ||
+    info.summary ||
+    info.rawText
+  );
 }
 
 function buildCandidateReport(info) {

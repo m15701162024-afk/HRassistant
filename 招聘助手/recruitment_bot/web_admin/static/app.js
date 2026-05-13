@@ -147,6 +147,10 @@ async function loadSettings() {
   if ($('jobAccountInput')) $('jobAccountInput').value = settings.accountName || settings.detectedAccount?.name || '';
   if ($('jobSourceInput') && !$('jobSourceInput').value) $('jobSourceInput').value = settings.accountPlatform || settings.detectedAccount?.platform || '手动录入';
   $('scheduledPushTime').value = settings.scheduledPushTime || '10:00';
+  $('scheduledPushRangeMode').value = settings.scheduledPushRangeMode || 'yesterday';
+  $('scheduledPushStart').value = settings.scheduledPushStart || '';
+  $('scheduledPushEnd').value = settings.scheduledPushEnd || '';
+  $('publicBaseUrl').value = settings.publicBaseUrl || '';
   $('llmEnabled').value = settings.llmEnabled ? 'true' : 'false';
   $('llmProvider').value = settings.llmProvider || 'openai';
   $('llmApiBase').value = settings.llmApiBase || '';
@@ -162,7 +166,7 @@ async function loadSettings() {
   $('llmStatus').className = settings.llmEnabled ? 'badge ok' : 'badge';
   $('toggleScheduleBtn').textContent = settings.scheduledPushEnabled ? '关闭定时推送' : '开启定时推送';
   $('scheduleStatus').textContent = settings.scheduledPushEnabled
-    ? `已开启 ${settings.scheduledPushTime || '10:00'}`
+    ? `已开启 ${settings.scheduledPushTime || '10:00'}｜${pushRangeLabel(settings.scheduledPushRangeMode)}`
     : '未开启';
   $('scheduleStatus').className = settings.scheduledPushEnabled ? 'badge ok' : 'badge';
   const callbackOrigin = normalizeApiBase(getApiBase()) || location.origin;
@@ -288,6 +292,10 @@ async function saveSettings(showToast = true) {
       accountPlatform: $('accountPlatform').value.trim() || 'BOSS直聘',
       accountNameManual: Boolean($('accountName').value.trim()),
       scheduledPushTime: $('scheduledPushTime').value || '10:00',
+      scheduledPushRangeMode: $('scheduledPushRangeMode').value || 'yesterday',
+      scheduledPushStart: $('scheduledPushStart').value,
+      scheduledPushEnd: $('scheduledPushEnd').value,
+      publicBaseUrl: $('publicBaseUrl').value.trim(),
     }),
   });
   await loadSettings();
@@ -305,6 +313,10 @@ async function toggleSchedule() {
       accountPlatform: $('accountPlatform').value.trim() || 'BOSS直聘',
       accountNameManual: Boolean($('accountName').value.trim()),
       scheduledPushTime: $('scheduledPushTime').value || '10:00',
+      scheduledPushRangeMode: $('scheduledPushRangeMode').value || 'yesterday',
+      scheduledPushStart: $('scheduledPushStart').value,
+      scheduledPushEnd: $('scheduledPushEnd').value,
+      publicBaseUrl: $('publicBaseUrl').value.trim(),
       scheduledPushEnabled: !settings.scheduledPushEnabled,
     }),
   });
@@ -540,8 +552,32 @@ async function testDingTalk() {
 }
 
 async function pushYesterday() {
-  const result = await api('/api/summary/push?scope=yesterday', { method: 'POST', body: '{}' });
-  toast(result.success ? '昨日汇总已推送' : result.message, result.success ? 'success' : 'warning');
+  await saveSettings(false);
+  const result = await api(`/api/summary/push${buildSummaryQuery()}`, { method: 'POST', body: '{}' });
+  toast(result.success ? `汇总已推送，Excel：${result.excel || '已生成'}` : result.message, result.success ? 'success' : 'warning');
+}
+
+function pushRangeLabel(mode) {
+  return ({
+    yesterday: '昨日',
+    today: '今日',
+    last7: '近7天',
+    custom: '自定义时间',
+  })[mode || 'yesterday'] || '昨日';
+}
+
+function buildSummaryQuery() {
+  const params = new URLSearchParams();
+  params.set('scope', $('scheduledPushRangeMode').value || 'yesterday');
+  if ($('scheduledPushRangeMode').value === 'custom') {
+    if ($('scheduledPushStart').value) params.set('start', $('scheduledPushStart').value);
+    if ($('scheduledPushEnd').value) params.set('end', $('scheduledPushEnd').value);
+  }
+  return `?${params.toString()}`;
+}
+
+function exportSummaryExcel() {
+  window.open(apiUrl(`/api/summary/excel${buildSummaryQuery()}`), '_blank');
 }
 
 async function saveJobRequirement() {
@@ -575,7 +611,8 @@ async function matchAllJobRequirements() {
 }
 
 async function previewSummary() {
-  const result = await api('/api/summary?scope=yesterday');
+  await saveSettings(false);
+  const result = await api(`/api/summary${buildSummaryQuery()}`);
   openDialog('昨日招聘数据汇总预览', result.markdown || '');
 }
 
@@ -618,6 +655,7 @@ function bindEvents() {
   $('toggleScheduleBtn').addEventListener('click', () => toggleSchedule().catch(showError));
   $('testDingTalkBtn').addEventListener('click', () => testDingTalk().catch(showError));
   $('pushYesterdayBtn').addEventListener('click', () => pushYesterday().catch(showError));
+  $('exportSummaryExcelBtn').addEventListener('click', exportSummaryExcel);
   $('saveBehaviorBtn').addEventListener('click', () => saveBehaviorPolicy().catch(showError));
   $('loadBehaviorBtn').addEventListener('click', () => loadBehaviorPolicy().catch(showError));
   $('saveJobRequirementBtn').addEventListener('click', () => saveJobRequirement().catch(showError));

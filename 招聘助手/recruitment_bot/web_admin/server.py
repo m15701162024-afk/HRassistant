@@ -33,6 +33,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
+TEMPLATE_DIR = ROOT / "templates"
+EXPORT_DIR = ROOT / "exports"
+RECOMMENDATION_TEMPLATE = TEMPLATE_DIR / "定时推送候选人推荐表模板.xlsx"
 DB_PATH = Path(os.environ.get("RECRUITMENT_DB", ROOT / "recruitment_history.db"))
 HOST = os.environ.get("RECRUITMENT_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RECRUITMENT_PORT", "8787"))
@@ -244,6 +247,23 @@ def text_response(
     handler.send_header("Access-Control-Allow-Origin", "*")
     if filename:
         handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def binary_response(
+    handler: SimpleHTTPRequestHandler,
+    data: bytes,
+    content_type: str,
+    filename: str | None = None,
+) -> None:
+    handler.send_response(200)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    if filename:
+        quoted = urllib.parse.quote(filename)
+        handler.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quoted}")
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
@@ -623,6 +643,135 @@ def list_recommendation_details(limit: int = 1000, date_value: str | None = None
         row["source"] = row.get("merged_source") or row.get("source") or ""
         row["account_name"] = row.get("merged_account_name") or row.get("account_name") or ""
     return rows
+
+
+def parse_datetime_value(value: Any, end_of_day: bool = False) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) == 10 and re.match(r"\d{4}-\d{2}-\d{2}", text):
+        suffix = "23:59:59" if end_of_day else "00:00:00"
+        text = f"{text}T{suffix}"
+    text = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+        return dt.replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def row_datetime(row: dict[str, Any], *fields: str) -> datetime | None:
+    for field in fields:
+        dt = parse_datetime_value(row.get(field))
+        if dt:
+            return dt
+    return None
+
+
+def resolve_push_range(
+    scope: str = "configured",
+    start: str | None = None,
+    end: str | None = None,
+    settings: dict[str, Any] | None = None,
+) -> tuple[datetime, datetime, str]:
+    settings = settings or get_settings()
+    mode = scope if scope and scope not in {"configured", "excel"} else str(settings.get("scheduledPushRangeMode") or "yesterday")
+    now = datetime.now()
+    if start or end:
+        mode = "custom"
+    if mode == "today":
+        start_dt = datetime.combine(now.date(), datetime.min.time())
+        end_dt = datetime.combine(now.date(), datetime.max.time()).replace(microsecond=0)
+        label = "今日"
+    elif mode == "all":
+        start_dt = datetime(1970, 1, 1)
+        end_dt = datetime.combine(now.date(), datetime.max.time()).replace(microsecond=0)
+        label = "全部历史"
+    elif mode == "last7":
+        start_dt = datetime.combine((now - timedelta(days=6)).date(), datetime.min.time())
+        end_dt = datetime.combine(now.date(), datetime.max.time()).replace(microsecond=0)
+        label = "近7天"
+    elif mode == "custom":
+        start_dt = parse_datetime_value(start or settings.get("scheduledPushStart"), end_of_day=False)
+        end_dt = parse_datetime_value(end or settings.get("scheduledPushEnd"), end_of_day=True)
+        if not start_dt:
+            start_dt = datetime.combine((now - timedelta(days=1)).date(), datetime.min.time())
+        if not end_dt:
+            end_dt = datetime.combine((now - timedelta(days=1)).date(), datetime.max.time()).replace(microsecond=0)
+        if end_dt < start_dt:
+            start_dt, end_dt = end_dt, start_dt
+        label = f"{start_dt:%Y-%m-%d %H:%M} 至 {end_dt:%Y-%m-%d %H:%M}"
+    else:
+        day = now - timedelta(days=1)
+        start_dt = datetime.combine(day.date(), datetime.min.time())
+        end_dt = datetime.combine(day.date(), datetime.max.time()).replace(microsecond=0)
+        label = "昨日"
+    return start_dt, end_dt, label
+
+
+def in_time_range(row: dict[str, Any], start_dt: datetime, end_dt: datetime, *fields: str) -> bool:
+    dt = row_datetime(row, *fields)
+    return bool(dt and start_dt <= dt <= end_dt)
+
+
+def has_resume_evidence(row: dict[str, Any]) -> bool:
+    candidate_id = str(row.get("candidate_id") or row.get("id") or "")
+    if candidate_id.startswith("chat_"):
+        return False
+    raw = {}
+    try:
+        raw = json.loads(str(row.get("raw_json") or "{}"))
+    except json.JSONDecodeError:
+        raw = {}
+    if raw.get("hasResume") is False:
+        return False
+    if raw.get("resumeStatus") in {"未获取简历", "仅沟通信息"}:
+        return False
+    return bool(
+        raw.get("hasResume")
+        or raw.get("resumeStatus")
+        or row.get("education")
+        or row.get("experience")
+        or raw.get("summary")
+        or raw.get("rawText")
+    )
+
+
+def get_range_dataset(scope: str = "configured", start: str | None = None, end: str | None = None) -> dict[str, Any]:
+    start_dt, end_dt, label = resolve_push_range(scope, start, end)
+    candidates_all = list_rows("candidates", limit=10000)
+    recommendations_all = list_recommendation_details(limit=10000)
+    candidates = [
+        item for item in candidates_all
+        if in_time_range(item, start_dt, end_dt, "created_at", "updated_at")
+    ]
+    recommendations = [
+        item for item in recommendations_all
+        if in_time_range(item, start_dt, end_dt, "created_at")
+    ]
+    resume_candidates = [item for item in candidates if has_resume_evidence(item)]
+    recommended_by_id: dict[str, dict[str, Any]] = {}
+    for item in resume_candidates:
+        if int(item.get("score") or 0) >= 60 or str(item.get("recommendation") or "") in {"推荐", "强烈推荐"}:
+            recommended_by_id[str(item.get("id") or "")] = item
+    for item in [
+        item for item in recommendations
+        if has_resume_evidence(item) and (
+            int(item.get("score") or 0) >= 60
+            or str(item.get("recommendation") or "") in {"推荐", "强烈推荐"}
+        )
+    ]:
+        recommended_by_id[str(item.get("candidate_id") or item.get("id") or "")] = item
+    recommended_candidates = list(recommended_by_id.values())
+    return {
+        "start": start_dt,
+        "end": end_dt,
+        "label": label,
+        "candidates": candidates,
+        "resumeCandidates": resume_candidates,
+        "recommendations": recommendations,
+        "recommendedCandidates": recommended_candidates,
+    }
 
 
 def get_stats() -> dict[str, Any]:
@@ -1044,13 +1193,40 @@ def scheduled_push_loop() -> None:
             last_date = str(settings.get("scheduledPushLastDate") or "")
             today = date_str()
             if enabled and last_date != today and datetime.now().strftime("%H:%M") == push_time:
-                markdown = build_summary("yesterday")
-                result = send_dingtalk_markdown("招聘助手昨日候选人汇总", markdown)
+                scope = str(settings.get("scheduledPushRangeMode") or "yesterday")
+                output_path, dataset = create_recommendation_excel(scope)
+                markdown = build_push_markdown(scope, dataset, output_path)
+                result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
                 if result.get("success"):
                     save_settings({"scheduledPushLastDate": today})
         except Exception as exc:
             print(f"[scheduled_push] {exc}")
         time.sleep(60)
+
+
+def export_url(path: Path) -> str:
+    settings = get_settings()
+    base = str(settings.get("publicBaseUrl") or "").strip().rstrip("/")
+    if not base:
+        base = str(settings.get("adminBaseUrl") or "").strip().rstrip("/")
+    filename = urllib.parse.quote(path.name)
+    return f"{base}/exports/{filename}" if base else f"/exports/{filename}"
+
+
+def build_push_markdown(scope: str, dataset: dict[str, Any], excel_path: Path) -> str:
+    summary = build_summary(
+        "custom",
+        dataset["start"].isoformat(timespec="minutes"),
+        dataset["end"].isoformat(timespec="minutes"),
+    )
+    link = export_url(excel_path)
+    return "\n\n".join([
+        summary,
+        "#### Excel 推荐表",
+        f"- 推送时间范围：{dataset['label']}（{dataset['start']:%Y-%m-%d %H:%M} 至 {dataset['end']:%Y-%m-%d %H:%M}）",
+        f"- 已按模板生成候选人推荐表：[{excel_path.name}]({link})",
+        "- 推荐候选人仅包含已识别到简历证据的候选人；未获取简历的沟通候选人不进入推荐表。",
+    ])
 
 
 def dingtalk_signed_url(webhook: str, secret: str = "") -> str:
@@ -1207,16 +1383,13 @@ def markdown_cell(value: Any) -> str:
     return str(value or "").replace("|", "｜").replace("\n", " ").strip()
 
 
-def build_summary(scope: str = "all") -> str:
-    target_date = date_str(-1) if scope == "yesterday" else None
-    candidates = list_rows("candidates", limit=1000, date_field="received_date", date_value=target_date)
-    recommendations = list_recommendation_details(limit=1000, date_value=target_date)
-    title_date = target_date or "全部历史"
-    period_label = "昨日" if target_date else "历史"
-    recommended_candidates = [
-        item for item in recommendations
-        if int(item.get("score") or 0) >= 60 or str(item.get("recommendation") or "") in {"推荐", "强烈推荐"}
-    ]
+def build_summary(scope: str = "yesterday", start: str | None = None, end: str | None = None) -> str:
+    dataset = get_range_dataset(scope, start, end)
+    candidates = dataset["candidates"]
+    recommendations = dataset["recommendations"]
+    received_candidates = dataset["resumeCandidates"]
+    recommended_candidates = dataset["recommendedCandidates"]
+    title_date = dataset["label"]
     account_names = sorted({
         str(item.get("account_name") or "未识别") for item in [*candidates, *recommendations, *recommended_candidates]
     })
@@ -1233,7 +1406,6 @@ def build_summary(scope: str = "all") -> str:
             if account_count(rows, account) > 0
         ] or [empty]
 
-    received_candidates = [item for item in candidates if item.get("raw_json")]
     source_counts: dict[str, int] = {}
     for item in candidates:
         source = item.get("source") or "未知来源"
@@ -1249,13 +1421,13 @@ def build_summary(scope: str = "all") -> str:
             f"### {title_date} 招聘数据汇总",
             "",
             "#### 定时推送",
-            f"{period_label}新增：全部 {len(candidates)}",
-            *account_lines(candidates, f"{period_label}新增"),
+            f"新增候选人：全部 {len(candidates)}",
+            *account_lines(candidates, "新增候选人"),
             "",
-            f"{period_label}收到简历数量：全部 {len(received_candidates)}",
-            *account_lines(received_candidates, f"{period_label}收到简历数量"),
+            f"收到简历数量：全部 {len(received_candidates)}",
+            *account_lines(received_candidates, "收到简历数量"),
             "",
-            f"{period_label}推荐候选人：全部 {len(recommended_candidates)}",
+            f"推荐候选人：全部 {len(recommended_candidates)}",
             *account_lines(recommended_candidates, "推荐候选人"),
             "",
             f"数据来源：{source_text}",
@@ -1267,6 +1439,139 @@ def build_summary(scope: str = "all") -> str:
             *(detail_rows or ["| 暂无 | - | - | - | - | - | - |"]),
         ]
     )
+
+
+def raw_payload(row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return json.loads(str(row.get("raw_json") or "{}"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def raw_value(row: dict[str, Any], *keys: str) -> str:
+    raw = raw_payload(row)
+    for key in keys:
+        value = row.get(key)
+        if value:
+            return str(value)
+        value = raw.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def account_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        account = str(row.get("account_name") or "未识别")
+        counts[account] = counts.get(account, 0) + 1
+    return counts
+
+
+def attachment_resume_count(rows: list[dict[str, Any]]) -> int:
+    total = 0
+    for row in rows:
+        raw = raw_payload(row)
+        text = " ".join(str(raw.get(key) or "") for key in ("resumeStatus", "summary", "rawText", "nextStep"))
+        if "附件简历" in text or "附件" in text:
+            total += 1
+    return total
+
+
+def create_recommendation_excel(scope: str = "configured", start: str | None = None, end: str | None = None) -> tuple[Path, dict[str, Any]]:
+    try:
+        from openpyxl import load_workbook, Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    except Exception as exc:
+        raise RuntimeError(f"Excel 模块不可用，请安装 openpyxl：{exc}") from exc
+
+    dataset = get_range_dataset(scope, start, end)
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = EXPORT_DIR / f"候选人推荐表_{timestamp}.xlsx"
+
+    if RECOMMENDATION_TEMPLATE.exists():
+        workbook = load_workbook(RECOMMENDATION_TEMPLATE)
+    else:
+        workbook = Workbook()
+        workbook.active.title = "定时推送数据底表"
+        workbook.create_sheet("定时推送候选人详情表模板")
+
+    summary_sheet = workbook["定时推送数据底表"] if "定时推送数据底表" in workbook.sheetnames else workbook.worksheets[0]
+    detail_sheet = workbook["定时推送候选人详情表模板"] if "定时推送候选人详情表模板" in workbook.sheetnames else workbook.worksheets[-1]
+
+    for sheet in (summary_sheet, detail_sheet):
+        if sheet.max_row:
+            sheet.delete_rows(1, sheet.max_row)
+
+    header_fill = PatternFill("solid", fgColor="FFEE00")
+    thin = Side(style="thin", color="D9D9D9")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_font = Font(bold=True, color="111111")
+
+    summary_headers = ["类目（推荐表中不显示）", "显示名称", "账号", "数量"]
+    summary_sheet.append(summary_headers)
+    metrics = [
+        ("查看候选人计数", "查看候选人", dataset["candidates"]),
+        ("收到简历计数", "收到简历", dataset["resumeCandidates"]),
+        ("推荐候选人计数", "推荐候选人", dataset["recommendedCandidates"]),
+        ("收到附件简历计数", "收到附件简历", [row for row in dataset["resumeCandidates"] if attachment_resume_count([row])]),
+        ("收到推荐候选人附件简历计数", "收到推荐候选人附件简历", [row for row in dataset["recommendedCandidates"] if attachment_resume_count([row])]),
+    ]
+    for metric_key, display_name, rows in metrics:
+        summary_sheet.append([metric_key, display_name, "全部", len(rows)])
+        for account, count in sorted(account_counts(rows).items()):
+            summary_sheet.append([metric_key, display_name, account, count])
+    summary_sheet.append(["推送时间范围", dataset["label"], f"{dataset['start']:%Y-%m-%d %H:%M}", f"{dataset['end']:%Y-%m-%d %H:%M}"])
+
+    detail_headers = ["候选人姓名", "学历", "学校", "经验", "收到附件简历", "来源", "账号", "投递岗位", "匹配度", "匹配度依据"]
+    detail_sheet.append(detail_headers)
+    for row in sorted(dataset["recommendedCandidates"], key=lambda item: int(item.get("score") or 0), reverse=True):
+        raw = raw_payload(row)
+        basis = "；".join(
+            item for item in [
+                raw_value(row, "recommendation"),
+                raw_value(row, "next_step", "nextStep"),
+                "优势：" + "、".join(raw.get("strengths") or []) if isinstance(raw.get("strengths"), list) and raw.get("strengths") else "",
+                "风险：" + "、".join(raw.get("risks") or []) if isinstance(raw.get("risks"), list) and raw.get("risks") else "",
+            ]
+            if item
+        )
+        detail_sheet.append([
+            raw_value(row, "name") or "未识别",
+            raw_value(row, "education"),
+            raw_value(row, "school", "schoolName"),
+            raw_value(row, "experience"),
+            "是" if attachment_resume_count([row]) else "否",
+            raw_value(row, "source") or "BOSS直聘",
+            raw_value(row, "account_name", "accountName") or "未识别",
+            raw_value(row, "role"),
+            f"{int(row.get('score') or 0)}%",
+            basis[:1000],
+        ])
+
+    for sheet in (summary_sheet, detail_sheet):
+        for cell in sheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+        for row in sheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+                cell.border = border
+        sheet.freeze_panes = "A2"
+
+    for column, width in {"A": 24, "B": 18, "C": 20, "D": 12}.items():
+        summary_sheet.column_dimensions[column].width = width
+    detail_widths = {"A": 16, "B": 10, "C": 18, "D": 12, "E": 14, "F": 12, "G": 16, "H": 28, "I": 10, "J": 70}
+    for column, width in detail_widths.items():
+        detail_sheet.column_dimensions[column].width = width
+    detail_sheet.auto_filter.ref = f"A1:J{max(1, detail_sheet.max_row)}"
+    summary_sheet.auto_filter.ref = f"A1:D{max(1, summary_sheet.max_row)}"
+
+    workbook.save(output_path)
+    return output_path, dataset
 
 
 def answer_question_rules(question: str) -> str:
@@ -1382,7 +1687,36 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, {"items": list_agent_conversations(int(query.get("limit", ["100"])[0]))})
             elif parsed.path == "/api/summary":
                 scope = query.get("scope", ["all"])[0]
-                json_response(self, {"markdown": build_summary(scope)})
+                json_response(self, {"markdown": build_summary(
+                    scope,
+                    query.get("start", [""])[0] or None,
+                    query.get("end", [""])[0] or None,
+                )})
+            elif parsed.path == "/api/summary/excel":
+                scope = query.get("scope", ["configured"])[0]
+                output_path, dataset = create_recommendation_excel(
+                    scope,
+                    query.get("start", [""])[0] or None,
+                    query.get("end", [""])[0] or None,
+                )
+                binary_response(
+                    self,
+                    output_path.read_bytes(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    output_path.name,
+                )
+            elif parsed.path.startswith("/exports/"):
+                filename = Path(urllib.parse.unquote(parsed.path.split("/exports/", 1)[1])).name
+                path = EXPORT_DIR / filename
+                if not path.exists() or not path.is_file():
+                    json_response(self, {"success": False, "message": "文件不存在"}, 404)
+                else:
+                    binary_response(
+                        self,
+                        path.read_bytes(),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        path.name,
+                    )
             elif parsed.path == "/api/export/candidates.csv":
                 rows = list_rows("candidates", 10000, filters={
                     "q": query.get("q", [""])[0],
@@ -1458,9 +1792,25 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/dingtalk/test":
                 json_response(self, send_dingtalk_markdown("招聘助手钉钉连接测试", "### 招聘助手钉钉连接测试\n\n连接成功。"))
             elif parsed.path == "/api/summary/push":
-                scope = urllib.parse.parse_qs(parsed.query).get("scope", ["yesterday"])[0]
-                markdown = build_summary(scope)
-                json_response(self, send_dingtalk_markdown("招聘助手候选人汇总", markdown))
+                query = urllib.parse.parse_qs(parsed.query)
+                scope = query.get("scope", ["configured"])[0]
+                output_path, dataset = create_recommendation_excel(
+                    scope,
+                    query.get("start", [""])[0] or None,
+                    query.get("end", [""])[0] or None,
+                )
+                markdown = build_push_markdown(scope, dataset, output_path)
+                result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
+                result.update({
+                    "excel": output_path.name,
+                    "excelUrl": export_url(output_path),
+                    "range": {
+                        "label": dataset["label"],
+                        "start": dataset["start"].isoformat(timespec="seconds"),
+                        "end": dataset["end"].isoformat(timespec="seconds"),
+                    },
+                })
+                json_response(self, result)
             elif parsed.path == "/api/dingtalk/callback":
                 result = handle_dingtalk_conversation(payload)
                 if payload.get("data") is not None:

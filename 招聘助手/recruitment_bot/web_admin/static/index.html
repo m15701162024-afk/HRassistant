@@ -115,14 +115,36 @@
           每日推送时间
           <input id="scheduledPushTime" type="time" value="10:00" />
         </label>
+        <label>
+          数据推送范围
+          <select id="scheduledPushRangeMode">
+            <option value="yesterday">昨日</option>
+            <option value="today">今日</option>
+            <option value="last7">近7天</option>
+            <option value="custom">自定义时间</option>
+          </select>
+        </label>
+        <label>
+          范围开始
+          <input id="scheduledPushStart" type="datetime-local" />
+        </label>
+        <label>
+          范围结束
+          <input id="scheduledPushEnd" type="datetime-local" />
+        </label>
+        <label>
+          公开访问地址
+          <input id="publicBaseUrl" type="url" placeholder="https://hr.example.com，用于钉钉下载 Excel" />
+        </label>
       </div>
       <div class="actions">
         <button id="saveSettingsBtn">保存配置</button>
         <button id="toggleScheduleBtn" class="secondary">开启定时推送</button>
         <button id="testDingTalkBtn" class="secondary">测试钉钉</button>
-        <button id="pushYesterdayBtn" class="secondary">推送昨日汇总</button>
+        <button id="pushYesterdayBtn" class="secondary">按范围推送汇总</button>
+        <button id="exportSummaryExcelBtn" class="secondary">导出推荐 Excel</button>
       </div>
-      <p class="hint">钉钉机器人回调地址：<code id="callbackUrl"></code></p>
+      <p class="hint">钉钉机器人回调地址：<code id="callbackUrl"></code>。Excel 推荐表使用“定时推送候选人推荐表模板”，仅推送已识别到简历证据且匹配度达到推荐阈值的候选人。</p>
     </section>
 
     <section class="panel module-section" data-module="settings">

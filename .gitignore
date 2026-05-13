@@ -4,6 +4,7 @@ __pycache__/
 
 # Local runtime data
 招聘助手/recruitment_bot/web_admin/data/
+招聘助手/recruitment_bot/web_admin/exports/
 招聘助手/recruitment_bot/web_admin/*.db
 招聘助手/recruitment_bot/web_admin/*.sqlite
 招聘助手/recruitment_bot/web_admin/*.sqlite3
