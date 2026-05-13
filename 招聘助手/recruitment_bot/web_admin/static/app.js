@@ -150,7 +150,7 @@ async function loadSettings() {
   $('scheduledPushRangeMode').value = settings.scheduledPushRangeMode || 'yesterday';
   $('scheduledPushStart').value = settings.scheduledPushStart || '';
   $('scheduledPushEnd').value = settings.scheduledPushEnd || '';
-  $('publicBaseUrl').value = settings.publicBaseUrl || settings.adminBaseUrl || normalizeApiBase(getApiBase()) || '';
+  $('publicBaseUrl').value = settings.publicBaseUrl || '';
   $('llmEnabled').value = settings.llmEnabled ? 'true' : 'false';
   $('llmProvider').value = settings.llmProvider || 'openai';
   $('llmApiBase').value = settings.llmApiBase || '';

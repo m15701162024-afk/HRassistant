@@ -1214,7 +1214,7 @@ def request_base_url(handler: SimpleHTTPRequestHandler) -> str:
 
 def export_url(path: Path, base_url: str | None = None) -> str:
     settings = get_settings()
-    base = str(base_url or settings.get("publicBaseUrl") or os.environ.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    base = str(settings.get("publicBaseUrl") or os.environ.get("PUBLIC_BASE_URL") or base_url or "").strip().rstrip("/")
     if not base:
         base = str(settings.get("adminBaseUrl") or "").strip().rstrip("/")
     filename = urllib.parse.quote(path.name)
@@ -1421,13 +1421,10 @@ def build_summary(scope: str = "yesterday", start: str | None = None, end: str |
     source_text = "，".join(f"{k} {v}份" for k, v in source_counts.items()) or "暂无"
     return "\n".join(
         [
-            f"### {title_date} 招聘数据汇总",
-            "",
-            "#### 定时推送",
+            "定时推送",
             metric_line(candidates, "新增候选人"),
             metric_line(received_candidates, "收到简历数量"),
             metric_line(recommended_candidates, "推荐候选人"),
-            "",
             f"数据来源：{source_text}",
         ]
     )
