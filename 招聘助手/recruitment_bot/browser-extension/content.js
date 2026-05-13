@@ -1901,9 +1901,16 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
       await ensureChatJobRequirement(candidate);
       if (!beforeRequirement && candidate.jobRequirement) summary.savedJobs++;
 
-      await openOnlineResumeIfPresent();
+      const acceptedResume = accepted.executed > 0;
+      const openedOnlineResume = await openOnlineResumeIfPresent();
       const refreshed = await scrapeChatCandidateInfo();
       const finalCandidate = refreshed || candidate;
+      if (acceptedResume || openedOnlineResume) {
+        finalCandidate.hasResume = true;
+        finalCandidate.resumeStatus = acceptedResume ? '已同意接收附件简历' : '已打开在线简历';
+        finalCandidate.resumeEvidence = acceptedResume ? 'attachmentAccepted' : 'onlineResumeOpened';
+        finalCandidate.id = `resume_${hashString(`${finalCandidate.name || ''}|${finalCandidate.role || ''}|${finalCandidate.resumeStatus}|${Date.now()}`)}`;
+      }
       if (!finalCandidate.evaluation) finalCandidate.evaluation = evaluateCandidate(finalCandidate);
       await saveResumeData(finalCandidate);
 
@@ -2342,7 +2349,7 @@ async function pushCandidateRecommendation(resumeInfo) {
 function hasCandidateResumeEvidence(info) {
   if (!info || info.hasResume === false || info.resumeStatus === '仅沟通信息') return false;
   const id = String(info.id || '');
-  if (id.startsWith('chat_')) return false;
+  if (id.startsWith('chat_') && !info.hasResume) return false;
   return Boolean(
     info.hasResume ||
     info.resumeStatus ||

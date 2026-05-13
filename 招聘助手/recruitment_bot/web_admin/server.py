@@ -85,8 +85,8 @@ DEFAULT_LLM_CONFIG: dict[str, Any] = {
     "llmApiBase": "",
     "llmModel": "",
     "llmTemperature": 0.2,
-    "llmMaxContextItems": 80,
-    "llmMaxTokens": 1000,
+    "llmMaxContextItems": 30,
+    "llmMaxTokens": 600,
     "llmTimeoutSeconds": 90,
 }
 
@@ -724,19 +724,20 @@ def in_time_range(row: dict[str, Any], start_dt: datetime, end_dt: datetime, *fi
 
 def has_resume_evidence(row: dict[str, Any]) -> bool:
     candidate_id = str(row.get("candidate_id") or row.get("id") or "")
-    if candidate_id.startswith("chat_"):
-        return False
     raw = {}
     try:
         raw = json.loads(str(row.get("raw_json") or "{}"))
     except json.JSONDecodeError:
         raw = {}
+    has_resume = bool(raw.get("hasResume"))
+    if candidate_id.startswith("chat_") and not has_resume:
+        return False
     if raw.get("hasResume") is False:
         return False
     if raw.get("resumeStatus") in {"未获取简历", "仅沟通信息"}:
         return False
     return bool(
-        raw.get("hasResume")
+        has_resume
         or raw.get("resumeStatus")
         or row.get("education")
         or row.get("experience")
@@ -886,10 +887,11 @@ def list_agent_conversations(limit: int = 100) -> list[dict[str, Any]]:
 
 
 def build_llm_history_context(question: str, max_items: int = 80) -> str:
-    candidates = list_rows("candidates", limit=max_items)
-    recommendations = list_rows("recommendations", limit=max_items)
-    reports = list_rows("reports", limit=max(20, min(max_items, 80)))
-    job_requirements = list_job_requirements(limit=200)
+    safe_items = max(10, min(int(max_items or 30), 80))
+    candidates = list_rows("candidates", limit=safe_items)
+    recommendations = list_rows("recommendations", limit=safe_items)
+    reports = list_rows("reports", limit=max(5, min(safe_items // 2, 20)))
+    job_requirements = list_job_requirements(limit=max(10, min(safe_items, 40)))
     stats = get_stats()
     parts = [
         "【统计概览】",
@@ -912,12 +914,12 @@ def build_llm_history_context(question: str, max_items: int = 80) -> str:
     parts.extend(["", "【候选人报告摘要】"])
     for idx, item in enumerate(reports[:30], 1):
         report = str(item.get("report") or "").replace("\n", " ")
-        parts.append(f"{idx}. {item.get('name','')}｜{item.get('role','')}｜{report[:900]}")
+        parts.append(f"{idx}. {item.get('name','')}｜{item.get('role','')}｜{report[:320]}")
     parts.extend(["", "【岗位要求库】"])
     for idx, item in enumerate(job_requirements[:80], 1):
         requirement = str(item.get("requirement") or "").replace("\n", " ")
-        parts.append(f"{idx}. 岗位:{item.get('role','')}｜来源:{item.get('source','')}｜账号:{item.get('account_name','')}｜要求:{requirement[:900]}")
-    return "\n".join(parts)[:24000]
+        parts.append(f"{idx}. 岗位:{item.get('role','')}｜来源:{item.get('source','')}｜账号:{item.get('account_name','')}｜要求:{requirement[:360]}")
+    return "\n".join(parts)[:max(7000, safe_items * 260)]
 
 
 def build_llm_system_prompt() -> str:
@@ -1069,9 +1071,26 @@ def call_llm_chat(question: str, context: str) -> str:
         raise
 
 
+def should_use_fast_rules(question: str) -> bool:
+    normalized = str(question or "").strip()
+    if not normalized:
+        return True
+    fast_keywords = [
+        "多少", "数量", "统计", "汇总", "昨天", "昨日", "今天", "今日",
+        "推荐候选人", "收到简历", "新增候选人", "数据来源", "账号分布",
+        "有哪些", "是谁", "最高", "排名", "最合适",
+    ]
+    analysis_keywords = ["分析原因", "为什么", "怎么优化", "建议", "写一段", "生成话术", "对比分析"]
+    return any(keyword in normalized for keyword in fast_keywords) and not any(
+        keyword in normalized for keyword in analysis_keywords
+    )
+
+
 def answer_question_with_agent(question: str) -> tuple[str, dict[str, Any]]:
     fallback = answer_question_rules(question)
     config = get_llm_config(mask_key=False)
+    if should_use_fast_rules(question):
+        return fallback, {"mode": "rules-fast", "llmSkipped": True}
     if not config.get("llmEnabled"):
         return fallback, {"mode": "rules", "llmEnabled": False}
     try:
