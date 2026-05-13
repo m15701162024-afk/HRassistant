@@ -23,8 +23,8 @@ import sqlite3
 import time
 import urllib.parse
 import urllib.request
-import threading
 import uuid
+import threading
 from datetime import datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1054,8 +1054,11 @@ def get_settings() -> dict[str, Any]:
 
 
 def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    current = get_settings()
     with connect() as conn:
         for key, value in payload.items():
+            if key in {"dingtalkAppKey", "dingtalkAppSecret"} and str(value or "").strip() in {"", "********"} and current.get(key):
+                value = current.get(key)
             conn.execute(
                 "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
                 (key, json.dumps(value, ensure_ascii=False), now_iso()),
@@ -1206,6 +1209,7 @@ def scheduled_push_loop() -> None:
                 output_path, dataset = create_recommendation_excel(scope)
                 markdown = build_push_markdown(scope, dataset, output_path)
                 result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
+                file_result = send_dingtalk_file(output_path)
                 if result.get("success"):
                     save_settings({"scheduledPushLastDate": today})
         except Exception as exc:
@@ -1251,13 +1255,11 @@ def build_push_markdown(scope: str, dataset: dict[str, Any], excel_path: Path, b
         dataset["start"].isoformat(timespec="minutes"),
         dataset["end"].isoformat(timespec="minutes"),
     )
-    link = export_url(excel_path, base_url)
     excel_section = "\n".join([
         "#### Excel 推荐表",
-        f"- 文件：[{excel_path.name}]({link})",
+        f"- 文件：{excel_path.name}",
         f"- 范围：{dataset['label']}（{dataset['start']:%Y-%m-%d %H:%M} 至 {dataset['end']:%Y-%m-%d %H:%M}）",
         "- 口径：仅推荐已识别到简历证据且匹配度达标的候选人；未获取简历的沟通记录已排除。",
-        "- 明细：候选人姓名、学历、学校、经验、附件简历、来源、账号、投递岗位、匹配度、匹配度依据。",
     ])
     return f"{summary}\n\n{excel_section}"
 
@@ -1291,6 +1293,93 @@ def send_dingtalk_markdown_to_webhook(webhook: str, title: str, text: str, secre
     if body.get("errcode") not in (None, 0):
         return {"success": False, "message": body.get("errmsg", "钉钉推送失败"), "body": body}
     return {"success": True, "body": body}
+
+
+def get_dingtalk_access_token(settings: dict[str, Any]) -> str:
+    app_key = str(settings.get("dingtalkAppKey") or "").strip()
+    app_secret = str(settings.get("dingtalkAppSecret") or "").strip()
+    if not app_key or not app_secret:
+        return ""
+    url = "https://oapi.dingtalk.com/gettoken?" + urllib.parse.urlencode({
+        "appkey": app_key,
+        "appsecret": app_secret,
+    })
+    with urllib.request.urlopen(url, timeout=15) as response:
+        body = json.loads(response.read().decode("utf-8") or "{}")
+    if body.get("errcode") != 0:
+        raise RuntimeError(f"获取钉钉 access_token 失败：{body.get('errmsg') or body}")
+    return str(body.get("access_token") or "")
+
+
+def multipart_form_data(fields: dict[str, str], files: dict[str, tuple[str, bytes, str]]) -> tuple[bytes, str]:
+    boundary = f"----RecruitmentBot{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend([
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+            str(value).encode("utf-8"),
+            b"\r\n",
+        ])
+    for name, (filename, data, content_type) in files.items():
+        chunks.extend([
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode(),
+            f"Content-Type: {content_type}\r\n\r\n".encode(),
+            data,
+            b"\r\n",
+        ])
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def upload_dingtalk_file(access_token: str, file_path: Path) -> str:
+    data, content_type = multipart_form_data(
+        {},
+        {
+            "media": (
+                file_path.name,
+                file_path.read_bytes(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    url = f"https://oapi.dingtalk.com/media/upload?access_token={urllib.parse.quote(access_token)}&type=file"
+    request = urllib.request.Request(url, data=data, method="POST")
+    request.add_header("Content-Type", content_type)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        body = json.loads(response.read().decode("utf-8") or "{}")
+    if body.get("errcode") != 0:
+        raise RuntimeError(f"上传钉钉文件失败：{body.get('errmsg') or body}")
+    return str(body.get("media_id") or "")
+
+
+def send_dingtalk_file(file_path: Path) -> dict[str, Any]:
+    settings = get_settings()
+    chat_id = str(settings.get("dingtalkChatId") or "").strip()
+    if not chat_id:
+        return {"success": False, "skipped": True, "message": "未配置钉钉 chatId，无法直接发送文件"}
+    access_token = get_dingtalk_access_token(settings)
+    if not access_token:
+        return {"success": False, "skipped": True, "message": "未配置钉钉 AppKey/AppSecret，无法直接发送文件"}
+    media_id = upload_dingtalk_file(access_token, file_path)
+    payload = {
+        "chatid": chat_id,
+        "msg": {
+            "msgtype": "file",
+            "file": {"media_id": media_id},
+        },
+    }
+    url = f"https://oapi.dingtalk.com/chat/send?access_token={urllib.parse.quote(access_token)}"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = json.loads(response.read().decode("utf-8") or "{}")
+    return {"success": body.get("errcode") == 0, "body": body, "mediaId": media_id}
 
 
 def parse_dingtalk_message(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1445,7 +1534,7 @@ def build_summary(scope: str = "yesterday", start: str | None = None, end: str |
     source_text = "，".join(f"{k} {v}份" for k, v in source_counts.items()) or "暂无"
     return "\n".join(
         [
-            "定时推送",
+            "**定时推送**",
             metric_line(candidates, "新增候选人"),
             metric_line(received_candidates, "收到简历数量"),
             metric_line(recommended_candidates, "推荐候选人"),
@@ -1667,6 +1756,12 @@ class Handler(SimpleHTTPRequestHandler):
                 settings = get_settings()
                 llm_config = get_llm_config(mask_key=True)
                 settings.update(llm_config)
+                if settings.get("dingtalkAppKey"):
+                    settings["dingtalkAppKeyConfigured"] = True
+                    settings["dingtalkAppKey"] = "********"
+                if settings.get("dingtalkAppSecret"):
+                    settings["dingtalkAppSecretConfigured"] = True
+                    settings["dingtalkAppSecret"] = "********"
                 json_response(self, settings)
             elif parsed.path == "/api/llm/config":
                 json_response(self, get_llm_config(mask_key=True))
@@ -1820,9 +1915,11 @@ class Handler(SimpleHTTPRequestHandler):
                 )
                 markdown = build_push_markdown(scope, dataset, output_path, base_url)
                 result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
+                file_result = send_dingtalk_file(output_path)
                 result.update({
                     "excel": output_path.name,
                     "excelUrl": export_url(output_path, base_url),
+                    "excelFile": file_result,
                     "range": {
                         "label": dataset["label"],
                         "start": dataset["start"].isoformat(timespec="seconds"),

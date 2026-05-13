@@ -104,6 +104,18 @@
           <input id="dingtalkSecret" type="password" placeholder="SEC..." />
         </label>
         <label>
+          钉钉 AppKey
+          <input id="dingtalkAppKey" type="password" placeholder="用于直接发送 Excel 文件" />
+        </label>
+        <label>
+          钉钉 AppSecret
+          <input id="dingtalkAppSecret" type="password" placeholder="用于上传 Excel 文件" />
+        </label>
+        <label>
+          钉钉群 ChatId
+          <input id="dingtalkChatId" type="text" placeholder="用于直接发送 Excel 文件到群" />
+        </label>
+        <label>
           自动识别账号
           <input id="accountName" type="text" placeholder="由插件自动识别，也可在这里修正" />
         </label>
@@ -144,7 +156,7 @@
         <button id="pushYesterdayBtn" class="secondary">按范围推送汇总</button>
         <button id="exportSummaryExcelBtn" class="secondary">导出推荐 Excel</button>
       </div>
-      <p class="hint">钉钉机器人回调地址：<code id="callbackUrl"></code>。Excel 推荐表使用“定时推送候选人推荐表模板”，仅推送已识别到简历证据且匹配度达到推荐阈值的候选人。</p>
+      <p class="hint">钉钉机器人回调地址：<code id="callbackUrl"></code>。配置 AppKey、AppSecret、ChatId 后会直接发送 Excel 文件；仅配置 Webhook 时只发送正文。</p>
     </section>
 
     <section class="panel module-section" data-module="settings">

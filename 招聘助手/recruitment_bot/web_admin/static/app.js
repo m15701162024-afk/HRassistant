@@ -151,6 +151,11 @@ async function loadSettings() {
   state.settings = settings;
   $('dingtalkWebhook').value = settings.dingtalkWebhook || '';
   $('dingtalkSecret').value = settings.dingtalkSecret || '';
+  $('dingtalkAppKey').value = '';
+  $('dingtalkAppKey').placeholder = settings.dingtalkAppKeyConfigured ? '已配置，留空则保留' : '用于直接发送 Excel 文件';
+  $('dingtalkAppSecret').value = '';
+  $('dingtalkAppSecret').placeholder = settings.dingtalkAppSecretConfigured ? '已配置，留空则保留' : '用于上传 Excel 文件';
+  $('dingtalkChatId').value = settings.dingtalkChatId || '';
   $('accountName').value = settings.accountName || settings.detectedAccount?.name || '';
   $('accountPlatform').value = settings.accountPlatform || settings.detectedAccount?.platform || 'BOSS直聘';
   if ($('jobAccountInput')) $('jobAccountInput').value = settings.accountName || settings.detectedAccount?.name || '';
@@ -297,6 +302,9 @@ async function saveSettings(showToast = true) {
     body: JSON.stringify({
       dingtalkWebhook: $('dingtalkWebhook').value.trim(),
       dingtalkSecret: $('dingtalkSecret').value.trim(),
+      dingtalkAppKey: $('dingtalkAppKey').value.trim(),
+      dingtalkAppSecret: $('dingtalkAppSecret').value.trim(),
+      dingtalkChatId: $('dingtalkChatId').value.trim(),
       accountName: $('accountName').value.trim(),
       accountPlatform: $('accountPlatform').value.trim() || 'BOSS直聘',
       accountNameManual: Boolean($('accountName').value.trim()),
@@ -318,6 +326,9 @@ async function toggleSchedule() {
     body: JSON.stringify({
       dingtalkWebhook: $('dingtalkWebhook').value.trim(),
       dingtalkSecret: $('dingtalkSecret').value.trim(),
+      dingtalkAppKey: $('dingtalkAppKey').value.trim(),
+      dingtalkAppSecret: $('dingtalkAppSecret').value.trim(),
+      dingtalkChatId: $('dingtalkChatId').value.trim(),
       accountName: $('accountName').value.trim(),
       accountPlatform: $('accountPlatform').value.trim() || 'BOSS直聘',
       accountNameManual: Boolean($('accountName').value.trim()),
@@ -563,7 +574,8 @@ async function testDingTalk() {
 async function pushYesterday() {
   await saveSettings(false);
   const result = await api(`/api/summary/push${buildSummaryQuery()}`, { method: 'POST', body: '{}' });
-  toast(result.success ? `汇总已推送，Excel：${result.excel || '已生成'}` : result.message, result.success ? 'success' : 'warning');
+  const fileText = result.excelFile?.success ? 'Excel 文件已发送' : (result.excelFile?.message || 'Excel 文件未发送');
+  toast(result.success ? `汇总已推送，${fileText}` : result.message, result.success ? 'success' : 'warning');
 }
 
 function pushRangeLabel(mode) {
