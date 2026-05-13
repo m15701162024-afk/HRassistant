@@ -1449,9 +1449,46 @@ def parse_dingtalk_message(payload: dict[str, Any]) -> dict[str, Any]:
         "sessionWebhook": payload.get("sessionWebhook") or "",
         "senderNick": payload.get("senderNick") or payload.get("senderStaffId") or payload.get("senderId") or "",
         "conversationTitle": payload.get("conversationTitle") or "",
+        "openConversationId": first_nested_value(payload, "openConversationId", "conversationId", "open_conversation_id"),
+        "chatId": first_nested_value(payload, "chatId", "chatid", "chat_id"),
+        "robotCode": first_nested_value(payload, "robotCode", "robot_code"),
         "msgtype": payload.get("msgtype") or "text",
         "raw": payload,
     }
+
+
+def first_nested_value(value: Any, *keys: str) -> str:
+    key_set = set(keys)
+    if isinstance(value, dict):
+        for key in keys:
+            found = value.get(key)
+            if found:
+                return str(found)
+        for key, child in value.items():
+            if key in key_set and child:
+                return str(child)
+            found = first_nested_value(child, *keys)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = first_nested_value(child, *keys)
+            if found:
+                return found
+    return ""
+
+
+def persist_dingtalk_conversation_target(message: dict[str, Any]) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if message.get("openConversationId"):
+        updates["dingtalkOpenConversationId"] = message["openConversationId"]
+    if message.get("chatId"):
+        updates["dingtalkChatId"] = message["chatId"]
+    if message.get("robotCode"):
+        updates["dingtalkRobotCode"] = message["robotCode"]
+    if updates:
+        save_settings(updates)
+    return updates
 
 
 def dingtalk_callback_ack() -> dict[str, Any]:
@@ -1485,6 +1522,7 @@ def dingtalk_stream_ack_with_answer(answer: str) -> dict[str, Any]:
 
 def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
     message = parse_dingtalk_message(payload)
+    saved_target = persist_dingtalk_conversation_target(message)
     question = message["question"]
     if not question:
         answer = "### 招聘助手\n\n我没有收到有效问题。你可以问：昨天推荐了谁？React候选人有哪些？匹配度最高的是谁？"
@@ -1522,6 +1560,7 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
         "question": question,
         "answer": answer,
         "agent": agent_meta,
+        "savedTarget": saved_target,
         "reply": push_result,
         "directReply": dingtalk_markdown_reply("招聘助手问答", answer),
         "ack": dingtalk_stream_ack_with_answer(answer),
