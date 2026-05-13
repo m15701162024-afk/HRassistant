@@ -1988,6 +1988,9 @@ class Handler(SimpleHTTPRequestHandler):
                 markdown = build_push_markdown(scope, dataset, output_path, base_url)
                 result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
                 file_result = send_dingtalk_file(output_path)
+                if not file_result.get("success"):
+                    result["success"] = False
+                    result["message"] = f"正文已发送，但 Excel 文件未发送：{file_result.get('message') or file_result.get('body') or '未知错误'}"
                 result.update({
                     "excel": output_path.name,
                     "excelUrl": export_url(output_path, base_url),
