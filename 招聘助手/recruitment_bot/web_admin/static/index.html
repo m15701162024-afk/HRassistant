@@ -289,24 +289,6 @@
 
     <section class="panel module-section" data-module="qa">
       <div class="panel-title">
-        <h2>问答 Agent</h2>
-        <span>基于历史候选人、推荐和报告回答</span>
-      </div>
-      <div class="qa">
-        <input id="questionInput" type="text" placeholder="例如：昨天推荐了谁？React候选人有哪些？匹配度最高的是谁？" />
-        <button id="askBtn">提问</button>
-        <button id="askAndPushBtn" class="secondary">回答并推送</button>
-      </div>
-      <pre id="answerBox">等待提问...</pre>
-      <div class="panel-title sub-title">
-        <h2>问答历史</h2>
-        <span id="conversationCount">0 条</span>
-      </div>
-      <div id="conversationList" class="conversation-list"></div>
-    </section>
-
-    <section class="panel module-section" data-module="qa">
-      <div class="panel-title">
         <h2>大模型 API</h2>
         <span id="llmStatus" class="badge">未启用</span>
       </div>
@@ -375,6 +357,24 @@
         <button id="resetLlmBtn" class="secondary">清空大模型配置</button>
       </div>
       <p class="hint">OpenAI、千问、阿里云百炼、硅基流动、DeepSeek 使用 OpenAI-compatible Chat Completions；Claude 使用 Anthropic Messages。钉钉机器人提问时会检索历史数据后调用模型，调用失败时自动使用本地规则回答。</p>
+    </section>
+
+    <section class="panel module-section" data-module="qa">
+      <div class="panel-title">
+        <h2>问答 Agent</h2>
+        <span>基于历史候选人、推荐和报告回答</span>
+      </div>
+      <div class="qa">
+        <input id="questionInput" type="text" placeholder="例如：昨天推荐了谁？React候选人有哪些？匹配度最高的是谁？" />
+        <button id="askBtn">提问</button>
+        <button id="askAndPushBtn" class="secondary">回答并推送</button>
+      </div>
+      <pre id="answerBox">等待提问...</pre>
+      <div class="panel-title sub-title">
+        <h2>问答历史</h2>
+        <span id="conversationCount">0 条</span>
+      </div>
+      <div id="conversationList" class="conversation-list"></div>
     </section>
 
     <section class="panel module-section" data-module="candidates">
