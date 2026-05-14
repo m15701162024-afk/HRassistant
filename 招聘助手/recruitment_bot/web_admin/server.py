@@ -876,6 +876,14 @@ def resume_request_satisfied(row: dict[str, Any]) -> bool:
     return bool(raw.get("resumeRequestExecuted") or status in {"已点击求简历", "已索要简历", "已发送求简历消息"})
 
 
+def qualifies_for_recommendation(row: dict[str, Any]) -> bool:
+    raw = raw_payload(row)
+    labels = {"推荐", "非常推荐", "强烈推荐"}
+    score = int(row.get("score") or raw.get("score") or (raw.get("evaluation") or {}).get("score") or 0)
+    recommendation = str(row.get("recommendation") or raw.get("recommendation") or (raw.get("evaluation") or {}).get("recommendation") or "")
+    return score >= 40 or recommendation in labels
+
+
 def get_range_dataset(
     scope: str = "configured",
     start: str | None = None,
@@ -897,18 +905,12 @@ def get_range_dataset(
     ]
     resume_candidates = [item for item in candidates if has_resume_evidence(item)]
     recommended_by_id: dict[str, dict[str, Any]] = {}
-    recommendation_labels = {"推荐", "非常推荐", "强烈推荐"}
     for item in resume_candidates:
-        if resume_request_satisfied(item) and (
-            int(item.get("score") or 0) >= 40 or str(item.get("recommendation") or "") in recommendation_labels
-        ):
+        if qualifies_for_recommendation(item):
             recommended_by_id[str(item.get("id") or "")] = item
     for item in [
         item for item in recommendations
-        if has_resume_evidence(item) and resume_request_satisfied(item) and (
-            int(item.get("score") or 0) >= 40
-            or str(item.get("recommendation") or "") in recommendation_labels
-        )
+        if has_resume_evidence(item) and qualifies_for_recommendation(item)
     ]:
         recommended_by_id[str(item.get("candidate_id") or item.get("id") or "")] = item
     recommended_candidates = list(recommended_by_id.values())
