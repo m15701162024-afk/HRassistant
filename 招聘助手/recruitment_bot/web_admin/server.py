@@ -468,6 +468,16 @@ def extract_requirement_keywords_backend(text: str) -> list[str]:
     return [item for item in keywords if item in normalized]
 
 
+def recommendation_label_by_score(score: int) -> str:
+    if score >= 80:
+        return "强烈推荐"
+    if score >= 60:
+        return "非常推荐"
+    if score >= 40:
+        return "推荐"
+    return "不推荐"
+
+
 def match_candidate_with_requirement(candidate: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     raw: dict[str, Any]
     try:
@@ -518,11 +528,7 @@ def match_candidate_with_requirement(candidate: dict[str, Any], job: dict[str, A
 
     base_score = int(candidate.get("score") or evaluation.get("score") or 0)
     next_score = max(0, min(100, base_score + adjustment))
-    recommendation = str(candidate.get("recommendation") or evaluation.get("recommendation") or "待评估")
-    if verdict == "不匹配" and next_score < 60:
-        recommendation = "不推荐"
-    elif verdict == "部分匹配" and recommendation == "推荐":
-        recommendation = "待定"
+    recommendation = recommendation_label_by_score(next_score)
     evaluation["score"] = next_score
     evaluation["recommendation"] = recommendation
 
@@ -782,14 +788,15 @@ def get_range_dataset(scope: str = "configured", start: str | None = None, end: 
     ]
     resume_candidates = [item for item in candidates if has_resume_evidence(item)]
     recommended_by_id: dict[str, dict[str, Any]] = {}
+    recommendation_labels = {"推荐", "非常推荐", "强烈推荐"}
     for item in resume_candidates:
-        if int(item.get("score") or 0) >= 60 or str(item.get("recommendation") or "") in {"推荐", "强烈推荐"}:
+        if int(item.get("score") or 0) >= 40 or str(item.get("recommendation") or "") in recommendation_labels:
             recommended_by_id[str(item.get("id") or "")] = item
     for item in [
         item for item in recommendations
         if has_resume_evidence(item) and (
-            int(item.get("score") or 0) >= 60
-            or str(item.get("recommendation") or "") in {"推荐", "强烈推荐"}
+            int(item.get("score") or 0) >= 40
+            or str(item.get("recommendation") or "") in recommendation_labels
         )
     ]:
         recommended_by_id[str(item.get("candidate_id") or item.get("id") or "")] = item

@@ -89,9 +89,9 @@ const AGENTS_EVALUATION_RULES = {
   skills: 30,
   projects: 30,
   salary: 20,
-  recommendThreshold: 60,
-  strongRecommendThreshold: 90,
-  pendingThreshold: 50,
+  recommendThreshold: 40,
+  veryRecommendThreshold: 60,
+  strongRecommendThreshold: 80,
 };
 
 const SKILL_KEYWORDS = [
@@ -1354,14 +1354,14 @@ function evaluateCandidate(info) {
     recommendation = '强烈推荐';
     level = 'strong';
     nextStep = '立即安排面试';
+  } else if (score >= AGENTS_EVALUATION_RULES.veryRecommendThreshold) {
+    recommendation = '非常推荐';
+    level = 'very';
+    nextStep = '优先电话沟通并推进面试';
   } else if (score >= AGENTS_EVALUATION_RULES.recommendThreshold) {
     recommendation = '推荐';
     level = 'recommend';
-    nextStep = '电话沟通后安排面试';
-  } else if (score >= AGENTS_EVALUATION_RULES.pendingThreshold) {
-    recommendation = '待定';
-    level = 'pending';
-    nextStep = '补充追问项目职责、技术深度和薪资期望';
+    nextStep = '点击求简历，补充确认项目职责、技术深度和薪资期望';
   }
 
   return {
@@ -1991,7 +1991,8 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
       await saveResumeData(finalCandidate);
 
       const score = Number(finalCandidate.evaluation?.score || 0);
-      if (score >= AGENTS_EVALUATION_RULES.recommendThreshold) {
+      const needsResumeRequest = score >= AGENTS_EVALUATION_RULES.recommendThreshold && !finalCandidate.hasAttachmentResume;
+      if (needsResumeRequest) {
         const requestResult = await clickResumeActionType('request', finalCandidate.name || target?.name || '候选人');
         summary.requested += requestResult.executed;
         if (!requestResult.executed) summary.skipped++;
@@ -2004,7 +2005,8 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
         name: finalCandidate.name || target?.name || '候选人',
         role: finalCandidate.role || '',
         score,
-        requested: score >= AGENTS_EVALUATION_RULES.recommendThreshold,
+        requested: needsResumeRequest,
+        resumeType: finalCandidate.hasAttachmentResume ? '有附件简历' : '无附件简历',
       });
       workflowProcessedKeys.add(target?.key || getCurrentWorkflowKey(finalCandidate));
       await maybeTakeLongBreak(summary.processed);
@@ -2486,7 +2488,7 @@ function buildCandidateReport(info) {
     partial: '⚠️',
     weak: '❌',
   };
-  const stars = evaluation.score >= 90 ? '⭐⭐⭐' : evaluation.score >= 70 ? '⭐⭐' : evaluation.score >= 50 ? '⭐' : '❌';
+  const stars = evaluation.score >= 80 ? '⭐⭐⭐' : evaluation.score >= 60 ? '⭐⭐' : evaluation.score >= 40 ? '⭐' : '❌';
 
   return [
     `## 📋 ${info.role || '待确认岗位'} - ${info.name || '候选人'}`,
