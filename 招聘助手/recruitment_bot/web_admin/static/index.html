@@ -10,7 +10,7 @@
   <header class="app-header">
     <div>
       <h1>招聘助手 Web 管理后台</h1>
-      <p>候选人历史、推荐报告、钉钉问答、自动推送与部署监控</p>
+      <p>按招聘数据、岗位要求、钉钉推送、问答和系统配置分模块管理</p>
     </div>
     <div class="header-actions">
       <span id="healthBadge" class="badge">检查中</span>
@@ -20,14 +20,16 @@
 
   <nav class="module-nav" aria-label="后台模块">
     <button class="module-tab active" data-module="overview">总览</button>
-    <button class="module-tab" data-module="data">候选人与岗位</button>
+    <button class="module-tab" data-module="candidates">候选人数据</button>
+    <button class="module-tab" data-module="jobs">岗位要求</button>
+    <button class="module-tab" data-module="delivery">钉钉推送</button>
     <button class="module-tab" data-module="automation">自动化策略</button>
     <button class="module-tab" data-module="qa">问答 Agent</button>
     <button class="module-tab" data-module="settings">系统配置</button>
   </nav>
 
   <main>
-    <section class="toolbar module-section" data-module="data">
+    <section class="toolbar module-section" data-module="candidates">
       <div class="search-box">
         <input id="searchInput" type="search" placeholder="搜索姓名、岗位、技能、推荐意见" />
         <input id="sourceFilter" type="search" placeholder="数据来源" />
@@ -52,6 +54,30 @@
         <button id="resetApiBaseBtn" class="secondary">恢复自动</button>
       </div>
       <p class="hint">如果你是直接打开 HTML 文件，请先启动 Web 后端，并将这里设置为 <code>http://127.0.0.1:8787</code>。</p>
+    </section>
+
+    <section class="panel module-section" data-module="settings">
+      <div class="panel-title">
+        <h2>招聘账号</h2>
+        <span>插件识别失败时可手动修正</span>
+      </div>
+      <div class="form-grid account-grid">
+        <label>
+          BOSS账号信息
+          <input id="accountName" type="text" placeholder="由插件自动识别，也可在这里修正" />
+        </label>
+        <label>
+          账号平台
+          <input id="accountPlatform" type="text" placeholder="BOSS直聘" />
+        </label>
+        <label>
+          公开访问地址
+          <input id="publicBaseUrl" type="url" placeholder="用于钉钉下载 Excel 的公网地址" />
+        </label>
+      </div>
+      <div class="actions">
+        <button id="saveAccountSettingsBtn">保存账号配置</button>
+      </div>
     </section>
 
     <section class="stats-grid module-section active" data-module="overview">
@@ -83,160 +109,86 @@
       <article class="panel wide">
         <div class="panel-title">
           <h2>高匹配推荐 Top 10</h2>
-          <button id="previewSummaryBtn" class="secondary small">预览昨日汇总</button>
         </div>
         <div id="topRecommendations" class="top-list"></div>
       </article>
     </section>
 
-    <section class="panel module-section" data-module="settings">
+    <section class="panel module-section" data-module="delivery">
       <div class="panel-title">
         <h2>钉钉与推送</h2>
         <span id="scheduleStatus" class="badge">未开启</span>
       </div>
-      <div class="form-grid">
-        <label>
-          钉钉 Webhook
-          <input id="dingtalkWebhook" type="password" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
-        </label>
-        <label>
-          钉钉加签 Secret
-          <input id="dingtalkSecret" type="password" placeholder="SEC..." />
-        </label>
-        <label>
-          钉钉 AppKey
-          <input id="dingtalkAppKey" type="password" placeholder="用于直接发送 Excel 文件" />
-        </label>
-        <label>
-          钉钉 AppSecret
-          <input id="dingtalkAppSecret" type="password" placeholder="用于上传 Excel 文件" />
-        </label>
-        <label>
-          钉钉 RobotCode
-          <input id="dingtalkRobotCode" type="text" placeholder="应用机器人 robotCode，可不填则默认 AppKey" />
-        </label>
-        <label>
-          OpenConversationId
-          <input id="dingtalkOpenConversationId" type="text" placeholder="群会话 openConversationId，优先用于发送 Excel" />
-        </label>
-        <label>
-          钉钉群 ChatId（可选）
-          <input id="dingtalkChatId" type="text" placeholder="兼容旧接口，找不到可不填" />
-        </label>
-        <label>
-          自动识别账号
-          <input id="accountName" type="text" placeholder="由插件自动识别，也可在这里修正" />
-        </label>
-        <label>
-          账号平台
-          <input id="accountPlatform" type="text" placeholder="BOSS直聘" />
-        </label>
-        <label>
-          每日推送时间
-          <input id="scheduledPushTime" type="time" value="10:00" />
-        </label>
-        <label>
-          数据推送范围
-          <select id="scheduledPushRangeMode">
-            <option value="yesterday">昨日</option>
-            <option value="today">今日</option>
-            <option value="last7">近7天</option>
-            <option value="custom">自定义时间</option>
-          </select>
-        </label>
-        <label>
-          范围开始
-          <input id="scheduledPushStart" type="datetime-local" />
-        </label>
-        <label>
-          范围结束
-          <input id="scheduledPushEnd" type="datetime-local" />
-        </label>
-        <label>
-          公开访问地址
-          <input id="publicBaseUrl" type="url" placeholder="https://hr.example.com，用于钉钉下载 Excel" />
-        </label>
+      <div class="config-stack">
+        <div class="config-group">
+          <h3>钉钉机器人</h3>
+          <div class="form-grid dingtalk-grid">
+            <label>
+              钉钉 Webhook
+              <input id="dingtalkWebhook" type="password" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
+            </label>
+            <label>
+              钉钉加签 Secret
+              <input id="dingtalkSecret" type="password" placeholder="SEC..." />
+            </label>
+            <label>
+              钉钉 AppKey
+              <input id="dingtalkAppKey" type="password" placeholder="用于直接发送 Excel 文件" />
+            </label>
+            <label>
+              钉钉 AppSecret
+              <input id="dingtalkAppSecret" type="password" placeholder="用于上传 Excel 文件" />
+            </label>
+            <label>
+              钉钉 RobotCode
+              <input id="dingtalkRobotCode" type="text" placeholder="应用机器人 robotCode，可不填则默认 AppKey" />
+            </label>
+            <label>
+              OpenConversationId
+              <input id="dingtalkOpenConversationId" type="text" placeholder="群会话 openConversationId，优先用于发送 Excel" />
+            </label>
+            <label>
+              钉钉群 ChatId（可选）
+              <input id="dingtalkChatId" type="text" placeholder="兼容旧接口，找不到可不填" />
+            </label>
+          </div>
+        </div>
+        <div class="config-group">
+          <h3>定时汇总</h3>
+          <div class="form-grid schedule-grid">
+            <label>
+              每日推送时间
+              <input id="scheduledPushTime" type="time" value="10:00" />
+            </label>
+            <label>
+              数据推送范围
+              <select id="scheduledPushRangeMode">
+                <option value="yesterday">昨日</option>
+                <option value="today">今日</option>
+                <option value="last7">近7天</option>
+                <option value="custom">自定义时间</option>
+              </select>
+            </label>
+            <label>
+              范围开始
+              <input id="scheduledPushStart" type="datetime-local" />
+            </label>
+            <label>
+              范围结束
+              <input id="scheduledPushEnd" type="datetime-local" />
+            </label>
+          </div>
+        </div>
       </div>
       <div class="actions">
-        <button id="saveSettingsBtn">保存配置</button>
+        <button id="saveSettingsBtn">保存推送配置</button>
         <button id="toggleScheduleBtn" class="secondary">开启定时推送</button>
         <button id="testDingTalkBtn" class="secondary">测试钉钉</button>
+        <button id="previewSummaryBtn" class="secondary">预览汇总</button>
         <button id="pushYesterdayBtn" class="secondary">按范围推送汇总</button>
         <button id="exportSummaryExcelBtn" class="secondary">导出推荐 Excel</button>
       </div>
       <p class="hint">钉钉机器人回调地址：<code id="callbackUrl"></code>。群里向机器人提问后，系统会自动捕获 OpenConversationId/ChatId；配置 AppKey、AppSecret 后即可直接发送 Excel 文件。</p>
-    </section>
-
-    <section class="panel module-section" data-module="settings">
-      <div class="panel-title">
-        <h2>大模型 API</h2>
-        <span id="llmStatus" class="badge">未启用</span>
-      </div>
-      <div class="config-stack">
-        <div class="config-group">
-          <h3>基础连接</h3>
-          <div class="form-grid llm-connection-grid">
-            <label>
-              启用大模型问答
-              <select id="llmEnabled">
-                <option value="false">关闭</option>
-                <option value="true">开启</option>
-              </select>
-            </label>
-            <label>
-              模型平台
-              <select id="llmProvider">
-                <option value="openai">OpenAI</option>
-                <option value="claude">Claude</option>
-                <option value="qwen">通义千问</option>
-                <option value="aliyun">阿里云百炼</option>
-                <option value="siliconflow">硅基流动</option>
-                <option value="deepseek">DeepSeek</option>
-                <option value="custom">自定义 OpenAI-compatible</option>
-              </select>
-            </label>
-            <label>
-              API Base URL
-              <input id="llmApiBase" type="url" placeholder="请输入服务商 API Base URL" />
-            </label>
-            <label>
-              API Key
-              <input id="llmApiKey" type="password" placeholder="请输入 API Key" />
-            </label>
-          </div>
-        </div>
-        <div class="config-group">
-          <h3>模型参数</h3>
-          <div class="form-grid llm-model-grid">
-            <label>
-              模型名
-              <input id="llmModel" type="text" placeholder="请输入模型名" />
-            </label>
-            <label>
-              温度
-              <input id="llmTemperature" type="number" min="0" max="2" step="0.1" />
-            </label>
-            <label>
-              历史上下文条数
-              <input id="llmMaxContextItems" type="number" min="10" max="500" step="10" />
-            </label>
-            <label>
-              最大输出 tokens
-              <input id="llmMaxTokens" type="number" min="100" max="8000" step="100" />
-            </label>
-            <label>
-              API 超时秒数
-              <input id="llmTimeoutSeconds" type="number" min="30" max="180" step="10" />
-            </label>
-          </div>
-        </div>
-      </div>
-      <div class="actions">
-        <button id="saveLlmBtn">保存大模型配置</button>
-        <button id="testLlmBtn" class="secondary">测试问答</button>
-        <button id="resetLlmBtn" class="secondary">清空大模型配置</button>
-      </div>
-      <p class="hint">OpenAI、千问、阿里云百炼、硅基流动、DeepSeek 使用 OpenAI-compatible Chat Completions；Claude 使用 Anthropic Messages。钉钉机器人提问时会检索历史数据后调用模型，调用失败时自动使用本地规则回答。</p>
     </section>
 
     <section class="panel module-section" data-module="automation">
@@ -353,11 +305,82 @@
       <div id="conversationList" class="conversation-list"></div>
     </section>
 
-    <section class="panel module-section" data-module="data">
+    <section class="panel module-section" data-module="qa">
+      <div class="panel-title">
+        <h2>大模型 API</h2>
+        <span id="llmStatus" class="badge">未启用</span>
+      </div>
+      <div class="config-stack">
+        <div class="config-group">
+          <h3>基础连接</h3>
+          <div class="form-grid llm-connection-grid">
+            <label>
+              启用大模型问答
+              <select id="llmEnabled">
+                <option value="false">关闭</option>
+                <option value="true">开启</option>
+              </select>
+            </label>
+            <label>
+              模型平台
+              <select id="llmProvider">
+                <option value="openai">OpenAI</option>
+                <option value="claude">Claude</option>
+                <option value="qwen">通义千问</option>
+                <option value="aliyun">阿里云百炼</option>
+                <option value="siliconflow">硅基流动</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="custom">自定义 OpenAI-compatible</option>
+              </select>
+            </label>
+            <label>
+              API Base URL
+              <input id="llmApiBase" type="url" placeholder="请输入服务商 API Base URL" />
+            </label>
+            <label>
+              API Key
+              <input id="llmApiKey" type="password" placeholder="请输入 API Key" />
+            </label>
+          </div>
+        </div>
+        <div class="config-group">
+          <h3>模型参数</h3>
+          <div class="form-grid llm-model-grid">
+            <label>
+              模型名
+              <input id="llmModel" type="text" placeholder="请输入模型名" />
+            </label>
+            <label>
+              温度
+              <input id="llmTemperature" type="number" min="0" max="2" step="0.1" />
+            </label>
+            <label>
+              历史上下文条数
+              <input id="llmMaxContextItems" type="number" min="10" max="500" step="10" />
+            </label>
+            <label>
+              最大输出 tokens
+              <input id="llmMaxTokens" type="number" min="100" max="8000" step="100" />
+            </label>
+            <label>
+              API 超时秒数
+              <input id="llmTimeoutSeconds" type="number" min="30" max="180" step="10" />
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="saveLlmBtn">保存大模型配置</button>
+        <button id="testLlmBtn" class="secondary">测试问答</button>
+        <button id="resetLlmBtn" class="secondary">清空大模型配置</button>
+      </div>
+      <p class="hint">OpenAI、千问、阿里云百炼、硅基流动、DeepSeek 使用 OpenAI-compatible Chat Completions；Claude 使用 Anthropic Messages。钉钉机器人提问时会检索历史数据后调用模型，调用失败时自动使用本地规则回答。</p>
+    </section>
+
+    <section class="panel module-section" data-module="candidates">
       <div class="tabs">
         <button class="tab active" data-tab="recommendations">推荐候选人</button>
         <button class="tab" data-tab="candidates">候选人历史</button>
-        <button class="tab" data-tab="jobs">岗位要求库</button>
         <button class="tab" data-tab="reports">推荐报告</button>
       </div>
 
@@ -407,34 +430,38 @@
       <div id="reportsTab" class="tab-panel">
         <div id="reportList" class="reports"></div>
       </div>
+    </section>
 
-      <div id="jobsTab" class="tab-panel">
-        <div class="job-editor">
-          <div class="form-grid job-form-grid">
-            <label>
-              岗位名称
-              <input id="jobRoleInput" type="text" placeholder="例如：Java开发工程师" />
-            </label>
-            <label>
-              来源
-              <input id="jobSourceInput" type="text" placeholder="手动录入 / BOSS直聘" />
-            </label>
-            <label>
-              账号
-              <input id="jobAccountInput" type="text" placeholder="默认使用系统账号信息" />
-            </label>
-          </div>
-          <label class="textarea-field">
-            岗位要求
-            <textarea id="jobRequirementInput" rows="7" placeholder="粘贴或录入老职位/新职位的完整岗位要求，保存后会自动匹配历史候选人"></textarea>
-          </label>
-          <div class="actions">
-            <button id="saveJobRequirementBtn">保存岗位要求</button>
-            <button id="matchJobsBtn" class="secondary">重新匹配所有候选人</button>
-          </div>
-        </div>
-        <div id="jobRequirementList" class="reports"></div>
+    <section class="panel module-section" data-module="jobs">
+      <div class="panel-title">
+        <h2>岗位要求库</h2>
+        <span>保存 JD 后用于候选人匹配</span>
       </div>
+      <div class="job-editor">
+        <div class="form-grid job-form-grid">
+          <label>
+            岗位名称
+            <input id="jobRoleInput" type="text" placeholder="例如：Java开发工程师" />
+          </label>
+          <label>
+            来源
+            <input id="jobSourceInput" type="text" placeholder="手动录入 / BOSS直聘" />
+          </label>
+          <label>
+            账号
+            <input id="jobAccountInput" type="text" placeholder="默认使用系统账号信息" />
+          </label>
+        </div>
+        <label class="textarea-field">
+          岗位要求
+          <textarea id="jobRequirementInput" rows="7" placeholder="粘贴或录入老职位/新职位的完整岗位要求，保存后会自动匹配历史候选人"></textarea>
+        </label>
+        <div class="actions">
+          <button id="saveJobRequirementBtn">保存岗位要求</button>
+          <button id="matchJobsBtn" class="secondary">重新匹配所有候选人</button>
+        </div>
+      </div>
+      <div id="jobRequirementList" class="reports"></div>
     </section>
   </main>
 

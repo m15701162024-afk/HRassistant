@@ -667,7 +667,7 @@ async function matchAllJobRequirements() {
 async function previewSummary() {
   await saveSettings(false);
   const result = await api(`/api/summary${buildSummaryQuery()}`);
-  openDialog('昨日招聘数据汇总预览', result.markdown || '');
+  openDialog('招聘数据汇总预览', result.markdown || '');
 }
 
 function openDialog(title, content) {
@@ -702,6 +702,7 @@ function showError(err) {
 function bindEvents() {
   $('refreshBtn').addEventListener('click', () => refreshAll().catch(showError));
   $('saveSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
+  $('saveAccountSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
   $('saveLlmBtn').addEventListener('click', () => saveLlmConfig().catch(showError));
   $('testLlmBtn').addEventListener('click', () => testLlm().catch(showError));
   $('resetLlmBtn').addEventListener('click', () => resetLlmConfig().catch(showError));
