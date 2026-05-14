@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 TEMPLATE_DIR = ROOT / "templates"
 EXPORT_DIR = ROOT / "exports"
+EXPORT_MANIFEST = EXPORT_DIR / "manifest.json"
 RECOMMENDATION_TEMPLATE = TEMPLATE_DIR / "定时推送候选人推荐表模板.xlsx"
 DB_PATH = Path(os.environ.get("RECRUITMENT_DB", ROOT / "recruitment_history.db"))
 HOST = os.environ.get("RECRUITMENT_HOST", "0.0.0.0")
@@ -44,6 +45,7 @@ DEFAULT_PUBLIC_BASE_URL = os.environ.get(
     "RECRUITMENT_PUBLIC_BASE_URL",
     "https://unconfuted-superbusily-ryan.ngrok-free.dev",
 ).rstrip("/")
+EXPORT_FILENAME_PATTERN = re.compile(r"^候选人推荐表_\d{8}_\d{6}\.xlsx$")
 
 DEFAULT_BEHAVIOR_POLICY: dict[str, Any] = {
     "behaviorPolicyEnabled": True,
@@ -1759,7 +1761,57 @@ def attachment_resume_label(row: dict[str, Any]) -> str:
     return "有附件简历" if has_attachment_resume(row) else "无附件简历"
 
 
-def create_recommendation_excel(scope: str = "configured", start: str | None = None, end: str | None = None) -> tuple[Path, dict[str, Any]]:
+def load_export_manifest() -> dict[str, Any]:
+    if not EXPORT_MANIFEST.exists():
+        return {}
+    try:
+        payload = json.loads(EXPORT_MANIFEST.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_export_manifest(manifest: dict[str, Any]) -> None:
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    entries = list(manifest.items())[-500:]
+    EXPORT_MANIFEST.write_text(json.dumps(dict(entries), ensure_ascii=False, indent=2), "utf-8")
+
+
+def register_export(
+    path: Path,
+    scope: str,
+    dataset: dict[str, Any],
+    start: str | None = None,
+    end: str | None = None,
+) -> None:
+    manifest = load_export_manifest()
+    manifest[path.name] = {
+        "filename": path.name,
+        "scope": scope,
+        "start": start or dataset["start"].isoformat(timespec="seconds"),
+        "end": end or dataset["end"].isoformat(timespec="seconds"),
+        "label": dataset["label"],
+        "createdAt": datetime.now().isoformat(timespec="seconds"),
+        "candidateCount": len(dataset.get("candidates") or []),
+        "resumeCount": len(dataset.get("resumeCandidates") or []),
+        "recommendedCount": len(dataset.get("recommendedCandidates") or []),
+    }
+    save_export_manifest(manifest)
+
+
+def sanitize_export_filename(filename: str) -> str:
+    name = Path(filename).name
+    if not EXPORT_FILENAME_PATTERN.match(name):
+        raise ValueError("非法导出文件名")
+    return name
+
+
+def create_recommendation_excel(
+    scope: str = "configured",
+    start: str | None = None,
+    end: str | None = None,
+    output_filename: str | None = None,
+) -> tuple[Path, dict[str, Any]]:
     try:
         from openpyxl import load_workbook, Workbook
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -1769,7 +1821,8 @@ def create_recommendation_excel(scope: str = "configured", start: str | None = N
     dataset = get_range_dataset(scope, start, end)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = EXPORT_DIR / f"候选人推荐表_{timestamp}.xlsx"
+    filename = sanitize_export_filename(output_filename) if output_filename else f"候选人推荐表_{timestamp}.xlsx"
+    output_path = EXPORT_DIR / filename
 
     if RECOMMENDATION_TEMPLATE.exists():
         workbook = load_workbook(RECOMMENDATION_TEMPLATE)
@@ -1852,6 +1905,7 @@ def create_recommendation_excel(scope: str = "configured", start: str | None = N
     summary_sheet.auto_filter.ref = f"A1:D{max(1, summary_sheet.max_row)}"
 
     workbook.save(output_path)
+    register_export(output_path, scope, dataset, start, end)
     return output_path, dataset
 
 
@@ -1913,6 +1967,27 @@ def answer_question_rules(question: str) -> str:
     return f"### 招聘助手答复\n\n查询范围：{scope_label}\n\n" + "\n".join(lines) + requirement_text
 
 
+def recover_missing_export(filename: str) -> Path | None:
+    try:
+        safe_name = sanitize_export_filename(filename)
+    except ValueError:
+        return None
+    manifest = load_export_manifest()
+    meta = manifest.get(safe_name) if isinstance(manifest.get(safe_name), dict) else {}
+    scope = str(meta.get("scope") or "configured")
+    start = str(meta.get("start") or "").strip() or None
+    end = str(meta.get("end") or "").strip() or None
+    try:
+        path, dataset = create_recommendation_excel(scope, start, end, output_filename=safe_name)
+    except Exception as exc:
+        print(f"[exports] recover failed: {safe_name}: {exc}")
+        return None
+    if path.exists() and path.is_file():
+        print(f"[exports] recovered missing Excel: {safe_name} scope={scope} label={dataset['label']}")
+        return path
+    return None
+
+
 class Handler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
         parsed = urllib.parse.urlparse(path)
@@ -1924,8 +1999,11 @@ class Handler(SimpleHTTPRequestHandler):
         filename = Path(urllib.parse.unquote(path_value.split("/exports/", 1)[1])).name
         path = EXPORT_DIR / filename
         if not path.exists() or not path.is_file():
-            json_response(self, {"success": False, "message": "文件不存在"}, 404)
-            return True
+            recovered = recover_missing_export(filename)
+            if not recovered:
+                json_response(self, {"success": False, "message": "文件不存在且无法自动恢复"}, 404)
+                return True
+            path = recovered
         binary_response(
             self,
             path.read_bytes(),
