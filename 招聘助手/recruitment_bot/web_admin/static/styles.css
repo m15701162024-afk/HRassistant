@@ -396,6 +396,7 @@ pre {
 }
 
 .hint { color: var(--muted); font-size: 12px; margin-top: 10px; }
+.provider-hint a { color: #0f766e; font-weight: 650; }
 
 .tabs {
   display: flex;

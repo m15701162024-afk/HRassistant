@@ -20,37 +20,49 @@ const state = {
 const API_BASE_STORAGE_KEY = 'recruitmentAdminApiBase';
 const DEFAULT_PUBLIC_BASE_URL = 'https://unconfuted-superbusily-ryan.ngrok-free.dev';
 const LLM_PROVIDER_DEFAULTS = {
+  siliconflow: {
+    apiBase: 'https://api.siliconflow.cn/v1',
+    model: 'deepseek-ai/DeepSeek-V3.2',
+    keyUrl: 'https://cloud.siliconflow.cn/me/account/ak',
+    description: '使用硅基流动 OpenAI-compatible Chat Completions，适合无 OpenAI 额度时调用。',
+  },
   'openai-codex': {
     apiBase: 'https://api.openai.com/v1',
     model: 'gpt-5.2-codex',
+    keyUrl: 'https://platform.openai.com/api-keys',
+    description: '使用 OpenAI Responses API，需要 OpenAI Platform API Key。',
   },
   openai: {
     apiBase: '',
     model: '',
+    keyUrl: 'https://platform.openai.com/api-keys',
+    description: '使用 OpenAI-compatible Chat Completions。',
   },
   claude: {
     apiBase: 'https://api.anthropic.com/v1',
     model: '',
+    keyUrl: 'https://console.anthropic.com/settings/keys',
+    description: '使用 Anthropic Messages API。',
   },
   qwen: {
     apiBase: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     model: '',
+    description: '使用通义千问 OpenAI-compatible Chat Completions。',
   },
   aliyun: {
     apiBase: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     model: '',
-  },
-  siliconflow: {
-    apiBase: 'https://api.siliconflow.cn/v1',
-    model: '',
+    description: '使用阿里云百炼 OpenAI-compatible Chat Completions。',
   },
   deepseek: {
     apiBase: 'https://api.deepseek.com/v1',
     model: '',
+    description: '使用 DeepSeek OpenAI-compatible Chat Completions。',
   },
   custom: {
     apiBase: '',
     model: '',
+    description: '使用自定义 OpenAI-compatible Chat Completions。',
   },
 };
 
@@ -197,6 +209,7 @@ async function loadSettings() {
   $('llmMaxContextItems').value = settings.llmMaxContextItems ?? 80;
   $('llmMaxTokens').value = settings.llmMaxTokens ?? 1000;
   if ($('llmTimeoutSeconds')) $('llmTimeoutSeconds').value = settings.llmTimeoutSeconds ?? 90;
+  renderLlmProviderHint();
   $('llmStatus').textContent = settings.llmEnabled
     ? `已启用 ${settings.llmModel || '模型'}`
     : '未启用';
@@ -275,6 +288,18 @@ function applyLlmProviderPreset(force = false) {
   if (force || !$('llmModel').value.trim()) {
     $('llmModel').value = preset.model;
   }
+  renderLlmProviderHint();
+}
+
+function renderLlmProviderHint() {
+  const hint = $('llmProviderHint');
+  if (!hint) return;
+  const provider = $('llmProvider').value || 'siliconflow';
+  const preset = LLM_PROVIDER_DEFAULTS[provider] || LLM_PROVIDER_DEFAULTS.custom;
+  const keyLink = preset.keyUrl
+    ? ` API Key：<a href="${escapeHtml(preset.keyUrl)}" target="_blank" rel="noreferrer">打开平台密钥页面</a>`
+    : '';
+  hint.innerHTML = `${escapeHtml(preset.description || '')}${keyLink}`;
 }
 
 async function resetLlmConfig() {

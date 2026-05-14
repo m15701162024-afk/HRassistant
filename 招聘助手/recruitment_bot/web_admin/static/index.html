@@ -316,12 +316,12 @@
             <label>
               模型平台
               <select id="llmProvider">
+                <option value="siliconflow">硅基流动</option>
                 <option value="openai-codex">Codex GPT-5.2</option>
                 <option value="openai">OpenAI</option>
                 <option value="claude">Claude</option>
                 <option value="qwen">通义千问</option>
                 <option value="aliyun">阿里云百炼</option>
-                <option value="siliconflow">硅基流动</option>
                 <option value="deepseek">DeepSeek</option>
                 <option value="custom">自定义 OpenAI-compatible</option>
               </select>
@@ -335,6 +335,7 @@
               <input id="llmApiKey" type="password" placeholder="请输入 API Key" />
             </label>
           </div>
+          <p id="llmProviderHint" class="hint provider-hint"></p>
         </div>
         <div class="config-group">
           <h3>模型参数</h3>
@@ -367,7 +368,7 @@
         <button id="testLlmBtn" class="secondary">测试问答</button>
         <button id="resetLlmBtn" class="secondary">清空大模型配置</button>
       </div>
-      <p class="hint">Codex GPT-5.2 使用 OpenAI Responses API；OpenAI、千问、阿里云百炼、硅基流动、DeepSeek 使用 OpenAI-compatible Chat Completions；Claude 使用 Anthropic Messages。钉钉机器人提问时会检索历史数据后调用模型，调用失败时自动使用本地规则回答。</p>
+      <p class="hint">硅基流动使用 OpenAI-compatible Chat Completions，默认 API Base URL 为 <code>https://api.siliconflow.cn/v1</code>。钉钉机器人提问时会检索历史数据后调用模型，调用失败时自动使用本地规则回答。</p>
     </section>
 
     <section class="panel module-section" data-module="qa">

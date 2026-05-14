@@ -82,14 +82,14 @@ DEFAULT_BEHAVIOR_POLICY: dict[str, Any] = {
 
 DEFAULT_LLM_CONFIG: dict[str, Any] = {
     "llmEnabled": False,
-    "llmProvider": "openai-codex",
-    "llmProtocol": "openai-responses",
-    "llmApiBase": "https://api.openai.com/v1",
-    "llmModel": "gpt-5.2-codex",
+    "llmProvider": "siliconflow",
+    "llmProtocol": "openai-chat",
+    "llmApiBase": "https://api.siliconflow.cn/v1",
+    "llmModel": "deepseek-ai/DeepSeek-V3.2",
     "llmTemperature": 0.2,
-    "llmMaxContextItems": 30,
-    "llmMaxTokens": 600,
-    "llmTimeoutSeconds": 90,
+    "llmMaxContextItems": 12,
+    "llmMaxTokens": 400,
+    "llmTimeoutSeconds": 60,
 }
 
 LLM_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
@@ -98,18 +98,21 @@ LLM_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "protocol": "openai-responses",
         "apiBase": "https://api.openai.com/v1",
         "model": "gpt-5.2-codex",
+        "keyUrl": "https://platform.openai.com/api-keys",
     },
     "openai": {
         "label": "OpenAI",
         "protocol": "openai-chat",
         "apiBase": "",
         "model": "",
+        "keyUrl": "https://platform.openai.com/api-keys",
     },
     "claude": {
         "label": "Claude",
         "protocol": "anthropic-messages",
         "apiBase": "https://api.anthropic.com/v1",
         "model": "",
+        "keyUrl": "https://console.anthropic.com/settings/keys",
     },
     "qwen": {
         "label": "通义千问",
@@ -127,7 +130,8 @@ LLM_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "label": "硅基流动",
         "protocol": "openai-chat",
         "apiBase": "https://api.siliconflow.cn/v1",
-        "model": "",
+        "model": "deepseek-ai/DeepSeek-V3.2",
+        "keyUrl": "https://cloud.siliconflow.cn/me/account/ak",
     },
     "deepseek": {
         "label": "DeepSeek",
@@ -1100,7 +1104,7 @@ def build_llm_history_context(question: str, max_items: int = 80, account: str |
     for idx, item in enumerate(job_requirements[:80], 1):
         requirement = str(item.get("requirement") or "").replace("\n", " ")
         parts.append(f"{idx}. 岗位:{item.get('role','')}｜来源:{item.get('source','')}｜账号:{item.get('account_name','')}｜要求:{requirement[:360]}")
-    return "\n".join(parts)[:max(7000, safe_items * 260)]
+    return "\n".join(parts)[:max(3500, safe_items * 240)]
 
 
 def build_llm_system_prompt() -> str:
@@ -1275,9 +1279,11 @@ def call_llm_chat(question: str, context: str) -> str:
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1200]
         if exc.code == 401:
+            provider_label = LLM_PROVIDER_PRESETS.get(str(config.get("llmProvider")), {}).get("label") or str(config.get("llmProvider") or "当前平台")
+            key_url = LLM_PROVIDER_PRESETS.get(str(config.get("llmProvider")), {}).get("keyUrl") or "对应平台控制台"
             raise RuntimeError(
                 "大模型 API 返回 401 Unauthorized。当前保存的 API Key 无效或不属于所选平台；"
-                "Codex GPT-5.2 需要填写 OpenAI Platform 的 API Key，不能使用硅基流动/DeepSeek 等第三方 Key。"
+                f"当前选择的是 {provider_label}，请在 {key_url} 获取并填写该平台 API Key。"
                 f" 服务返回：{detail}"
             )
         if exc.code == 403:
