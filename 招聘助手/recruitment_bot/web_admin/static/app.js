@@ -200,7 +200,7 @@ async function loadSettings() {
   $('scheduledPushEnd').value = settings.scheduledPushEnd || '';
   $('publicBaseUrl').value = isPlaceholderUrl(settings.publicBaseUrl) ? '' : (settings.publicBaseUrl || '');
   $('llmEnabled').value = settings.llmEnabled ? 'true' : 'false';
-  $('llmProvider').value = settings.llmProvider || 'openai';
+  $('llmProvider').value = settings.llmProvider || 'siliconflow';
   $('llmApiBase').value = settings.llmApiBase || '';
   $('llmApiKey').value = '';
   $('llmApiKey').placeholder = settings.llmApiKeyConfigured ? '已配置，留空则保留原 Key' : '请输入 API Key';
@@ -210,8 +210,9 @@ async function loadSettings() {
   $('llmMaxTokens').value = settings.llmMaxTokens ?? 1000;
   if ($('llmTimeoutSeconds')) $('llmTimeoutSeconds').value = settings.llmTimeoutSeconds ?? 90;
   renderLlmProviderHint();
+  const providerName = $('llmProvider').selectedOptions?.[0]?.textContent || settings.llmProvider || '硅基流动';
   $('llmStatus').textContent = settings.llmEnabled
-    ? `已启用 ${settings.llmModel || '模型'}`
+    ? `已启用 ${providerName}｜${settings.llmModel || '模型'}`
     : '未启用';
   $('llmStatus').className = settings.llmEnabled ? 'badge ok' : 'badge';
   $('toggleScheduleBtn').textContent = settings.scheduledPushEnabled ? '关闭定时推送' : '开启定时推送';
@@ -261,7 +262,7 @@ function setAccountScope(account, reload = true) {
 async function saveLlmConfig(showToast = true) {
   const payload = {
     llmEnabled: $('llmEnabled').value === 'true',
-    llmProvider: $('llmProvider').value || 'openai',
+    llmProvider: $('llmProvider').value || 'siliconflow',
     llmApiBase: $('llmApiBase').value.trim(),
     llmModel: $('llmModel').value.trim(),
     llmTemperature: Number($('llmTemperature').value || 0.2),
@@ -280,8 +281,8 @@ async function saveLlmConfig(showToast = true) {
 }
 
 function applyLlmProviderPreset(force = false) {
-  const provider = $('llmProvider').value || 'openai';
-  const preset = LLM_PROVIDER_DEFAULTS[provider] || LLM_PROVIDER_DEFAULTS.openai;
+  const provider = $('llmProvider').value || 'siliconflow';
+  const preset = LLM_PROVIDER_DEFAULTS[provider] || LLM_PROVIDER_DEFAULTS.siliconflow;
   if (force || !$('llmApiBase').value.trim()) {
     $('llmApiBase').value = preset.apiBase;
   }
@@ -318,8 +319,17 @@ async function testLlm() {
     method: 'POST',
     body: JSON.stringify({ question: '请分析当前招聘历史数据，并给出一句话优化建议', sender: 'LLM 配置测试', forceLlm: true }),
   });
-  $('answerBox').textContent = `${result.answer}\n\n[Agent 模式] ${result.agent?.mode || 'unknown'}${result.agent?.model ? `｜${result.agent.model}` : ''}`;
+  $('answerBox').textContent = `${result.answer}\n\n${formatAgentMode(result.agent)}`;
   await loadConversations();
+}
+
+function formatAgentMode(agent = {}) {
+  const parts = [
+    agent.mode || 'unknown',
+    agent.providerLabel || agent.provider || '',
+    agent.model || '',
+  ].filter(Boolean);
+  return `[Agent 模式] ${parts.join('｜')}`;
 }
 
 async function loadBehaviorPolicy() {
@@ -663,7 +673,7 @@ async function ask(replyToDingTalk = false) {
     method: 'POST',
     body: JSON.stringify({ question, replyToDingTalk, account: state.filters.account }),
   });
-  $('answerBox').textContent = result.answer;
+  $('answerBox').textContent = `${result.answer}\n\n${formatAgentMode(result.agent)}`;
   await loadConversations();
   if (replyToDingTalk) toast('答案已推送钉钉');
 }

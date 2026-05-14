@@ -1320,16 +1320,30 @@ def should_use_fast_rules(question: str) -> bool:
 def answer_question_with_agent(question: str, account: str | None = None, force_llm: bool = False) -> tuple[str, dict[str, Any]]:
     fallback = answer_question_rules(question, account)
     config = get_llm_config(mask_key=False)
+    provider = str(config.get("llmProvider") or DEFAULT_LLM_CONFIG["llmProvider"])
+    provider_label = LLM_PROVIDER_PRESETS.get(provider, {}).get("label") or provider
     if not config.get("llmEnabled"):
-        return fallback, {"mode": "rules", "llmEnabled": False}
+        return fallback, {"mode": "rules", "llmEnabled": False, "provider": provider, "providerLabel": provider_label}
     try:
         context = build_llm_history_context(question, int(config.get("llmMaxContextItems") or 80), account)
         answer = call_llm_chat(question, context)
-        return answer, {"mode": "llm", "model": config.get("llmModel"), "contextLength": len(context)}
+        return answer, {
+            "mode": "llm",
+            "provider": provider,
+            "providerLabel": provider_label,
+            "model": config.get("llmModel"),
+            "contextLength": len(context),
+        }
     except Exception as exc:
         return (
             f"{fallback}\n\n---\n\n> 大模型回答暂不可用，已使用本地历史规则回答。原因：{exc}",
-            {"mode": "rules-fallback", "error": str(exc), "model": config.get("llmModel")},
+            {
+                "mode": "rules-fallback",
+                "error": str(exc),
+                "provider": provider,
+                "providerLabel": provider_label,
+                "model": config.get("llmModel"),
+            },
         )
 
 
@@ -1385,7 +1399,7 @@ def get_llm_config(mask_key: bool = False) -> dict[str, Any]:
 
 def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
     current = get_llm_config(mask_key=False)
-    provider = str(payload.get("llmProvider") or current["llmProvider"] or "openai")
+    provider = str(payload.get("llmProvider") or current["llmProvider"] or DEFAULT_LLM_CONFIG["llmProvider"])
     preset = LLM_PROVIDER_PRESETS.get(provider, LLM_PROVIDER_PRESETS["custom"])
     api_base = str(payload.get("llmApiBase") or preset.get("apiBase") or "").rstrip("/")
     model = str(payload.get("llmModel") or preset.get("model") or "")
@@ -1848,7 +1862,14 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
         raw=message.get("raw", {}),
     )
 
-    push_result = {"success": True, "skipped": True, "message": "使用钉钉回调直接回复"}
+    session_webhook = str(message.get("sessionWebhook") or "").strip()
+    if session_webhook and answer:
+        try:
+            push_result = send_dingtalk_markdown_to_webhook(session_webhook, "招聘助手问答", answer)
+        except Exception as exc:
+            push_result = {"success": False, "message": f"钉钉 sessionWebhook 回复失败：{exc}"}
+    else:
+        push_result = {"success": True, "skipped": True, "message": "使用钉钉回调直接回复"}
 
     return {
         "success": True,
