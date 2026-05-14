@@ -1274,6 +1274,12 @@ def call_llm_chat(question: str, context: str) -> str:
         return call_llm_chat_completions(question, context, config)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        if exc.code == 401:
+            raise RuntimeError(
+                "大模型 API 返回 401 Unauthorized。当前保存的 API Key 无效或不属于所选平台；"
+                "Codex GPT-5.2 需要填写 OpenAI Platform 的 API Key，不能使用硅基流动/DeepSeek 等第三方 Key。"
+                f" 服务返回：{detail}"
+            )
         if exc.code == 403:
             raise RuntimeError(
                 "大模型 API 返回 403 Forbidden。请检查 API Key 是否有效、账户额度/模型权限是否开通、Base URL 是否正确。"
@@ -1308,8 +1314,6 @@ def should_use_fast_rules(question: str) -> bool:
 def answer_question_with_agent(question: str, account: str | None = None, force_llm: bool = False) -> tuple[str, dict[str, Any]]:
     fallback = answer_question_rules(question, account)
     config = get_llm_config(mask_key=False)
-    if should_use_fast_rules(question) and not force_llm:
-        return fallback, {"mode": "rules-fast", "llmSkipped": True}
     if not config.get("llmEnabled"):
         return fallback, {"mode": "rules", "llmEnabled": False}
     try:
