@@ -393,6 +393,20 @@ def normalize_role(role: str) -> str:
     return "".join(str(role or "").lower().split())
 
 
+def normalize_account_name(account_name: Any) -> str:
+    return re.sub(r"\s+", "", str(account_name or "").strip().lower())
+
+
+def account_label(account_name: Any) -> str:
+    return str(account_name or "").strip() or "未识别"
+
+
+def scoped_role_key(role: str, account_name: Any = "") -> str:
+    role_key = normalize_role(role)
+    account_key = normalize_account_name(account_name)
+    return f"{account_key}::{role_key}" if account_key else role_key
+
+
 def is_valid_job_requirement_text(requirement: str) -> bool:
     text = re.sub(r"\s+", " ", str(requirement or "")).strip()
     if len(text) < 20:
@@ -413,11 +427,12 @@ def is_valid_job_requirement_text(requirement: str) -> bool:
 def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     role = str(payload.get("role") or "").strip()
     requirement = str(payload.get("requirement") or payload.get("jobRequirement") or "").strip()
+    account_name = str(payload.get("accountName") or payload.get("account_name") or "").strip()
     if not role:
         return {"success": False, "message": "岗位名称不能为空"}
     if not is_valid_job_requirement_text(requirement):
         return {"success": False, "message": "岗位要求内容不符合工作内容/工作要求格式，未保存"}
-    normalized = normalize_role(role)
+    normalized = scoped_role_key(role, account_name)
     item_id = hashlib.sha1(normalized.encode()).hexdigest()
     now = now_iso()
     with connect() as conn:
@@ -436,7 +451,7 @@ def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
                 role,
                 normalized,
                 payload.get("source", ""),
-                payload.get("accountName", ""),
+                account_name,
                 requirement[:12000],
                 payload.get("sourceUrl", ""),
                 json.dumps(payload, ensure_ascii=False),
@@ -444,15 +459,34 @@ def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
                 now,
             ),
         )
-    matched = match_candidates_with_job_requirements()
+    matched = match_candidates_with_job_requirements(role, account_name)
     return {"success": True, "id": item_id, "matchedCandidates": matched["updated"]}
 
 
-def get_job_requirement(role: str) -> dict[str, Any] | None:
+def get_job_requirement(role: str, account_name: str = "") -> dict[str, Any] | None:
     normalized = normalize_role(role)
     if not normalized:
         return None
+    scoped_normalized = scoped_role_key(role, account_name)
     with connect() as conn:
+        if account_name:
+            row = conn.execute(
+                "SELECT * FROM job_requirements WHERE normalized_role = ?",
+                (scoped_normalized,),
+            ).fetchone()
+            if row:
+                return dict(row)
+            loose_account = conn.execute(
+                """
+                SELECT * FROM job_requirements
+                WHERE COALESCE(NULLIF(account_name, ''), '未识别') = ?
+                  AND (normalized_role LIKE ? OR ? LIKE '%' || normalized_role || '%' OR normalized_role LIKE ?)
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (account_label(account_name), f"%{normalized}%", normalized, f"%::{normalized}"),
+            ).fetchone()
+            if loose_account:
+                return dict(loose_account)
         row = conn.execute(
             "SELECT * FROM job_requirements WHERE normalized_role = ?",
             (normalized,),
@@ -466,14 +500,8 @@ def get_job_requirement(role: str) -> dict[str, Any] | None:
         return dict(loose) if loose else None
 
 
-def list_job_requirements(limit: int = 200) -> list[dict[str, Any]]:
-    with connect() as conn:
-        return [
-            dict(row) for row in conn.execute(
-                "SELECT * FROM job_requirements ORDER BY updated_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        ]
+def list_job_requirements(limit: int = 200, filters: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    return list_rows("job_requirements", limit, filters=filters)
 
 
 def extract_requirement_keywords_backend(text: str) -> list[str]:
@@ -558,17 +586,26 @@ def match_candidate_with_requirement(candidate: dict[str, Any], job: dict[str, A
     }
 
 
-def match_candidates_with_job_requirements(role: str = "") -> dict[str, Any]:
+def match_candidates_with_job_requirements(role: str = "", account: str = "") -> dict[str, Any]:
     updated = 0
     skipped = 0
     with connect() as conn:
-        candidates = conn.execute(
-            "SELECT * FROM candidates WHERE role = ? ORDER BY updated_at DESC" if role else "SELECT * FROM candidates ORDER BY updated_at DESC",
-            (role,) if role else (),
-        ).fetchall()
+        where: list[str] = []
+        params: list[Any] = []
+        if role:
+            where.append("role = ?")
+            params.append(role)
+        if account:
+            where.append("COALESCE(NULLIF(account_name, ''), '未识别') = ?")
+            params.append(account)
+        sql = "SELECT * FROM candidates"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY updated_at DESC"
+        candidates = conn.execute(sql, params).fetchall()
         for row in candidates:
             candidate = dict(row)
-            job = get_job_requirement(candidate.get("role", ""))
+            job = get_job_requirement(candidate.get("role", ""), candidate.get("account_name", ""))
             if not job:
                 skipped += 1
                 continue
@@ -636,11 +673,24 @@ def list_rows(
     allowed = {"candidates", "recommendations", "reports", "job_requirements"}
     if table not in allowed:
         raise ValueError("invalid table")
-    sql = f"SELECT * FROM {table}"
+    if table == "reports":
+        sql = """
+            SELECT
+                r.*,
+                COALESCE(NULLIF(c.source, ''), '未知来源') AS source,
+                COALESCE(NULLIF(c.account_name, ''), '未识别') AS account_name
+            FROM reports r
+            LEFT JOIN candidates c ON c.id = r.candidate_id
+        """
+        order_field = "r.created_at"
+    else:
+        sql = f"SELECT * FROM {table}"
+        order_field = "updated_at" if table == "job_requirements" else "created_at"
     params: list[Any] = []
     where: list[str] = []
     if date_field and date_value:
-        where.append(f"{date_field} LIKE ?")
+        qualified_date_field = f"r.{date_field}" if table == "reports" and "." not in date_field else date_field
+        where.append(f"{qualified_date_field} LIKE ?")
         params.append(f"{date_value}%")
     filters = filters or {}
     q = (filters.get("q") or "").strip()
@@ -650,31 +700,55 @@ def list_rows(
         searchable = {
             "candidates": ["name", "role", "education", "experience", "expected_salary", "recommendation", "raw_json"],
             "recommendations": ["name", "role", "recommendation", "next_step", "raw_json"],
-            "reports": ["name", "role", "report"],
+            "reports": ["r.name", "r.role", "r.report", "c.source", "c.account_name"],
             "job_requirements": ["role", "requirement", "source", "account_name"],
         }[table]
         where.append("(" + " OR ".join(f"{field} LIKE ?" for field in searchable) + ")")
         params.extend([f"%{q}%"] * len(searchable))
-    if source and table in {"candidates", "recommendations"}:
-        where.append("source LIKE ?")
+    if source:
+        if table == "reports":
+            where.append("COALESCE(NULLIF(c.source, ''), '未知来源') LIKE ?")
+        elif table in {"candidates", "recommendations", "job_requirements"}:
+            where.append("source LIKE ?")
         params.append(f"%{source}%")
-    if account and table in {"candidates", "recommendations"}:
-        where.append("account_name LIKE ?")
-        params.append(f"%{account}%")
+    if account:
+        if table == "reports":
+            where.append("COALESCE(NULLIF(c.account_name, ''), '未识别') = ?")
+        elif table in {"candidates", "recommendations", "job_requirements"}:
+            where.append("COALESCE(NULLIF(account_name, ''), '未识别') = ?")
+        params.append(account)
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY created_at DESC LIMIT ?"
+    sql += f" ORDER BY {order_field} DESC LIMIT ?"
     params.append(limit)
     with connect() as conn:
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
-def list_recommendation_details(limit: int = 1000, date_value: str | None = None) -> list[dict[str, Any]]:
+def list_recommendation_details(
+    limit: int = 1000,
+    date_value: str | None = None,
+    filters: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     where = []
     params: list[Any] = []
     if date_value:
         where.append("r.created_at LIKE ?")
         params.append(f"{date_value}%")
+    filters = filters or {}
+    q = str(filters.get("q") or "").strip()
+    source = str(filters.get("source") or "").strip()
+    account = str(filters.get("account") or "").strip()
+    if q:
+        fields = ["r.name", "r.role", "r.recommendation", "r.next_step", "r.raw_json", "c.education", "c.experience"]
+        where.append("(" + " OR ".join(f"{field} LIKE ?" for field in fields) + ")")
+        params.extend([f"%{q}%"] * len(fields))
+    if source:
+        where.append("COALESCE(NULLIF(c.source, ''), NULLIF(r.source, ''), '未知来源') LIKE ?")
+        params.append(f"%{source}%")
+    if account:
+        where.append("COALESCE(NULLIF(c.account_name, ''), NULLIF(r.account_name, ''), '未识别') = ?")
+        params.append(account)
     sql = """
         SELECT
             r.*,
@@ -802,18 +876,23 @@ def resume_request_satisfied(row: dict[str, Any]) -> bool:
     return bool(raw.get("resumeRequestExecuted") or status in {"已点击求简历", "已索要简历", "已发送求简历消息"})
 
 
-def get_range_dataset(scope: str = "configured", start: str | None = None, end: str | None = None) -> dict[str, Any]:
+def get_range_dataset(
+    scope: str = "configured",
+    start: str | None = None,
+    end: str | None = None,
+    account: str | None = None,
+) -> dict[str, Any]:
     settings = get_settings()
-    report_account = str(settings.get("accountName") or "").strip()
     start_dt, end_dt, label = resolve_push_range(scope, start, end, settings)
-    candidates_all = list_rows("candidates", limit=10000)
-    recommendations_all = list_recommendation_details(limit=10000)
+    filters = {"account": str(account or "").strip()} if str(account or "").strip() else {}
+    candidates_all = list_rows("candidates", limit=100000, filters=filters)
+    recommendations_all = list_recommendation_details(limit=100000, filters=filters)
     candidates = [
-        normalize_report_account(item, report_account) for item in candidates_all
+        item for item in candidates_all
         if in_time_range(item, start_dt, end_dt, "created_at", "updated_at")
     ]
     recommendations = [
-        normalize_report_account(item, report_account) for item in recommendations_all
+        item for item in recommendations_all
         if in_time_range(item, start_dt, end_dt, "created_at")
     ]
     resume_candidates = [item for item in candidates if has_resume_evidence(item)]
@@ -837,6 +916,7 @@ def get_range_dataset(scope: str = "configured", start: str | None = None, end: 
         "start": start_dt,
         "end": end_dt,
         "label": label,
+        "account": str(account or "").strip(),
         "candidates": candidates,
         "resumeCandidates": resume_candidates,
         "recommendations": recommendations,
@@ -844,47 +924,79 @@ def get_range_dataset(scope: str = "configured", start: str | None = None, end: 
     }
 
 
-def normalize_report_account(row: dict[str, Any], report_account: str = "") -> dict[str, Any]:
-    item = dict(row)
-    if report_account:
-        item["account_name"] = report_account
-    return item
+def get_accounts() -> list[dict[str, Any]]:
+    accounts: dict[str, int] = {}
+    with connect() as conn:
+        candidate_rows = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(account_name, ''), '未识别') AS name, COUNT(*) AS count
+            FROM candidates
+            GROUP BY COALESCE(NULLIF(account_name, ''), '未识别')
+            """
+        ).fetchall()
+        for row in candidate_rows:
+            accounts[str(row["name"])] = int(row["count"] or 0)
+        for table in ("recommendations", "job_requirements"):
+            rows = conn.execute(
+                f"""
+                SELECT COALESCE(NULLIF(account_name, ''), '未识别') AS name, COUNT(*) AS count
+                FROM {table}
+                GROUP BY COALESCE(NULLIF(account_name, ''), '未识别')
+                """
+            ).fetchall()
+            for row in rows:
+                name = str(row["name"])
+                accounts.setdefault(name, int(row["count"] or 0))
+    settings = get_settings()
+    for value in (
+        settings.get("accountName"),
+        (settings.get("detectedAccount") or {}).get("name") if isinstance(settings.get("detectedAccount"), dict) else "",
+    ):
+        name = str(value or "").strip()
+        if name:
+            accounts.setdefault(name, 0)
+    return [
+        {"name": name, "count": count}
+        for name, count in sorted(accounts.items(), key=lambda item: (-item[1], item[0]))
+    ]
 
 
-def get_stats() -> dict[str, Any]:
+def get_stats(filters: dict[str, str] | None = None) -> dict[str, Any]:
     today = date_str()
     yesterday = date_str(-1)
-    with connect() as conn:
-        total_candidates = conn.execute("SELECT COUNT(*) AS count FROM candidates").fetchone()["count"]
-        today_candidates = conn.execute(
-            "SELECT COUNT(*) AS count FROM candidates WHERE received_date = ?",
-            (today,),
-        ).fetchone()["count"]
-        yesterday_candidates = conn.execute(
-            "SELECT COUNT(*) AS count FROM candidates WHERE received_date = ?",
-            (yesterday,),
-        ).fetchone()["count"]
-        recommendation_count = conn.execute("SELECT COUNT(*) AS count FROM recommendations").fetchone()["count"]
-        report_count = conn.execute("SELECT COUNT(*) AS count FROM reports").fetchone()["count"]
-        avg_score = conn.execute("SELECT AVG(score) AS score FROM recommendations").fetchone()["score"] or 0
-        by_source = [
-            dict(row) for row in conn.execute(
-                "SELECT COALESCE(NULLIF(source, ''), '未知来源') AS name, COUNT(*) AS count "
-                "FROM candidates GROUP BY COALESCE(NULLIF(source, ''), '未知来源') ORDER BY count DESC"
-            ).fetchall()
-        ]
-        by_account = [
-            dict(row) for row in conn.execute(
-                "SELECT COALESCE(NULLIF(account_name, ''), '未识别') AS name, COUNT(*) AS count "
-                "FROM candidates GROUP BY COALESCE(NULLIF(account_name, ''), '未识别') ORDER BY count DESC"
-            ).fetchall()
-        ]
-        top_recommendations = [
-            dict(row) for row in conn.execute(
-                "SELECT name, role, score, recommendation, next_step, source, account_name, created_at "
-                "FROM recommendations ORDER BY score DESC, created_at DESC LIMIT 10"
-            ).fetchall()
-        ]
+    filters = filters or {}
+    candidates = list_rows("candidates", limit=100000, filters=filters)
+    recommendations = list_recommendation_details(limit=100000, filters=filters)
+    reports = list_rows("reports", limit=100000, filters=filters)
+
+    total_candidates = len(candidates)
+    today_candidates = sum(1 for item in candidates if str(item.get("received_date") or "") == today)
+    yesterday_candidates = sum(1 for item in candidates if str(item.get("received_date") or "") == yesterday)
+    recommendation_count = len(recommendations)
+    report_count = len(reports)
+    scores = [int(item.get("score") or 0) for item in recommendations if str(item.get("score") or "").strip()]
+    avg_score = (sum(scores) / len(scores)) if scores else 0
+
+    source_counts: dict[str, int] = {}
+    account_counts_map: dict[str, int] = {}
+    for item in candidates:
+        source = str(item.get("source") or "未知来源")
+        account = account_label(item.get("account_name"))
+        source_counts[source] = source_counts.get(source, 0) + 1
+        account_counts_map[account] = account_counts_map.get(account, 0) + 1
+    by_source = [
+        {"name": name, "count": count}
+        for name, count in sorted(source_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    by_account = [
+        {"name": name, "count": count}
+        for name, count in sorted(account_counts_map.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    top_recommendations = sorted(
+        recommendations,
+        key=lambda item: (int(item.get("score") or 0), str(item.get("created_at") or "")),
+        reverse=True,
+    )[:10]
     return {
         "totalCandidates": total_candidates,
         "todayCandidates": today_candidates,
@@ -945,15 +1057,17 @@ def list_agent_conversations(limit: int = 100) -> list[dict[str, Any]]:
         ]
 
 
-def build_llm_history_context(question: str, max_items: int = 80) -> str:
+def build_llm_history_context(question: str, max_items: int = 80, account: str | None = None) -> str:
     safe_items = max(10, min(int(max_items or 30), 80))
-    candidates = list_rows("candidates", limit=safe_items)
-    recommendations = list_rows("recommendations", limit=safe_items)
-    reports = list_rows("reports", limit=max(5, min(safe_items // 2, 20)))
-    job_requirements = list_job_requirements(limit=max(10, min(safe_items, 40)))
-    stats = get_stats()
+    filters = {"account": str(account or "").strip()} if str(account or "").strip() else {}
+    candidates = list_rows("candidates", limit=safe_items, filters=filters)
+    recommendations = list_recommendation_details(limit=safe_items, filters=filters)
+    reports = list_rows("reports", limit=max(5, min(safe_items // 2, 20)), filters=filters)
+    job_requirements = list_job_requirements(limit=max(10, min(safe_items, 40)), filters=filters)
+    stats = get_stats(filters)
     parts = [
         "【统计概览】",
+        f"账号范围：{account_label(account) if account else '全部账号'}",
         json.dumps(stats, ensure_ascii=False),
         "",
         "【候选人历史】",
@@ -1145,15 +1259,15 @@ def should_use_fast_rules(question: str) -> bool:
     )
 
 
-def answer_question_with_agent(question: str) -> tuple[str, dict[str, Any]]:
-    fallback = answer_question_rules(question)
+def answer_question_with_agent(question: str, account: str | None = None) -> tuple[str, dict[str, Any]]:
+    fallback = answer_question_rules(question, account)
     config = get_llm_config(mask_key=False)
     if should_use_fast_rules(question):
         return fallback, {"mode": "rules-fast", "llmSkipped": True}
     if not config.get("llmEnabled"):
         return fallback, {"mode": "rules", "llmEnabled": False}
     try:
-        context = build_llm_history_context(question, int(config.get("llmMaxContextItems") or 80))
+        context = build_llm_history_context(question, int(config.get("llmMaxContextItems") or 80), account)
         answer = call_llm_chat(question, context)
         return answer, {"mode": "llm", "model": config.get("llmModel"), "contextLength": len(context)}
     except Exception as exc:
@@ -1387,6 +1501,7 @@ def build_push_markdown(scope: str, dataset: dict[str, Any], excel_path: Path, b
         "custom",
         dataset["start"].isoformat(timespec="minutes"),
         dataset["end"].isoformat(timespec="minutes"),
+        dataset.get("account") or "",
     )
     excel_link = export_url(excel_path, base_url)
     file_line = (
@@ -1692,8 +1807,13 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_summary(scope: str = "yesterday", start: str | None = None, end: str | None = None) -> str:
-    dataset = get_range_dataset(scope, start, end)
+def build_summary(
+    scope: str = "yesterday",
+    start: str | None = None,
+    end: str | None = None,
+    account: str | None = None,
+) -> str:
+    dataset = get_range_dataset(scope, start, end, account)
     candidates = dataset["candidates"]
     recommendations = dataset["recommendations"]
     received_candidates = dataset["resumeCandidates"]
@@ -1808,6 +1928,7 @@ def register_export(
         "start": start or dataset["start"].isoformat(timespec="seconds"),
         "end": end or dataset["end"].isoformat(timespec="seconds"),
         "label": dataset["label"],
+        "account": dataset.get("account") or "",
         "createdAt": datetime.now().isoformat(timespec="seconds"),
         "candidateCount": len(dataset.get("candidates") or []),
         "resumeCount": len(dataset.get("resumeCandidates") or []),
@@ -1827,6 +1948,7 @@ def create_recommendation_excel(
     scope: str = "configured",
     start: str | None = None,
     end: str | None = None,
+    account: str | None = None,
     output_filename: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     try:
@@ -1835,7 +1957,7 @@ def create_recommendation_excel(
     except Exception as exc:
         raise RuntimeError(f"Excel 模块不可用，请安装 openpyxl：{exc}") from exc
 
-    dataset = get_range_dataset(scope, start, end)
+    dataset = get_range_dataset(scope, start, end, account)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = sanitize_export_filename(output_filename) if output_filename else f"候选人推荐表_{timestamp}.xlsx"
@@ -1926,7 +2048,7 @@ def create_recommendation_excel(
     return output_path, dataset
 
 
-def answer_question_rules(question: str) -> str:
+def answer_question_rules(question: str, account: str | None = None) -> str:
     question = question.strip()
     if not question:
         return "请提出一个和招聘历史数据有关的问题。"
@@ -1940,8 +2062,11 @@ def answer_question_rules(question: str) -> str:
     elif "昨天" in question or "昨日" in question:
         scope_date = yesterday
         scope_label = "昨日"
-    candidates = list_rows("candidates", limit=1000, date_field="received_date", date_value=scope_date)
-    recommendations = list_rows("recommendations", limit=1000, date_field="created_at", date_value=scope_date)
+    filters = {"account": str(account or "").strip()} if str(account or "").strip() else {}
+    candidates = list_rows("candidates", limit=1000, date_field="received_date", date_value=scope_date, filters=filters)
+    recommendations = list_recommendation_details(limit=1000, date_value=scope_date, filters=filters)
+    if account:
+        scope_label = f"{scope_label}｜账号：{account}"
     if any(word in question for word in ["汇总", "统计", "多少", "数量"]):
         sources: dict[str, int] = {}
         accounts: dict[str, int] = {}
@@ -1977,7 +2102,7 @@ def answer_question_rules(question: str) -> str:
         if not normalized or normalized in seen_roles:
             continue
         seen_roles.add(normalized)
-        requirement = get_job_requirement(role)
+        requirement = get_job_requirement(role, account or "")
         if requirement:
             role_requirements.append(f"- {role}：{str(requirement.get('requirement') or '')[:180]}")
     requirement_text = "\n\n岗位要求依据：\n" + "\n".join(role_requirements) if role_requirements else ""
@@ -1994,8 +2119,9 @@ def recover_missing_export(filename: str) -> Path | None:
     scope = str(meta.get("scope") or "configured")
     start = str(meta.get("start") or "").strip() or None
     end = str(meta.get("end") or "").strip() or None
+    account = str(meta.get("account") or "").strip() or None
     try:
-        path, dataset = create_recommendation_excel(scope, start, end, output_filename=safe_name)
+        path, dataset = create_recommendation_excel(scope, start, end, account, output_filename=safe_name)
     except Exception as exc:
         print(f"[exports] recover failed: {safe_name}: {exc}")
         return None
@@ -2053,7 +2179,13 @@ class Handler(SimpleHTTPRequestHandler):
                     "dingtalkTargetConfigured": bool(settings.get("dingtalkOpenConversationId") or settings.get("dingtalkChatId")),
                 })
             elif parsed.path == "/api/stats":
-                json_response(self, get_stats())
+                json_response(self, get_stats({
+                    "q": query.get("q", [""])[0],
+                    "source": query.get("source", [""])[0],
+                    "account": query.get("account", [""])[0],
+                }))
+            elif parsed.path == "/api/accounts":
+                json_response(self, {"items": get_accounts()})
             elif parsed.path == "/api/settings":
                 settings = get_settings()
                 if not usable_base_url(settings.get("publicBaseUrl")):
@@ -2080,7 +2212,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "account": query.get("account", [""])[0],
                 })})
             elif parsed.path == "/api/recommendations":
-                json_response(self, {"items": list_rows("recommendations", int(query.get("limit", ["200"])[0]), filters={
+                json_response(self, {"items": list_recommendation_details(int(query.get("limit", ["200"])[0]), filters={
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
@@ -2088,14 +2220,19 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/reports":
                 json_response(self, {"items": list_rows("reports", int(query.get("limit", ["100"])[0]), filters={
                     "q": query.get("q", [""])[0],
+                    "source": query.get("source", [""])[0],
+                    "account": query.get("account", [""])[0],
                 })})
             elif parsed.path == "/api/job-requirements":
                 role = query.get("role", [""])[0]
+                account = query.get("account", [""])[0]
                 if role:
-                    json_response(self, {"item": get_job_requirement(role)})
+                    json_response(self, {"item": get_job_requirement(role, account)})
                 else:
                     json_response(self, {"items": list_rows("job_requirements", int(query.get("limit", ["200"])[0]), filters={
                         "q": query.get("q", [""])[0],
+                        "source": query.get("source", [""])[0],
+                        "account": account,
                     })})
             elif parsed.path == "/api/agent/conversations":
                 json_response(self, {"items": list_agent_conversations(int(query.get("limit", ["100"])[0]))})
@@ -2105,6 +2242,7 @@ class Handler(SimpleHTTPRequestHandler):
                     scope,
                     query.get("start", [""])[0] or None,
                     query.get("end", [""])[0] or None,
+                    query.get("account", [""])[0] or None,
                 )})
             elif parsed.path == "/api/summary/excel":
                 scope = query.get("scope", ["configured"])[0]
@@ -2112,6 +2250,7 @@ class Handler(SimpleHTTPRequestHandler):
                     scope,
                     query.get("start", [""])[0] or None,
                     query.get("end", [""])[0] or None,
+                    query.get("account", [""])[0] or None,
                 )
                 binary_response(
                     self,
@@ -2141,7 +2280,7 @@ class Handler(SimpleHTTPRequestHandler):
                     ("created_at", "创建时间"),
                 ]), content_type="text/csv; charset=utf-8", filename="candidates.csv")
             elif parsed.path == "/api/export/recommendations.csv":
-                rows = list_rows("recommendations", 10000, filters={
+                rows = list_recommendation_details(10000, filters={
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
@@ -2180,9 +2319,15 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/job-requirements":
                 json_response(self, upsert_job_requirement(payload))
             elif parsed.path == "/api/job-requirements/match-candidates":
-                json_response(self, match_candidates_with_job_requirements(str(payload.get("role", ""))))
+                json_response(self, match_candidates_with_job_requirements(
+                    str(payload.get("role", "")),
+                    str(payload.get("account", "")),
+                ))
             elif parsed.path == "/api/agent/ask":
-                answer, agent_meta = answer_question_with_agent(str(payload.get("question", "")))
+                answer, agent_meta = answer_question_with_agent(
+                    str(payload.get("question", "")),
+                    str(payload.get("account", "") or "").strip() or None,
+                )
                 save_agent_conversation(
                     question=str(payload.get("question", "")),
                     answer=answer,
@@ -2210,6 +2355,7 @@ class Handler(SimpleHTTPRequestHandler):
                     scope,
                     query.get("start", [""])[0] or None,
                     query.get("end", [""])[0] or None,
+                    query.get("account", [""])[0] or None,
                 )
                 markdown = build_push_markdown(scope, dataset, output_path, base_url)
                 result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)

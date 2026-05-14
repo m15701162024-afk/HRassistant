@@ -8,8 +8,6 @@
  * 4. 管理通知
  */
 
-const DEFAULT_ACCOUNT_NAME = '马女士';
-
 const DEFAULT_SETTINGS = {
   autoAccept: false,
   autoRequestResume: false,
@@ -20,9 +18,9 @@ const DEFAULT_SETTINGS = {
   dingtalkWebhook: '',
   dingtalkSecret: '',
   backendUrl: 'http://127.0.0.1:8787',
-  accountName: DEFAULT_ACCOUNT_NAME,
+  accountName: '',
   accountPlatform: 'BOSS直聘',
-  accountNameManual: true,
+  accountNameManual: false,
   scheduledPushEnabled: false,
   scheduledPushTime: '10:00',
   scheduledPushLastDate: '',
@@ -607,7 +605,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'getJobRequirementFromBackend') {
     const role = encodeURIComponent(message.role || '');
-    fetchFromBackend(`/api/job-requirements?role=${role}`)
+    const account = encodeURIComponent(message.accountName || '');
+    fetchFromBackend(`/api/job-requirements?role=${role}&account=${account}`)
       .then(sendResponse)
       .catch(err => sendResponse({ success: false, message: err.message }));
     return true;
@@ -616,39 +615,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'detectedAccountUpdated') {
     const accountInfo = {
       ...(message.accountInfo || {}),
-      name: DEFAULT_ACCOUNT_NAME,
+      name: String((message.accountInfo || {}).name || '').trim(),
       platform: (message.accountInfo || {}).platform || 'BOSS直聘',
     };
     chrome.storage.local.get(['settings'], ({ settings = DEFAULT_SETTINGS }) => {
+      const manualName = String(settings.accountName || '').trim();
       if (settings.accountNameManual) {
         const mergedSettings = {
           ...DEFAULT_SETTINGS,
           ...settings,
-          accountName: DEFAULT_ACCOUNT_NAME,
+          accountName: manualName,
           accountPlatform: accountInfo.platform || settings.accountPlatform || 'BOSS直聘',
-          accountNameManual: true,
+          accountNameManual: Boolean(manualName),
         };
         chrome.storage.local.set({ settings: mergedSettings, detectedAccount: accountInfo });
         syncToBackend('/api/settings', {
-          accountName: DEFAULT_ACCOUNT_NAME,
+          accountName: manualName,
           accountPlatform: mergedSettings.accountPlatform,
-          accountNameManual: true,
+          accountNameManual: Boolean(manualName),
           detectedAccount: accountInfo,
         }).catch(() => {});
         sendResponse({ success: true, accountInfo, manualOverride: true });
         return;
       }
+      const detectedName = accountInfo.name || String(settings.accountName || '').trim();
       const mergedSettings = {
         ...DEFAULT_SETTINGS,
         ...settings,
-        accountName: DEFAULT_ACCOUNT_NAME,
+        accountName: detectedName,
         accountPlatform: accountInfo.platform || settings.accountPlatform || 'BOSS直聘',
-        accountNameManual: true,
+        accountNameManual: false,
       };
       chrome.storage.local.set({ settings: mergedSettings, detectedAccount: accountInfo });
       syncToBackend('/api/settings', {
         accountName: mergedSettings.accountName,
         accountPlatform: mergedSettings.accountPlatform,
+        accountNameManual: false,
         detectedAccount: accountInfo,
       }).catch(() => {});
       sendResponse({ success: true, accountInfo });
@@ -657,7 +659,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'manualAccountUpdated') {
-    const accountName = String(message.accountName || DEFAULT_ACCOUNT_NAME).trim() || DEFAULT_ACCOUNT_NAME;
+    const accountName = String(message.accountName || '').trim();
     const accountPlatform = String(message.accountPlatform || 'BOSS直聘').trim() || 'BOSS直聘';
     chrome.storage.local.get(['settings'], ({ settings = DEFAULT_SETTINGS }) => {
       const mergedSettings = {

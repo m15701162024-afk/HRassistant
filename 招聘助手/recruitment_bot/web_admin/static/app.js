@@ -8,6 +8,7 @@ const state = {
   reports: [],
   jobRequirements: [],
   conversations: [],
+  accounts: [],
   behaviorPolicy: {},
   filters: {
     q: '',
@@ -205,6 +206,41 @@ async function loadSettings() {
   $('callbackUrl').textContent = `${callbackOrigin}/api/dingtalk/callback`;
 }
 
+async function loadAccounts() {
+  const result = await api('/api/accounts');
+  state.accounts = result.items || [];
+  renderAccountScope();
+}
+
+function renderAccountScope() {
+  const select = $('accountScopeSelect');
+  if (!select) return;
+  const selected = state.filters.account || '';
+  const accounts = [...state.accounts];
+  if (selected && !accounts.some(item => item.name === selected)) {
+    accounts.unshift({ name: selected, count: 0 });
+  }
+  select.innerHTML = [
+    '<option value="">全部账号</option>',
+    ...accounts.map(item => {
+      const label = `${item.name || '未识别'}${Number(item.count || 0) ? `（${item.count}）` : ''}`;
+      return `<option value="${escapeHtml(item.name || '未识别')}">${escapeHtml(label)}</option>`;
+    }),
+  ].join('');
+  select.value = selected;
+  if ($('accountFilter')) $('accountFilter').value = selected;
+  $('accountScopeHint').textContent = selected
+    ? `当前只显示账号「${selected}」的数据`
+    : '当前显示全部账号数据';
+}
+
+function setAccountScope(account, reload = true) {
+  state.filters.account = String(account || '').trim();
+  if ($('accountFilter')) $('accountFilter').value = state.filters.account;
+  renderAccountScope();
+  if (reload) loadData().catch(showError);
+}
+
 async function saveLlmConfig(showToast = true) {
   const payload = {
     llmEnabled: $('llmEnabled').value === 'true',
@@ -370,12 +406,13 @@ async function toggleSchedule() {
 async function loadData() {
   const qs = queryString();
   const suffix = qs ? `&${qs}` : '';
+  const querySuffix = qs ? `?${qs}` : '';
   const [stats, candidates, recommendations, reports, jobs] = await Promise.all([
-    api('/api/stats'),
+    api(`/api/stats${querySuffix}`),
     api(`/api/candidates?limit=500${suffix}`),
     api(`/api/recommendations?limit=500${suffix}`),
-    api(`/api/reports?limit=200${state.filters.q ? `&q=${encodeURIComponent(state.filters.q)}` : ''}`),
-    api(`/api/job-requirements?limit=200${state.filters.q ? `&q=${encodeURIComponent(state.filters.q)}` : ''}`),
+    api(`/api/reports?limit=200${suffix}`),
+    api(`/api/job-requirements?limit=200${suffix}`),
   ]);
 
   state.stats = stats;
@@ -566,6 +603,7 @@ function applyFilters() {
     source: $('sourceFilter').value.trim(),
     account: $('accountFilter').value.trim(),
   };
+  renderAccountScope();
   loadData().catch(showError);
 }
 
@@ -573,6 +611,7 @@ function clearFilters() {
   $('searchInput').value = '';
   $('sourceFilter').value = '';
   $('accountFilter').value = '';
+  setAccountScope('', false);
   applyFilters();
 }
 
@@ -593,7 +632,7 @@ async function ask(replyToDingTalk = false) {
   $('answerBox').textContent = 'Agent 正在查询历史数据...';
   const result = await api('/api/agent/ask', {
     method: 'POST',
-    body: JSON.stringify({ question, replyToDingTalk }),
+    body: JSON.stringify({ question, replyToDingTalk, account: state.filters.account }),
   });
   $('answerBox').textContent = result.answer;
   await loadConversations();
@@ -629,6 +668,7 @@ function buildSummaryQuery() {
     if ($('scheduledPushStart').value) params.set('start', $('scheduledPushStart').value);
     if ($('scheduledPushEnd').value) params.set('end', $('scheduledPushEnd').value);
   }
+  if (state.filters.account) params.set('account', state.filters.account);
   return `?${params.toString()}`;
 }
 
@@ -640,7 +680,7 @@ async function saveJobRequirement() {
   const payload = {
     role: $('jobRoleInput').value.trim(),
     source: $('jobSourceInput').value.trim() || '手动录入',
-    accountName: $('jobAccountInput').value.trim() || $('accountName').value.trim(),
+    accountName: $('jobAccountInput').value.trim() || state.filters.account || $('accountName').value.trim(),
     requirement: $('jobRequirementInput').value.trim(),
   };
   if (!payload.role || !payload.requirement) {
@@ -660,7 +700,7 @@ async function saveJobRequirement() {
 async function matchAllJobRequirements() {
   const result = await api('/api/job-requirements/match-candidates', {
     method: 'POST',
-    body: '{}',
+    body: JSON.stringify({ account: state.filters.account }),
   });
   await loadData();
   toast(`已重新匹配 ${result.updated || 0} 位候选人，跳过 ${result.skipped || 0} 位`);
@@ -726,6 +766,10 @@ function bindEvents() {
   $('clearFilterBtn').addEventListener('click', clearFilters);
   $('exportCandidatesBtn').addEventListener('click', () => exportCsv('candidates'));
   $('exportRecommendationsBtn').addEventListener('click', () => exportCsv('recommendations'));
+  $('accountScopeSelect').addEventListener('change', () => setAccountScope($('accountScopeSelect').value));
+  $('accountFilter').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') applyFilters();
+  });
   $('saveApiBaseBtn').addEventListener('click', () => {
     const value = normalizeApiBase($('apiBaseInput').value);
     if (value) {
@@ -755,7 +799,7 @@ function bindEvents() {
 
 async function refreshAll() {
   renderApiBase();
-  await Promise.all([loadHealth(), loadSettings(), loadBehaviorPolicy()]);
+  await Promise.all([loadHealth(), loadSettings(), loadBehaviorPolicy(), loadAccounts()]);
   await loadData();
 }
 

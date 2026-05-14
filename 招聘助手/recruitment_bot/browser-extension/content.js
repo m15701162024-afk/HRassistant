@@ -56,9 +56,9 @@ let settings = {
     filterReview: 25,
   },
   searchKeywordPool: [],
-  accountName: '马女士',
+  accountName: '',
   accountPlatform: 'BOSS直聘',
-  accountNameManual: true,
+  accountNameManual: false,
   longBreakEvery: 3,
   longBreakMin: 60000,
   longBreakMax: 150000,
@@ -691,7 +691,7 @@ async function handleReceivePage() {
 
 async function ensureJobRequirementForResume(card, resumeInfo) {
   if (!resumeInfo?.role) return;
-  const key = normalizeRoleKey(resumeInfo.role);
+  const key = jobRequirementCacheKey(resumeInfo.role, resumeInfo.accountName);
   if (cachedJobRequirements[key]?.requirement) {
     if (looksLikeJobRequirement(cachedJobRequirements[key].requirement)) {
       resumeInfo.jobRequirement = cachedJobRequirements[key].requirement;
@@ -723,7 +723,7 @@ async function ensureJobRequirementForResume(card, resumeInfo) {
 
 async function ensureChatJobRequirement(resumeInfo) {
   if (!resumeInfo?.role) return;
-  const key = normalizeRoleKey(resumeInfo.role);
+  const key = jobRequirementCacheKey(resumeInfo.role, resumeInfo.accountName);
   if (cachedJobRequirements[key]?.requirement) {
     if (looksLikeJobRequirement(cachedJobRequirements[key].requirement)) {
       resumeInfo.jobRequirement = cachedJobRequirements[key].requirement;
@@ -734,7 +734,7 @@ async function ensureChatJobRequirement(resumeInfo) {
     chrome.storage.local.set({ jobRequirements: cachedJobRequirements });
   }
 
-  const backendRequirement = await fetchJobRequirementFromBackend(resumeInfo.role);
+  const backendRequirement = await fetchJobRequirementFromBackend(resumeInfo.role, resumeInfo.accountName);
   if (backendRequirement?.requirement && looksLikeJobRequirement(backendRequirement.requirement)) {
     cacheJobRequirement(resumeInfo.role, backendRequirement.requirement, {
       source: backendRequirement.source || resumeInfo.source,
@@ -770,12 +770,13 @@ async function ensureChatJobRequirement(resumeInfo) {
   }
 }
 
-async function fetchJobRequirementFromBackend(role) {
+async function fetchJobRequirementFromBackend(role, accountName = '') {
   if (!role) return null;
   try {
     const response = await chrome.runtime.sendMessage({
       action: 'getJobRequirementFromBackend',
       role,
+      accountName,
     });
     return response?.item || null;
   } catch (err) {
@@ -1294,7 +1295,7 @@ function scrapeResumeInfo(card, resumeId) {
       '[class*="job"]', '[class*="position"]',
       '[class*="expect"]', '[class*="intention"]',
     ]);
-    const roleKey = normalizeRoleKey(info.role);
+    const roleKey = jobRequirementCacheKey(info.role, info.accountName);
     info.jobRequirement = cachedJobRequirements[roleKey]?.requirement || extractJobRequirementFromPage(card, info.role);
     if (info.role && info.jobRequirement) {
       cacheJobRequirement(info.role, info.jobRequirement, {
@@ -1354,8 +1355,18 @@ function normalizeRoleKey(role) {
   return normalizeText(role || '').toLowerCase().replace(/\s+/g, '');
 }
 
+function normalizeAccountKey(accountName) {
+  return normalizeText(accountName || '').toLowerCase().replace(/\s+/g, '');
+}
+
+function jobRequirementCacheKey(role, accountName = '') {
+  const roleKey = normalizeRoleKey(role);
+  const accountKey = normalizeAccountKey(accountName);
+  return accountKey ? `${accountKey}::${roleKey}` : roleKey;
+}
+
 function cacheJobRequirement(role, requirement, meta = {}) {
-  const key = normalizeRoleKey(role);
+  const key = jobRequirementCacheKey(role, meta.accountName);
   if (!key || !requirement || requirement.length < 20) return;
   if (!looksLikeJobRequirement(requirement)) return;
   const existing = cachedJobRequirements[key];
