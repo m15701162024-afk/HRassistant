@@ -20,6 +20,10 @@ const state = {
 const API_BASE_STORAGE_KEY = 'recruitmentAdminApiBase';
 const DEFAULT_PUBLIC_BASE_URL = 'https://unconfuted-superbusily-ryan.ngrok-free.dev';
 const LLM_PROVIDER_DEFAULTS = {
+  'openai-codex': {
+    apiBase: 'https://api.openai.com/v1',
+    model: 'gpt-5.2-codex',
+  },
   openai: {
     apiBase: '',
     model: '',
@@ -287,7 +291,7 @@ async function testLlm() {
   $('answerBox').textContent = '正在测试大模型问答...';
   const result = await api('/api/agent/ask', {
     method: 'POST',
-    body: JSON.stringify({ question: '请用一句话汇总当前招聘历史数据', sender: 'LLM 配置测试' }),
+    body: JSON.stringify({ question: '请分析当前招聘历史数据，并给出一句话优化建议', sender: 'LLM 配置测试', forceLlm: true }),
   });
   $('answerBox').textContent = `${result.answer}\n\n[Agent 模式] ${result.agent?.mode || 'unknown'}${result.agent?.model ? `｜${result.agent.model}` : ''}`;
   await loadConversations();

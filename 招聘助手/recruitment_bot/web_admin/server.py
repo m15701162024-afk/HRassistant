@@ -82,10 +82,10 @@ DEFAULT_BEHAVIOR_POLICY: dict[str, Any] = {
 
 DEFAULT_LLM_CONFIG: dict[str, Any] = {
     "llmEnabled": False,
-    "llmProvider": "openai",
-    "llmProtocol": "openai-chat",
-    "llmApiBase": "",
-    "llmModel": "",
+    "llmProvider": "openai-codex",
+    "llmProtocol": "openai-responses",
+    "llmApiBase": "https://api.openai.com/v1",
+    "llmModel": "gpt-5.2-codex",
     "llmTemperature": 0.2,
     "llmMaxContextItems": 30,
     "llmMaxTokens": 600,
@@ -93,6 +93,12 @@ DEFAULT_LLM_CONFIG: dict[str, Any] = {
 }
 
 LLM_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
+    "openai-codex": {
+        "label": "Codex GPT-5.2",
+        "protocol": "openai-responses",
+        "apiBase": "https://api.openai.com/v1",
+        "model": "gpt-5.2-codex",
+    },
     "openai": {
         "label": "OpenAI",
         "protocol": "openai-chat",
@@ -1184,6 +1190,42 @@ def call_llm_chat_completions(question: str, context: str, config: dict[str, Any
     return answer[:18000]
 
 
+def extract_responses_answer(body: dict[str, Any]) -> str:
+    if body.get("output_text"):
+        return str(body["output_text"]).strip()
+    parts: list[str] = []
+    for item in body.get("output", []) or []:
+        for content in item.get("content", []) or []:
+            if content.get("type") in {"output_text", "text"} and content.get("text"):
+                parts.append(str(content["text"]))
+    return "\n".join(parts).strip()
+
+
+def call_llm_openai_responses(question: str, context: str, config: dict[str, Any]) -> str:
+    url = f"{str(config['llmApiBase']).rstrip('/')}/responses"
+    payload = {
+        "model": config["llmModel"],
+        "instructions": build_llm_system_prompt(),
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": f"问题：{question}\n\n招聘历史数据：\n{context}",
+                    }
+                ],
+            }
+        ],
+        "max_output_tokens": int(config.get("llmMaxTokens") or 1000),
+    }
+    body = request_llm_json(url, payload, config)
+    answer = extract_responses_answer(body)
+    if not answer:
+        raise RuntimeError("OpenAI Responses API 返回空答案")
+    return answer[:18000]
+
+
 def call_llm_anthropic_messages(question: str, context: str, config: dict[str, Any]) -> str:
     url = f"{str(config['llmApiBase']).rstrip('/')}/messages"
     payload = {
@@ -1225,6 +1267,8 @@ def call_llm_chat(question: str, context: str) -> str:
         raise RuntimeError("大模型模型名未配置")
 
     try:
+        if config.get("llmProtocol") == "openai-responses":
+            return call_llm_openai_responses(question, context, config)
         if config.get("llmProtocol") == "anthropic-messages":
             return call_llm_anthropic_messages(question, context, config)
         return call_llm_chat_completions(question, context, config)
@@ -1261,10 +1305,10 @@ def should_use_fast_rules(question: str) -> bool:
     )
 
 
-def answer_question_with_agent(question: str, account: str | None = None) -> tuple[str, dict[str, Any]]:
+def answer_question_with_agent(question: str, account: str | None = None, force_llm: bool = False) -> tuple[str, dict[str, Any]]:
     fallback = answer_question_rules(question, account)
     config = get_llm_config(mask_key=False)
-    if should_use_fast_rules(question):
+    if should_use_fast_rules(question) and not force_llm:
         return fallback, {"mode": "rules-fast", "llmSkipped": True}
     if not config.get("llmEnabled"):
         return fallback, {"mode": "rules", "llmEnabled": False}
@@ -1313,9 +1357,9 @@ def get_llm_config(mask_key: bool = False) -> dict[str, Any]:
         "llmEnabled": bool(settings.get("llmEnabled", DEFAULT_LLM_CONFIG["llmEnabled"])),
         "llmProvider": provider,
         "llmProtocol": str(settings.get("llmProtocol") or preset["protocol"]),
-        "llmApiBase": str(settings.get("llmApiBase") or "").rstrip("/"),
+        "llmApiBase": str(settings.get("llmApiBase") or preset.get("apiBase") or "").rstrip("/"),
         "llmApiKey": str(settings.get("llmApiKey") or ""),
-        "llmModel": str(settings.get("llmModel") or ""),
+        "llmModel": str(settings.get("llmModel") or preset.get("model") or ""),
         "llmTemperature": float(settings.get("llmTemperature", DEFAULT_LLM_CONFIG["llmTemperature"]) or 0.2),
         "llmMaxContextItems": int(settings.get("llmMaxContextItems", DEFAULT_LLM_CONFIG["llmMaxContextItems"]) or 80),
         "llmMaxTokens": int(settings.get("llmMaxTokens", DEFAULT_LLM_CONFIG["llmMaxTokens"]) or 1000),
@@ -1333,8 +1377,8 @@ def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
     current = get_llm_config(mask_key=False)
     provider = str(payload.get("llmProvider") or current["llmProvider"] or "openai")
     preset = LLM_PROVIDER_PRESETS.get(provider, LLM_PROVIDER_PRESETS["custom"])
-    api_base = str(payload.get("llmApiBase") or "").rstrip("/")
-    model = str(payload.get("llmModel") or "")
+    api_base = str(payload.get("llmApiBase") or preset.get("apiBase") or "").rstrip("/")
+    model = str(payload.get("llmModel") or preset.get("model") or "")
     config: dict[str, Any] = {
         "llmEnabled": bool(payload.get("llmEnabled", current["llmEnabled"])),
         "llmProvider": provider,
@@ -1784,8 +1828,7 @@ def handle_dingtalk_conversation(payload: dict[str, Any]) -> dict[str, Any]:
         answer = "### 招聘助手\n\n我没有收到有效问题。你可以问：昨天推荐了谁？React候选人有哪些？匹配度最高的是谁？"
         agent_meta = {"mode": "empty"}
     else:
-        answer = answer_question_rules(question)
-        agent_meta = {"mode": "rules-fast-callback"}
+        answer, agent_meta = answer_question_with_agent(question)
 
     save_agent_conversation(
         question=question or "(empty)",
@@ -2329,6 +2372,7 @@ class Handler(SimpleHTTPRequestHandler):
                 answer, agent_meta = answer_question_with_agent(
                     str(payload.get("question", "")),
                     str(payload.get("account", "") or "").strip() or None,
+                    bool(payload.get("forceLlm")),
                 )
                 save_agent_conversation(
                     question=str(payload.get("question", "")),

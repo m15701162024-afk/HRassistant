@@ -316,6 +316,7 @@
             <label>
               模型平台
               <select id="llmProvider">
+                <option value="openai-codex">Codex GPT-5.2</option>
                 <option value="openai">OpenAI</option>
                 <option value="claude">Claude</option>
                 <option value="qwen">通义千问</option>
@@ -366,7 +367,7 @@
         <button id="testLlmBtn" class="secondary">测试问答</button>
         <button id="resetLlmBtn" class="secondary">清空大模型配置</button>
       </div>
-      <p class="hint">OpenAI、千问、阿里云百炼、硅基流动、DeepSeek 使用 OpenAI-compatible Chat Completions；Claude 使用 Anthropic Messages。钉钉机器人提问时会检索历史数据后调用模型，调用失败时自动使用本地规则回答。</p>
+      <p class="hint">Codex GPT-5.2 使用 OpenAI Responses API；OpenAI、千问、阿里云百炼、硅基流动、DeepSeek 使用 OpenAI-compatible Chat Completions；Claude 使用 Anthropic Messages。钉钉机器人提问时会检索历史数据后调用模型，调用失败时自动使用本地规则回答。</p>
     </section>
 
     <section class="panel module-section" data-module="qa">
