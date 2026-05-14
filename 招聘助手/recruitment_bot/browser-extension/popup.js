@@ -15,8 +15,9 @@ const elements = {
 
 const DEFAULT_SETTINGS = {
   backendUrl: 'http://127.0.0.1:8787',
-  accountName: '',
+  accountName: '马女士',
   accountPlatform: 'BOSS直聘',
+  accountNameManual: true,
   dailyLimit: 20,
 };
 

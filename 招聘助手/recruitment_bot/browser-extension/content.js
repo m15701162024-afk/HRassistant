@@ -56,6 +56,9 @@ let settings = {
     filterReview: 25,
   },
   searchKeywordPool: [],
+  accountName: '马女士',
+  accountPlatform: 'BOSS直聘',
+  accountNameManual: true,
   longBreakEvery: 3,
   longBreakMin: 60000,
   longBreakMax: 150000,
@@ -690,9 +693,13 @@ async function ensureJobRequirementForResume(card, resumeInfo) {
   if (!resumeInfo?.role) return;
   const key = normalizeRoleKey(resumeInfo.role);
   if (cachedJobRequirements[key]?.requirement) {
-    resumeInfo.jobRequirement = cachedJobRequirements[key].requirement;
-    resumeInfo.evaluation = evaluateCandidate(resumeInfo);
-    return;
+    if (looksLikeJobRequirement(cachedJobRequirements[key].requirement)) {
+      resumeInfo.jobRequirement = cachedJobRequirements[key].requirement;
+      resumeInfo.evaluation = evaluateCandidate(resumeInfo);
+      return;
+    }
+    delete cachedJobRequirements[key];
+    chrome.storage.local.set({ jobRequirements: cachedJobRequirements });
   }
 
   let requirement = extractJobRequirementFromPage(card, resumeInfo.role);
@@ -718,13 +725,17 @@ async function ensureChatJobRequirement(resumeInfo) {
   if (!resumeInfo?.role) return;
   const key = normalizeRoleKey(resumeInfo.role);
   if (cachedJobRequirements[key]?.requirement) {
-    resumeInfo.jobRequirement = cachedJobRequirements[key].requirement;
-    resumeInfo.evaluation = evaluateCandidate(resumeInfo);
-    return;
+    if (looksLikeJobRequirement(cachedJobRequirements[key].requirement)) {
+      resumeInfo.jobRequirement = cachedJobRequirements[key].requirement;
+      resumeInfo.evaluation = evaluateCandidate(resumeInfo);
+      return;
+    }
+    delete cachedJobRequirements[key];
+    chrome.storage.local.set({ jobRequirements: cachedJobRequirements });
   }
 
   const backendRequirement = await fetchJobRequirementFromBackend(resumeInfo.role);
-  if (backendRequirement?.requirement) {
+  if (backendRequirement?.requirement && looksLikeJobRequirement(backendRequirement.requirement)) {
     cacheJobRequirement(resumeInfo.role, backendRequirement.requirement, {
       source: backendRequirement.source || resumeInfo.source,
       accountName: backendRequirement.account_name || backendRequirement.accountName || resumeInfo.accountName,
@@ -1346,6 +1357,7 @@ function normalizeRoleKey(role) {
 function cacheJobRequirement(role, requirement, meta = {}) {
   const key = normalizeRoleKey(role);
   if (!key || !requirement || requirement.length < 20) return;
+  if (!looksLikeJobRequirement(requirement)) return;
   const existing = cachedJobRequirements[key];
   if (existing && existing.requirement && existing.requirement.length >= requirement.length) return;
   const item = {
@@ -1374,22 +1386,81 @@ function extractJobRequirementFromPage(card, role) {
     '[class*="detail-content"]',
     '[class*="jd"]',
   ];
-  const scoped = extractTextLong(card, selectors, { includeDocumentFallback: card === document.body || card === document });
-  if (looksLikeJobRequirement(scoped)) return scoped;
+  for (const selector of selectors) {
+    try {
+      const scoped = card?.querySelector ? card.querySelector(selector) : null;
+      const fallback = (card === document.body || card === document) ? document.querySelector(selector) : null;
+      const extracted = extractStructuredJobRequirementText(scoped || fallback, role);
+      if (extracted) return extracted;
+    } catch (e) {}
+  }
+
+  const scoped = extractStructuredJobRequirementText(card, role);
+  if (scoped) return scoped;
 
   const bodyText = normalizeText(document.body.textContent || '');
   const roleText = normalizeText(role || '');
   if (!roleText || !bodyText.includes(roleText)) return '';
   const roleIndex = bodyText.indexOf(roleText);
   const windowText = bodyText.slice(Math.max(0, roleIndex - 500), roleIndex + 3500);
-  if (/新招呼|沟通中|全部职位|账号权益|招聘规范/.test(windowText) && !/(岗位职责|职位描述|职位详情|任职要求|岗位要求|工作职责|工作内容)/.test(windowText)) {
-    return '';
-  }
-  const markerMatch = windowText.match(/(岗位职责|职位描述|职位详情|任职要求|岗位要求|工作职责|工作内容)[\s\S]{80,2500}/);
-  if (markerMatch && looksLikeJobRequirement(markerMatch[0])) {
-    return markerMatch[0];
-  }
-  return '';
+  return extractStructuredJobRequirementText(windowText, role);
+}
+
+function extractStructuredJobRequirementText(source, role = '') {
+  if (!source) return '';
+  const rawText = typeof source === 'string'
+    ? source
+    : (source.innerText || source.textContent || '');
+  let text = normalizeText(rawText);
+  if (!text || text.length < 40) return '';
+  text = text.replace(/(工作内容|工作职责|岗位职责|职位描述|工作要求|任职要求|岗位要求|职位要求)/g, ' $1 ');
+
+  const content = extractJobTextSection(text, ['工作内容', '工作职责', '岗位职责', '职位描述'], [
+    '工作要求', '任职要求', '岗位要求', '职位要求',
+    ...JOB_REQUIREMENT_STOP_MARKERS,
+  ]);
+  const requirement = extractJobTextSection(text, ['工作要求', '任职要求', '岗位要求', '职位要求'], JOB_REQUIREMENT_STOP_MARKERS);
+  const sections = [content, requirement].filter(Boolean);
+  if (!sections.length) return '';
+
+  const result = sections.join('\n').slice(0, 12000).trim();
+  if (!looksLikeJobRequirement(result)) return '';
+  if (isPollutedJobRequirementText(result, role)) return '';
+  return result;
+}
+
+const JOB_REQUIREMENT_STOP_MARKERS = [
+  '薪资详情', '职位福利', '工作地点', '公司介绍', '工商信息', '竞争力分析',
+  '相似职位', '推荐职位', '沟通职位', '立即沟通', '在线沟通', '全部职位',
+  '新招呼', '沟通中', '账号权益', '招聘规范', '我的客服', '招聘数据',
+];
+
+function extractJobTextSection(text, startTitles, stopTitles) {
+  const start = findEarliestMarker(text, startTitles, 0);
+  if (!start) return '';
+  const contentStart = start.index + start.title.length;
+  const stop = findEarliestMarker(text, stopTitles, contentStart);
+  const end = stop ? stop.index : Math.min(text.length, contentStart + 2600);
+  const body = text.slice(contentStart, end).replace(/^[：:，,\s-]+/, '').trim();
+  if (body.length < 20) return '';
+  return `${start.title}：${body}`.slice(0, 3000);
+}
+
+function findEarliestMarker(text, markers, fromIndex = 0) {
+  return markers
+    .map(title => ({ title, index: text.indexOf(title, fromIndex) }))
+    .filter(item => item.index >= 0)
+    .sort((a, b) => a.index - b.index)[0] || null;
+}
+
+function isPollutedJobRequirementText(text, role = '') {
+  const normalized = normalizeText(text || '');
+  const pageMarkers = ['新招呼', '沟通中', '全部职位', '账号权益', '招聘规范', '推荐牛人', '招聘数据']
+    .filter(marker => normalized.includes(marker)).length;
+  const chatMarkers = ['BOSS您好', 'Boss，您好', '您好，我叫', '方便沟通', '进一步沟通', '期待进一步', '我的简历', '详细简历']
+    .filter(marker => normalized.includes(marker)).length;
+  const repeatedRoles = new Set(normalized.match(/[\u4e00-\u9fa5A-Za-z/+-]+(?:工程师|分析|开发|产品|运营)[^\s，。|]{0,18}\(J\d+\)/g) || []).size;
+  return pageMarkers >= 1 || chatMarkers >= 1 || repeatedRoles >= 2;
 }
 
 function extractTextLong(container, selectors, options = {}) {
@@ -1410,10 +1481,10 @@ function extractTextLong(container, selectors, options = {}) {
 
 function looksLikeJobRequirement(text) {
   if (!text || text.length < 40) return false;
-  if (/新招呼|沟通中|账号权益|招聘规范/.test(text) && !/(岗位职责|职位描述|任职要求|岗位要求|工作职责|工作内容)/.test(text)) {
+  if (isPollutedJobRequirementText(text)) {
     return false;
   }
-  return /(岗位职责|职位描述|任职要求|岗位要求|工作职责|工作内容|经验|学历|技能|熟悉|精通|负责)/.test(text);
+  return /(工作内容|工作要求|岗位职责|职位描述|任职要求|岗位要求|工作职责|职位要求)/.test(text);
 }
 
 function extractText(container, selectors) {

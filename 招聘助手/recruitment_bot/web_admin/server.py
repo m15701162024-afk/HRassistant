@@ -393,13 +393,30 @@ def normalize_role(role: str) -> str:
     return "".join(str(role or "").lower().split())
 
 
+def is_valid_job_requirement_text(requirement: str) -> bool:
+    text = re.sub(r"\s+", " ", str(requirement or "")).strip()
+    if len(text) < 20:
+        return False
+    has_job_section = bool(re.search(r"工作内容|工作职责|岗位职责|职位描述|工作要求|任职要求|岗位要求|职位要求", text))
+    polluted_markers = [
+        "新招呼", "沟通中", "全部职位", "账号权益", "招聘规范", "BOSS您好", "Boss，您好",
+        "您好，我叫", "进一步沟通", "期待进一步", "我的简历", "详细简历",
+    ]
+    if any(marker in text for marker in polluted_markers):
+        return False
+    repeated_roles = set(re.findall(r"[\u4e00-\u9fa5A-Za-z/+-]+(?:工程师|分析|开发|产品|运营)[^\s，。|]{0,18}\(J\d+\)", text))
+    if len(repeated_roles) >= 2:
+        return False
+    return has_job_section
+
+
 def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     role = str(payload.get("role") or "").strip()
     requirement = str(payload.get("requirement") or payload.get("jobRequirement") or "").strip()
     if not role:
         return {"success": False, "message": "岗位名称不能为空"}
-    if not requirement or len(requirement) < 20:
-        return {"success": False, "message": "岗位要求内容过短，未保存"}
+    if not is_valid_job_requirement_text(requirement):
+        return {"success": False, "message": "岗位要求内容不符合工作内容/工作要求格式，未保存"}
     normalized = normalize_role(role)
     item_id = hashlib.sha1(normalized.encode()).hexdigest()
     now = now_iso()

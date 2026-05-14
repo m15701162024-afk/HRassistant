@@ -692,7 +692,9 @@ function showModule(name) {
     tab.classList.toggle('active', tab.dataset.module === name);
   });
   document.querySelectorAll('.module-section').forEach(section => {
-    section.classList.toggle('active', section.dataset.module === name);
+    const active = section.dataset.module === name;
+    section.classList.toggle('active', active);
+    section.hidden = !active;
   });
 }
 
@@ -758,4 +760,5 @@ async function refreshAll() {
 }
 
 bindEvents();
+showModule('overview');
 refreshAll().catch(showError);

@@ -70,6 +70,11 @@ main {
   display: none;
 }
 
+.module-section:not(.active),
+[hidden] {
+  display: none !important;
+}
+
 .module-section.active {
   display: grid;
 }
