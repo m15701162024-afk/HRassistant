@@ -79,8 +79,8 @@ const RESUME_ACTIONS = {
   },
   request: {
     label: '索要简历',
-    keywords: ['索要简历', '求简历', '请求简历', '要简历', '获取简历', '请求发送简历', '请发简历', '让TA发简历', '让他发简历', '让她发简历'],
-    blockedKeywords: ['已索要', '已请求', '已发送', '已获取', '等待对方'],
+    keywords: ['索要简历', '求简历', '请求简历', '要简历', '获取简历', '请求发送简历', '请发简历', '让TA发简历', '让他发简历', '让她发简历', '索要附件', '求附件', '发送附件简历'],
+    blockedKeywords: ['已索要', '已请求', '已获取', '等待对方'],
   },
 };
 
@@ -942,6 +942,42 @@ function getActionKey(type, element, text) {
   const path = window.location.pathname;
   const position = `${Math.round(rect.left)}_${Math.round(rect.top)}_${Math.round(rect.width)}_${Math.round(rect.height)}`;
   return `${type}_${hashString(`${path}|${text}|${position}`)}`;
+}
+
+function findExistingResumeRequestStatus() {
+  const text = normalizeText(document.body.textContent || '');
+  if (/已索要|已请求|已求简历|等待对方.*简历|简历.*等待对方/.test(text)) {
+    return '已索要简历';
+  }
+  return '';
+}
+
+async function closeResumeOverlayIfPresent() {
+  const before = normalizeText(document.body.textContent || '').slice(0, 700);
+  const closeTarget = Array.from(document.querySelectorAll('button, a, [role="button"], span, div')).find((element) => {
+    if (!isActionableElement(element)) return false;
+    const text = getClickableText(element);
+    if (!text || text.length > 20) return false;
+    return /^(关闭|返回|收起|取消|×|x)$/i.test(text);
+  });
+  if (closeTarget) {
+    await simulateMouseMove(closeTarget);
+    await sleep(400 + Math.random() * 600);
+    simulateHumanClick(closeTarget);
+    await sleep(900 + Math.random() * 1200);
+  }
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+  document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
+  await sleep(700 + Math.random() * 900);
+  return normalizeText(document.body.textContent || '').slice(0, 700) !== before;
+}
+
+async function prepareCommunicationActionsForRequest() {
+  const input = document.querySelector('textarea, input[type="text"], [contenteditable="true"], [class*="input"], [class*="editor"]');
+  if (input?.scrollIntoView) {
+    input.scrollIntoView({ block: 'center', inline: 'nearest' });
+    await sleep(500 + Math.random() * 700);
+  }
 }
 
 function findCandidateNavigationTargets() {
@@ -1988,17 +2024,33 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
         finalCandidate.id = `resume_${hashString(`${finalCandidate.name || ''}|${finalCandidate.role || ''}|online|${finalCandidate.receivedDate || ''}`)}`;
       }
       if (!finalCandidate.evaluation) finalCandidate.evaluation = evaluateCandidate(finalCandidate);
-      await saveResumeData(finalCandidate);
 
       const score = Number(finalCandidate.evaluation?.score || 0);
       const needsResumeRequest = score >= AGENTS_EVALUATION_RULES.recommendThreshold && !finalCandidate.hasAttachmentResume;
+      finalCandidate.resumeRequestRequired = needsResumeRequest;
       if (needsResumeRequest) {
+        if (openedOnlineResume) {
+          await closeResumeOverlayIfPresent();
+          await prepareCommunicationActionsForRequest();
+        }
         const requestResult = await clickResumeActionType('request', finalCandidate.name || target?.name || '候选人');
+        finalCandidate.resumeRequestExecuted = requestResult.executed > 0;
+        finalCandidate.resumeRequestStatus = requestResult.executed > 0
+          ? (requestResult.alreadyRequested ? '已索要简历' : '已点击求简历')
+          : '求简历失败';
+        finalCandidate.resumeRequestAt = requestResult.executed > 0 ? new Date().toISOString() : '';
+        finalCandidate.resumeRequestButtonText = requestResult.targetText || '';
+        finalCandidate.resumeRequestError = requestResult.executed > 0 ? '' : (requestResult.reason || '未找到或未能点击求简历按钮');
+        finalCandidate.resumeRequestAvailableActions = requestResult.availableActions || [];
         summary.requested += requestResult.executed;
         if (!requestResult.executed) summary.skipped++;
       } else {
+        finalCandidate.resumeRequestExecuted = false;
+        finalCandidate.resumeRequestStatus = finalCandidate.hasAttachmentResume ? '无需索要（已有附件简历）' : '未达到求简历阈值';
+        finalCandidate.resumeRequestError = '';
         summary.skipped++;
       }
+      await saveResumeData(finalCandidate);
 
       summary.processed++;
       summary.details.push({
@@ -2006,6 +2058,8 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
         role: finalCandidate.role || '',
         score,
         requested: needsResumeRequest,
+        requestStatus: finalCandidate.resumeRequestStatus,
+        requestError: finalCandidate.resumeRequestError,
         resumeType: finalCandidate.hasAttachmentResume ? '有附件简历' : '无附件简历',
       });
       workflowProcessedKeys.add(target?.key || getCurrentWorkflowKey(finalCandidate));
@@ -2058,10 +2112,27 @@ async function acceptAttachmentResumeIfPresent(contextName = '候选人') {
 }
 
 async function clickResumeActionType(type, contextName = '候选人') {
-  const target = findActionTargets(document).find(item => item.type === type && !processedActionKeys.has(item.key));
-  const summary = { executed: 0, skipped: 0 };
-  if (!target) return summary;
-  if (!canPerformOperation()) return { ...summary, blockedBySafety: true };
+  let target = findActionTargets(document).find(item => item.type === type && !processedActionKeys.has(item.key));
+  const summary = { executed: 0, skipped: 0, reason: '', targetText: '' };
+  const existingStatus = type === 'request' ? findExistingResumeRequestStatus() : '';
+  if (!target && existingStatus) {
+    return { ...summary, executed: 1, alreadyRequested: true, reason: existingStatus };
+  }
+  if (!target && type === 'request') {
+    await closeResumeOverlayIfPresent();
+    await prepareCommunicationActionsForRequest();
+    target = findActionTargets(document).find(item => item.type === type && !processedActionKeys.has(item.key));
+  }
+  if (!target) {
+    const availableActions = findActionTargets(document).map(item => `${item.type}:${item.text}`).slice(0, 8);
+    return {
+      ...summary,
+      skipped: 1,
+      reason: type === 'request' ? '未找到求简历按钮' : '未找到动作按钮',
+      availableActions,
+    };
+  }
+  if (!canPerformOperation()) return { ...summary, blockedBySafety: true, reason: '安全策略限制操作' };
 
   await sleep(humanDelay());
   await simulateHumanScroll();
@@ -2069,8 +2140,9 @@ async function clickResumeActionType(type, contextName = '候选人') {
   await simulateMouseMove(target.button);
   await sleep(700 + Math.random() * 1000);
   const success = simulateHumanClick(target.button);
-  processedActionKeys.add(target.key);
+  summary.targetText = target.text;
   if (success) {
+    processedActionKeys.add(target.key);
     recordOperation();
     summary.executed = 1;
     notifyPopup('resumeActionExecuted', {
@@ -2081,6 +2153,7 @@ async function clickResumeActionType(type, contextName = '候选人') {
     await simulateActionDwell();
   } else {
     summary.skipped = 1;
+    summary.reason = '点击动作未生效';
   }
   return summary;
 }
@@ -2377,9 +2450,24 @@ async function saveResumeData(resumeInfo) {
     chrome.storage.local.get(['resumes'], (result) => {
       const resumes = result.resumes || [];
 
-      const exists = resumes.some(r => isSameResume(r, resumeInfo));
-      if (exists) {
-        resolve({ saved: false, duplicate: true });
+      const existingIndex = resumes.findIndex(r => isSameResume(r, resumeInfo));
+      if (existingIndex >= 0) {
+        const merged = {
+          ...resumes[existingIndex],
+          ...resumeInfo,
+          updatedAt: new Date().toISOString(),
+        };
+        resumes[existingIndex] = merged;
+        chrome.storage.local.set({ resumes }, () => {
+          chrome.runtime.sendMessage({
+            action: 'syncCandidateToBackend',
+            candidate: merged,
+          }).catch(() => {});
+          if (merged.evaluation?.suitable && hasCandidateResumeEvidence(merged) && isResumeRequestSatisfied(merged)) {
+            pushCandidateRecommendation(merged);
+          }
+          resolve({ saved: false, duplicate: true, updated: true });
+        });
         return;
       }
 
@@ -2390,8 +2478,13 @@ async function saveResumeData(resumeInfo) {
           action: 'syncCandidateToBackend',
           candidate: resumeInfo,
         }).catch(() => {});
-        if (resumeInfo.evaluation?.suitable && hasCandidateResumeEvidence(resumeInfo)) {
+        if (resumeInfo.evaluation?.suitable && hasCandidateResumeEvidence(resumeInfo) && isResumeRequestSatisfied(resumeInfo)) {
           pushCandidateRecommendation(resumeInfo);
+        } else if (resumeInfo.evaluation?.suitable && hasCandidateResumeEvidence(resumeInfo)) {
+          notifyPopup('log', {
+            message: `已暂缓推荐：${resumeInfo.name || '候选人'} 尚未完成求简历`,
+            type: 'warning',
+          });
         }
         resolve({ saved: true, duplicate: false });
       });
@@ -2403,6 +2496,13 @@ async function pushCandidateRecommendation(resumeInfo) {
   if (!hasCandidateResumeEvidence(resumeInfo)) {
     notifyPopup('log', {
       message: `已跳过推荐：${resumeInfo.name || '候选人'} 尚未获取简历`,
+      type: 'warning',
+    });
+    return;
+  }
+  if (!isResumeRequestSatisfied(resumeInfo)) {
+    notifyPopup('log', {
+      message: `已跳过推荐：${resumeInfo.name || '候选人'} 未成功求简历`,
       type: 'warning',
     });
     return;
@@ -2425,7 +2525,15 @@ async function pushCandidateRecommendation(resumeInfo) {
       accountName: resumeInfo.accountName || '',
       accountPlatform: resumeInfo.accountPlatform || 'BOSS直聘',
       hasResume: true,
+      hasAttachmentResume: Boolean(resumeInfo.hasAttachmentResume),
+      resumeAttachmentType: resumeInfo.resumeAttachmentType || (resumeInfo.hasAttachmentResume ? 'attachment' : 'none'),
       resumeStatus: resumeInfo.resumeStatus || '已识别简历详情',
+      resumeRequestRequired: Boolean(resumeInfo.resumeRequestRequired),
+      resumeRequestExecuted: Boolean(resumeInfo.resumeRequestExecuted),
+      resumeRequestStatus: resumeInfo.resumeRequestStatus || '',
+      resumeRequestError: resumeInfo.resumeRequestError || '',
+      resumeRequestAt: resumeInfo.resumeRequestAt || '',
+      resumeRequestButtonText: resumeInfo.resumeRequestButtonText || '',
       score: resumeInfo.evaluation.score,
       recommendation: resumeInfo.evaluation.recommendation,
       nextStep: resumeInfo.evaluation.nextStep,
@@ -2477,6 +2585,17 @@ function hasCandidateResumeEvidence(info) {
     info.experience ||
     info.summary ||
     info.rawText
+  );
+}
+
+function isResumeRequestSatisfied(info) {
+  if (!info) return false;
+  if (info.hasAttachmentResume) return true;
+  const score = Number(info.evaluation?.score || info.score || 0);
+  if (score < AGENTS_EVALUATION_RULES.recommendThreshold) return true;
+  return Boolean(
+    info.resumeRequestExecuted ||
+    /已点击求简历|已索要简历/.test(String(info.resumeRequestStatus || ''))
   );
 }
 
