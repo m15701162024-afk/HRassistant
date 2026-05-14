@@ -1735,6 +1735,10 @@ def attachment_resume_count(rows: list[dict[str, Any]]) -> int:
     return sum(1 for row in rows if has_attachment_resume(row))
 
 
+def attachment_resume_label(row: dict[str, Any]) -> str:
+    return "有附件简历" if has_attachment_resume(row) else "无附件简历"
+
+
 def create_recommendation_excel(scope: str = "configured", start: str | None = None, end: str | None = None) -> tuple[Path, dict[str, Any]]:
     try:
         from openpyxl import load_workbook, Workbook
@@ -1781,7 +1785,7 @@ def create_recommendation_excel(scope: str = "configured", start: str | None = N
             summary_sheet.append([metric_key, display_name, account, count])
     summary_sheet.append(["推送时间范围", dataset["label"], f"{dataset['start']:%Y-%m-%d %H:%M}", f"{dataset['end']:%Y-%m-%d %H:%M}"])
 
-    detail_headers = ["候选人姓名", "学历", "学校", "经验", "收到附件简历", "来源", "账号", "投递岗位", "匹配度", "匹配度依据"]
+    detail_headers = ["候选人姓名", "学历", "学校", "经验", "是否有附件简历", "来源", "账号", "投递岗位", "匹配度", "匹配度依据"]
     detail_sheet.append(detail_headers)
     for row in sorted(dataset["recommendedCandidates"], key=lambda item: int(item.get("score") or 0), reverse=True):
         raw = raw_payload(row)
@@ -1799,7 +1803,7 @@ def create_recommendation_excel(scope: str = "configured", start: str | None = N
             raw_value(row, "education"),
             raw_value(row, "school", "schoolName"),
             raw_value(row, "experience"),
-            "是" if attachment_resume_count([row]) else "否",
+            attachment_resume_label(row),
             raw_value(row, "source") or "BOSS直聘",
             raw_value(row, "account_name", "accountName") or "未识别",
             raw_value(row, "role"),
