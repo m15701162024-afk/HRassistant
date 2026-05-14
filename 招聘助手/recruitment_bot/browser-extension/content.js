@@ -84,6 +84,8 @@ const RESUME_ACTIONS = {
   },
 };
 
+const RESUME_REQUEST_FALLBACK_MESSAGE = '方便发一份您的简历过来吗？';
+
 const AGENTS_EVALUATION_RULES = {
   hard: 20,
   skills: 30,
@@ -949,6 +951,9 @@ function findExistingResumeRequestStatus() {
   if (/已索要|已请求|已求简历|等待对方.*简历|简历.*等待对方/.test(text)) {
     return '已索要简历';
   }
+  if (text.includes(RESUME_REQUEST_FALLBACK_MESSAGE)) {
+    return '已发送求简历消息';
+  }
   return '';
 }
 
@@ -978,6 +983,170 @@ async function prepareCommunicationActionsForRequest() {
     input.scrollIntoView({ block: 'center', inline: 'nearest' });
     await sleep(500 + Math.random() * 700);
   }
+}
+
+function isLikelyChatInput(element) {
+  if (!isActionableElement(element)) return false;
+  const tag = element.tagName.toLowerCase();
+  const editable = element.getAttribute('contenteditable') === 'true';
+  const type = String(element.getAttribute('type') || '').toLowerCase();
+  if (!editable && tag !== 'textarea' && !(tag === 'input' && (!type || type === 'text'))) return false;
+
+  const hint = normalizeText([
+    element.getAttribute('placeholder'),
+    element.getAttribute('aria-label'),
+    element.getAttribute('title'),
+    element.className,
+  ].filter(Boolean).join(' '));
+  if (/搜索|筛选|职位|岗位|账号|姓名|手机号|电话|验证码|邮箱/.test(hint)) return false;
+
+  const rect = element.getBoundingClientRect();
+  if (rect.width < 160 || rect.height < 20) return false;
+  return rect.bottom > window.innerHeight * 0.45;
+}
+
+function findChatMessageInput() {
+  const inputs = Array.from(document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"]'))
+    .filter(isLikelyChatInput)
+    .sort((a, b) => {
+      const aRect = a.getBoundingClientRect();
+      const bRect = b.getBoundingClientRect();
+      return bRect.bottom - aRect.bottom || bRect.width - aRect.width;
+    });
+  return inputs[0] || null;
+}
+
+function findChatSendButton(input) {
+  const inputRect = input.getBoundingClientRect();
+  const roots = [];
+  let current = input.parentElement;
+  while (current && roots.length < 5) {
+    roots.push(current);
+    current = current.parentElement;
+  }
+  roots.push(document.body);
+
+  const candidates = [];
+  roots.forEach(root => {
+    root.querySelectorAll('button, a, [role="button"], span, div').forEach(element => {
+      if (!isActionableElement(element)) return;
+      const text = getClickableText(element);
+      if (!/^(发送|发送消息)$/.test(text)) return;
+      if (/附件|简历|微信|电话|面试|交换/.test(text)) return;
+      const rect = element.getBoundingClientRect();
+      if (rect.bottom < inputRect.top - 80) return;
+      candidates.push({
+        element,
+        distance: Math.abs(rect.left - inputRect.right) + Math.abs(rect.top - inputRect.top),
+      });
+    });
+  });
+
+  return candidates.sort((a, b) => a.distance - b.distance)[0]?.element || null;
+}
+
+function setChatInputValue(input, message) {
+  input.focus();
+  if (input.getAttribute('contenteditable') === 'true') {
+    input.textContent = message;
+  } else {
+    const prototype = input.tagName.toLowerCase() === 'textarea'
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+    if (descriptor?.set) descriptor.set.call(input, message);
+    else input.value = message;
+  }
+
+  input.dispatchEvent(new InputEvent('beforeinput', {
+    bubbles: true,
+    cancelable: true,
+    inputType: 'insertText',
+    data: message,
+  }));
+  input.dispatchEvent(new InputEvent('input', {
+    bubbles: true,
+    inputType: 'insertText',
+    data: message,
+  }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function getChatInputText(input) {
+  if (!input) return '';
+  if (input.getAttribute('contenteditable') === 'true') {
+    return normalizeText(input.textContent || '');
+  }
+  return normalizeText(input.value || '');
+}
+
+async function sendResumeRequestFallbackMessage(contextName = '候选人', reason = '') {
+  const summary = {
+    executed: 0,
+    skipped: 0,
+    reason: '',
+    targetText: `兜底消息：${RESUME_REQUEST_FALLBACK_MESSAGE}`,
+    viaMessage: true,
+    messageText: RESUME_REQUEST_FALLBACK_MESSAGE,
+  };
+  if (!canPerformOperation()) {
+    return { ...summary, blockedBySafety: true, reason: '安全策略限制操作' };
+  }
+
+  await closeResumeOverlayIfPresent();
+  await prepareCommunicationActionsForRequest();
+  const input = findChatMessageInput();
+  if (!input) {
+    return { ...summary, skipped: 1, reason: '未找到聊天输入框' };
+  }
+
+  const actionKey = `request_message_${hashString(`${window.location.pathname}|${contextName}|${RESUME_REQUEST_FALLBACK_MESSAGE}`)}`;
+  if (processedActionKeys.has(actionKey) || findExistingResumeRequestStatus()) {
+    return { ...summary, executed: 1, alreadyRequested: true, reason: '已发送求简历消息' };
+  }
+
+  await sleep(humanDelay());
+  await simulateHumanScroll();
+  await simulateActionDwell();
+  await simulateMouseMove(input);
+  await sleep(500 + Math.random() * 900);
+  simulateHumanClick(input);
+  setChatInputValue(input, RESUME_REQUEST_FALLBACK_MESSAGE);
+  await sleep(600 + Math.random() * 900);
+
+  const sendButton = findChatSendButton(input);
+  let sent = false;
+  if (sendButton) {
+    await simulateMouseMove(sendButton);
+    await sleep(500 + Math.random() * 900);
+    sent = simulateHumanClick(sendButton);
+  } else {
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    sent = true;
+  }
+  await sleep(900 + Math.random() * 900);
+  if (document.contains(input) && getChatInputText(input).includes(RESUME_REQUEST_FALLBACK_MESSAGE)) {
+    sent = false;
+  }
+
+  if (!sent) {
+    return { ...summary, skipped: 1, reason: '求简历兜底消息发送失败' };
+  }
+
+  processedActionKeys.add(actionKey);
+  recordOperation();
+  notifyPopup('resumeActionExecuted', {
+    name: contextName,
+    actionType: 'request',
+    actionLabel: '发送求简历消息',
+  });
+  await simulateActionDwell();
+  return {
+    ...summary,
+    executed: 1,
+    reason: reason ? `未点击到求简历按钮，已发送兜底消息：${reason}` : '未点击到求简历按钮，已发送兜底消息',
+  };
 }
 
 function findCandidateNavigationTargets() {
@@ -2036,10 +2205,13 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
         const requestResult = await clickResumeActionType('request', finalCandidate.name || target?.name || '候选人');
         finalCandidate.resumeRequestExecuted = requestResult.executed > 0;
         finalCandidate.resumeRequestStatus = requestResult.executed > 0
-          ? (requestResult.alreadyRequested ? '已索要简历' : '已点击求简历')
+          ? (requestResult.viaMessage ? '已发送求简历消息' : (requestResult.alreadyRequested ? (requestResult.reason || '已索要简历') : '已点击求简历'))
           : '求简历失败';
         finalCandidate.resumeRequestAt = requestResult.executed > 0 ? new Date().toISOString() : '';
         finalCandidate.resumeRequestButtonText = requestResult.targetText || '';
+        finalCandidate.resumeRequestMethod = requestResult.viaMessage ? 'message' : 'button';
+        finalCandidate.resumeRequestMessage = requestResult.messageText || '';
+        finalCandidate.resumeRequestFallbackReason = requestResult.viaMessage ? requestResult.reason || '' : '';
         finalCandidate.resumeRequestError = requestResult.executed > 0 ? '' : (requestResult.reason || '未找到或未能点击求简历按钮');
         finalCandidate.resumeRequestAvailableActions = requestResult.availableActions || [];
         summary.requested += requestResult.executed;
@@ -2116,7 +2288,15 @@ async function clickResumeActionType(type, contextName = '候选人') {
   const summary = { executed: 0, skipped: 0, reason: '', targetText: '' };
   const existingStatus = type === 'request' ? findExistingResumeRequestStatus() : '';
   if (!target && existingStatus) {
-    return { ...summary, executed: 1, alreadyRequested: true, reason: existingStatus };
+    return {
+      ...summary,
+      executed: 1,
+      alreadyRequested: true,
+      reason: existingStatus,
+      viaMessage: existingStatus === '已发送求简历消息',
+      messageText: existingStatus === '已发送求简历消息' ? RESUME_REQUEST_FALLBACK_MESSAGE : '',
+      targetText: existingStatus === '已发送求简历消息' ? `兜底消息：${RESUME_REQUEST_FALLBACK_MESSAGE}` : '',
+    };
   }
   if (!target && type === 'request') {
     await closeResumeOverlayIfPresent();
@@ -2125,10 +2305,25 @@ async function clickResumeActionType(type, contextName = '候选人') {
   }
   if (!target) {
     const availableActions = findActionTargets(document).map(item => `${item.type}:${item.text}`).slice(0, 8);
+    if (type === 'request') {
+      const fallback = await sendResumeRequestFallbackMessage(contextName, '未找到求简历按钮');
+      if (fallback.executed > 0) {
+        return {
+          ...fallback,
+          availableActions,
+        };
+      }
+      return {
+        ...summary,
+        skipped: 1,
+        reason: `未找到求简历按钮，且兜底消息未发送：${fallback.reason || '未知原因'}`,
+        availableActions,
+      };
+    }
     return {
       ...summary,
       skipped: 1,
-      reason: type === 'request' ? '未找到求简历按钮' : '未找到动作按钮',
+      reason: '未找到动作按钮',
       availableActions,
     };
   }
@@ -2152,6 +2347,10 @@ async function clickResumeActionType(type, contextName = '候选人') {
     });
     await simulateActionDwell();
   } else {
+    if (type === 'request') {
+      const fallback = await sendResumeRequestFallbackMessage(contextName, `求简历按钮“${target.text}”点击未生效`);
+      if (fallback.executed > 0) return fallback;
+    }
     summary.skipped = 1;
     summary.reason = '点击动作未生效';
   }
@@ -2534,6 +2733,9 @@ async function pushCandidateRecommendation(resumeInfo) {
       resumeRequestError: resumeInfo.resumeRequestError || '',
       resumeRequestAt: resumeInfo.resumeRequestAt || '',
       resumeRequestButtonText: resumeInfo.resumeRequestButtonText || '',
+      resumeRequestMethod: resumeInfo.resumeRequestMethod || '',
+      resumeRequestMessage: resumeInfo.resumeRequestMessage || '',
+      resumeRequestFallbackReason: resumeInfo.resumeRequestFallbackReason || '',
       score: resumeInfo.evaluation.score,
       recommendation: resumeInfo.evaluation.recommendation,
       nextStep: resumeInfo.evaluation.nextStep,
@@ -2595,7 +2797,7 @@ function isResumeRequestSatisfied(info) {
   if (score < AGENTS_EVALUATION_RULES.recommendThreshold) return true;
   return Boolean(
     info.resumeRequestExecuted ||
-    /已点击求简历|已索要简历/.test(String(info.resumeRequestStatus || ''))
+    /已点击求简历|已索要简历|已发送求简历消息/.test(String(info.resumeRequestStatus || ''))
   );
 }
 

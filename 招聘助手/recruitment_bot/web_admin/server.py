@@ -782,7 +782,7 @@ def resume_request_satisfied(row: dict[str, Any]) -> bool:
     if score < 40:
         return True
     status = str(raw.get("resumeRequestStatus") or "")
-    return bool(raw.get("resumeRequestExecuted") or status in {"已点击求简历", "已索要简历"})
+    return bool(raw.get("resumeRequestExecuted") or status in {"已点击求简历", "已索要简历", "已发送求简历消息"})
 
 
 def get_range_dataset(scope: str = "configured", start: str | None = None, end: str | None = None) -> dict[str, Any]:

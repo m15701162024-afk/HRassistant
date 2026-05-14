@@ -536,6 +536,8 @@ function buildCandidateDetail(item) {
     `简历类型：${resumeType}`,
     `简历状态：${raw.resumeStatus || '未记录'}`,
     `求简历状态：${raw.resumeRequestStatus || '未记录'}${raw.resumeRequestError ? `｜${raw.resumeRequestError}` : ''}`,
+    raw.resumeRequestMethod ? `求简历方式：${raw.resumeRequestMethod === 'message' ? '发送消息' : '点击按钮'}` : '',
+    raw.resumeRequestMessage ? `求简历话术：${raw.resumeRequestMessage}` : '',
     `学历：${item.education || raw.education || '未识别'}`,
     `经验：${item.experience || raw.experience || '未识别'}`,
     `薪资：${item.expected_salary || raw.expectedSalary || '未识别'}`,
