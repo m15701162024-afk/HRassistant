@@ -1251,13 +1251,13 @@ function findCardClickable(card) {
 }
 
 function extractCandidateName(card) {
-  return extractText(card, [
+  return extractCandidateNameFromText(card?.textContent || '') || cleanCandidateName(extractText(card, [
     '[class*="name"]',
     '[class*="title"]',
     '[class*="geek-name"]',
     'h3',
     'h4',
-  ]) || '候选人';
+  ])) || '候选人';
 }
 
 function getCandidateBrowseKey(card, clickable) {
@@ -1324,10 +1324,10 @@ function scrapeResumeInfo(card, resumeId) {
     info.topLevelText = topLevelText;
     info.rawText = topLevelText;
 
-    info.name = extractText(card, [
+    info.name = cleanCandidateName(extractText(card, [
       '[class*="name"]', '[class*="title"]', '[class*="geek-name"]',
       'h3', 'h4', 'a[class*="name"]',
-    ]);
+    ])) || extractCandidateNameFromText(topLevelText) || extractCandidateNameFromText(card.textContent || '');
     info.role = extractText(card, [
       '[class*="job"]', '[class*="position"]',
       '[class*="expect"]', '[class*="intention"]',
@@ -1365,19 +1365,17 @@ function scrapeResumeInfo(card, resumeId) {
     ]) || topLevelText;
     info.email = extractByRegex(topLevelText, /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
     info.phone = extractByRegex(topLevelText, /(?:\+?86[-\s]?)?1[3-9]\d{9}/);
-    info.qualityScore = calculateResumeQuality(info);
-    info.evaluation = evaluateCandidate(info);
-
     if (!info.name) {
-      const fullText = card.textContent || '';
-      const nameMatch = fullText.match(/^[\u4e00-\u9fa5]{2,4}/);
-      if (nameMatch) info.name = nameMatch[0];
+      info.name = extractCandidateNameFromText(info.summary) || extractCandidateNameFromText(info.rawText);
     }
 
     if (!info.name) {
       console.warn('[招聘助手] 无法提取简历姓名，跳过');
       return null;
     }
+
+    info.qualityScore = calculateResumeQuality(info);
+    info.evaluation = evaluateCandidate(info);
 
     console.log('[招聘助手] 抓取到简历信息:', info.name, info.role);
     return info;
@@ -2704,7 +2702,7 @@ async function scrapeVisibleOnlineResumeInfo(baseCandidate = {}) {
     resumeInfo.role = extractCommunicationRole(topLevelText) || extractExpectedRole(topLevelText) || '';
   }
   if (!resumeInfo.name) {
-    resumeInfo.name = extractChatCandidateName(topLevelText, topLevelText);
+    resumeInfo.name = extractChatCandidateName(topLevelText, topLevelText) || extractCandidateNameFromText(topLevelText);
   }
   resumeInfo = await enhanceCandidateWithPageIntelligence(resumeInfo, document, 'online-resume');
   await ensureChatJobRequirement(resumeInfo);
@@ -2902,16 +2900,67 @@ function extractExpectedRole(text) {
 
 function extractChatCandidateName(panelText, bodyText) {
   const text = panelText || bodyText || '';
+  const direct = extractCandidateNameFromText(text);
+  if (direct) return direct;
   const match = text.match(/^([\u4e00-\u9fa5]{2,4})\s*(?:[·•]|在线|离线|\d{2}岁)/);
-  if (match && !isGenericCandidateName(match[1])) return match[1];
+  if (match && isLikelyCandidateName(match[1])) return match[1];
   const compactMatch = text.match(/^([\u4e00-\u9fa5]{2,4})\s*(?:[红绿]点|[·•]|\s+)?\s*(?:在线|离线|\d{2}岁)/);
-  if (compactMatch && !isGenericCandidateName(compactMatch[1])) return compactMatch[1];
+  if (compactMatch && isLikelyCandidateName(compactMatch[1])) return compactMatch[1];
   const fallback = bodyText.match(/([\u4e00-\u9fa5]{2,4})\s+(?:在线|离线)\s+\d{2}岁/);
-  return fallback && !isGenericCandidateName(fallback[1]) ? fallback[1] : '';
+  return fallback && isLikelyCandidateName(fallback[1]) ? fallback[1] : '';
 }
 
 function isGenericCandidateName(name) {
-  return /^(候选人|牛人|求职者|用户|女士|先生)$/.test(normalizeText(name || ''));
+  return /^(候选人|牛人|求职者|用户|女士|先生|姓名|未识别|未识别姓名)$/.test(normalizeText(name || ''));
+}
+
+function cleanCandidateName(value) {
+  let name = normalizeText(value || '');
+  if (!name) return '';
+  name = name
+    .replace(/^[红绿]点/, '')
+    .replace(/^\d+\s*/, '')
+    .replace(/^\d{1,2}:\d{2}\s*/, '')
+    .replace(/[（(].*?[）)]/g, '')
+    .replace(/\s*(在线|离线|活跃|已读|未读).*$/, '')
+    .replace(/\s*(沟通职位|期望|应聘|投递).*$/, '')
+    .trim();
+  const match = name.match(/^[\u4e00-\u9fa5]{2,4}/);
+  name = match ? match[0] : name;
+  return isLikelyCandidateName(name) ? name : '';
+}
+
+function isLikelyCandidateName(name) {
+  const text = normalizeText(name || '');
+  if (!text || isGenericCandidateName(text)) return false;
+  if (!/^[\u4e00-\u9fa5]{2,4}$/.test(text)) return false;
+  if (/(工程师|开发|分析|运营|产品|经理|实习|岗位|职位|简历|数据|算法|测试|前端|后端|电气|结构|工艺|平台|系统|智能|求职|招聘|在线|离线|本科|硕士|博士|大专|经验|工作|公司|项目|沟通|您好|你好|谢谢|匹配|期待)/.test(text)) return false;
+  return true;
+}
+
+function extractCandidateNameFromText(text) {
+  const normalized = normalizeText(text || '');
+  if (!normalized) return '';
+  const compact = normalized
+    .replace(/^[\s\d红绿点未读已读]+/, '')
+    .replace(/^\d{1,2}:\d{2}\s*/, '')
+    .replace(/^牛人分析器\s*/, '')
+    .trim();
+  const patterns = [
+    /^([\u4e00-\u9fa5]{2,4})(?=\s*(?:[·•]|在线|离线|\d{2}岁|男|女|本科|大专|硕士|博士))/,
+    /^([\u4e00-\u9fa5]{2,4})(?=\s+(?:前端|后端|测试|数据|运营|产品|结构|电气|工艺|算法|嵌入式|Java|C\+\+|DevOps|SQE|PLM|ERP|具身|行业|动力|底盘|机器人))/i,
+    /^([\u4e00-\u9fa5]{2,4})(?=\s+[\u4e00-\u9fa5A-Za-z/+#（）()]+(?:工程师|开发|分析|运营|产品|实习|经理|算法))/,
+    /(?:^|\s)([\u4e00-\u9fa5]{2,4})(?=\s*(?:[·•]|在线|离线|\d{2}岁))/,
+    /(?:姓名|候选人)[:：]\s*([\u4e00-\u9fa5]{2,4})/,
+  ];
+  for (const source of [compact, normalized]) {
+    for (const pattern of patterns) {
+      const match = source.match(pattern);
+      const name = cleanCandidateName(match?.[1] || '');
+      if (name) return name;
+    }
+  }
+  return '';
 }
 
 function extractEducationFromText(text) {

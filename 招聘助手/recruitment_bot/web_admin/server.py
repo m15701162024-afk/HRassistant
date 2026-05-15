@@ -433,6 +433,7 @@ def init_db() -> None:
             """
         )
         cleanup_job_requirements(conn)
+        cleanup_candidate_names(conn)
 
 
 def normalize_host_header(value: str) -> str:
@@ -696,7 +697,13 @@ def normalize_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
     )
     polluted = looks_like_polluted_candidate(cleaned, raw_text)
     if is_generic_candidate_name(name):
-        cleaned["name"] = ""
+        name = ""
+    if not name:
+        name = extract_candidate_name_from_text(" ".join(
+            str(cleaned.get(key) or "")
+            for key in ("topLevelText", "rawText", "summary")
+        ))
+    cleaned["name"] = name
     if polluted:
         evaluation = dict(cleaned.get("evaluation") or {})
         evaluation["score"] = 0
@@ -727,7 +734,59 @@ def sanitize_candidate_snapshot(text: Any) -> str:
 
 
 def is_generic_candidate_name(name: str) -> bool:
-    return name in {"候选人", "牛人", "求职者", "用户", "先生", "女士"}
+    return str(name or "").strip() in {"候选人", "牛人", "求职者", "用户", "先生", "女士", "姓名", "未识别", "未识别姓名"}
+
+
+def is_likely_candidate_name(name: str) -> bool:
+    text = re.sub(r"\s+", "", str(name or "").strip())
+    if is_generic_candidate_name(text):
+        return False
+    if not re.fullmatch(r"[\u4e00-\u9fa5]{2,4}", text):
+        return False
+    blocked = (
+        "工程师|开发|分析|运营|产品|经理|实习|岗位|职位|简历|数据|算法|测试|前端|后端|"
+        "电气|结构|工艺|平台|系统|智能|求职|招聘|在线|离线|本科|硕士|博士|大专|"
+        "经验|工作|公司|项目|沟通|您好|你好|谢谢|匹配|期待"
+    )
+    return not re.search(blocked, text)
+
+
+def clean_candidate_name(value: Any) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    text = re.sub(r"^[红绿]点", "", text)
+    text = re.sub(r"^\d+\s*", "", text)
+    text = re.sub(r"^\d{1,2}:\d{2}\s*", "", text)
+    text = re.sub(r"[（(].*?[）)]", "", text)
+    text = re.sub(r"\s*(在线|离线|活跃|已读|未读).*$", "", text)
+    text = re.sub(r"\s*(沟通职位|期望|应聘|投递).*$", "", text).strip()
+    match = re.match(r"[\u4e00-\u9fa5]{2,4}", text)
+    name = match.group(0) if match else text
+    return name if is_likely_candidate_name(name) else ""
+
+
+def extract_candidate_name_from_text(text: Any) -> str:
+    normalized = " ".join(str(text or "").split()).strip()
+    if not normalized:
+        return ""
+    compact = re.sub(r"^[\s\d红绿点未读已读]+", "", normalized)
+    compact = re.sub(r"^\d{1,2}:\d{2}\s*", "", compact)
+    compact = re.sub(r"^牛人分析器\s*", "", compact).strip()
+    patterns = [
+        r"^([\u4e00-\u9fa5]{2,4})(?=\s*(?:[·•]|在线|离线|\d{2}岁|男|女|本科|大专|硕士|博士))",
+        r"^([\u4e00-\u9fa5]{2,4})(?=\s+(?:前端|后端|测试|数据|运营|产品|结构|电气|工艺|算法|嵌入式|Java|C\+\+|DevOps|SQE|PLM|ERP|具身|行业|动力|底盘|机器人))",
+        r"^([\u4e00-\u9fa5]{2,4})(?=\s+[\u4e00-\u9fa5A-Za-z/+#（）()]+(?:工程师|开发|分析|运营|产品|实习|经理|算法))",
+        r"(?:^|\s)([\u4e00-\u9fa5]{2,4})(?=\s*(?:[·•]|在线|离线|\d{2}岁))",
+        r"(?:姓名|候选人)[:：]\s*([\u4e00-\u9fa5]{2,4})",
+    ]
+    for source in (compact, normalized):
+        for pattern in patterns:
+            match = re.search(pattern, source, flags=re.I)
+            name = clean_candidate_name(match.group(1) if match else "")
+            if name:
+                return name
+    return ""
 
 
 def looks_like_polluted_candidate(candidate: dict[str, Any], raw_text: str) -> bool:
@@ -1045,6 +1104,30 @@ def cleanup_job_requirements(conn: sqlite3.Connection) -> None:
                 item.get("created_at") or now_iso(),
                 item.get("updated_at") or now_iso(),
             ),
+        )
+
+
+def cleanup_candidate_names(conn: sqlite3.Connection) -> None:
+    rows = [dict(row) for row in conn.execute(
+        "SELECT id, name, raw_json FROM candidates WHERE COALESCE(name, '') = '' OR name IN ('候选人','牛人','求职者','用户','先生','女士','未识别','未识别姓名')"
+    ).fetchall()]
+    for row in rows:
+        try:
+            raw = json.loads(row.get("raw_json") or "{}")
+        except json.JSONDecodeError:
+            raw = {}
+        name = extract_candidate_name_from_text(" ".join(
+            str(raw.get(key) or "")
+            for key in ("topLevelText", "rawText", "summary")
+        ))
+        if not name and is_generic_candidate_name(row.get("name", "")):
+            name = ""
+        if name == (row.get("name") or ""):
+            continue
+        raw["name"] = name
+        conn.execute(
+            "UPDATE candidates SET name = ?, raw_json = ?, updated_at = ? WHERE id = ?",
+            (name, json.dumps(raw, ensure_ascii=False), now_iso(), row["id"]),
         )
 
 
