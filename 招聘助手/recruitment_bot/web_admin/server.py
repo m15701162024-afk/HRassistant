@@ -436,6 +436,7 @@ def is_rate_limited(handler: SimpleHTTPRequestHandler) -> bool:
 
 
 def write_common_headers(handler: SimpleHTTPRequestHandler) -> None:
+    setattr(handler, "_common_headers_written", True)
     handler.send_header("Access-Control-Allow-Origin", cors_origin(handler))
     handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token")
     handler.send_header("Access-Control-Allow-Methods", "GET,HEAD,POST,OPTIONS")
@@ -2702,6 +2703,11 @@ def recover_missing_export(filename: str) -> Path | None:
 class Handler(SimpleHTTPRequestHandler):
     server_version = "HRassistant"
     sys_version = ""
+
+    def end_headers(self) -> None:
+        if not getattr(self, "_common_headers_written", False):
+            write_common_headers(self)
+        super().end_headers()
 
     def translate_path(self, path: str) -> str:
         parsed = urllib.parse.urlparse(path)

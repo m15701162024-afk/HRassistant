@@ -72,8 +72,20 @@ function defaultApiBase() {
   return '';
 }
 
+function isServedByWebBackend() {
+  return /^https?:$/i.test(location.protocol);
+}
+
 function getApiBase() {
-  return localStorage.getItem(API_BASE_STORAGE_KEY) || defaultApiBase();
+  const saved = normalizeApiBase(localStorage.getItem(API_BASE_STORAGE_KEY));
+  if (isServedByWebBackend()) {
+    const currentOrigin = normalizeApiBase(location.origin);
+    if (saved && saved !== currentOrigin) {
+      localStorage.removeItem(API_BASE_STORAGE_KEY);
+    }
+    return saved === currentOrigin ? saved : '';
+  }
+  return saved || defaultApiBase();
 }
 
 function normalizeApiBase(value) {
@@ -96,10 +108,16 @@ function apiUrl(path) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(apiUrl(path), {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
+  const requestUrl = apiUrl(path);
+  let response;
+  try {
+    response = await fetch(requestUrl, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    });
+  } catch (err) {
+    throw new Error(`无法连接后端：${requestUrl}。请刷新页面后重试；如果通过内网地址访问，应使用当前地址 ${location.origin}。`);
+  }
   const contentType = response.headers.get('content-type') || '';
   const raw = await response.text();
   let data;
@@ -107,7 +125,7 @@ async function api(path, options = {}) {
     data = raw ? JSON.parse(raw) : {};
   } else {
     const preview = raw.replace(/\s+/g, ' ').slice(0, 80);
-    throw new Error(`接口返回的不是 JSON。请确认后端服务已启动且后端地址正确。当前请求：${apiUrl(path)}；返回：${preview}`);
+    throw new Error(`接口返回的不是 JSON。请确认后端服务已启动且后端地址正确。当前请求：${requestUrl}；返回：${preview}`);
   }
   if (!response.ok || data.success === false) {
     throw new Error(data.message || '请求失败');
@@ -915,7 +933,10 @@ function bindEvents() {
   });
   $('saveApiBaseBtn').addEventListener('click', () => {
     const value = normalizeApiBase($('apiBaseInput').value);
-    if (value) {
+    if (isServedByWebBackend() && value && value !== normalizeApiBase(location.origin)) {
+      localStorage.removeItem(API_BASE_STORAGE_KEY);
+      toast(`当前通过 Web 后台访问，已使用当前地址 ${location.origin}`, 'warning');
+    } else if (value && value !== normalizeApiBase(location.origin)) {
       localStorage.setItem(API_BASE_STORAGE_KEY, value);
     } else {
       localStorage.removeItem(API_BASE_STORAGE_KEY);
