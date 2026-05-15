@@ -150,6 +150,10 @@ function escapeHtml(value) {
   }[char]));
 }
 
+function normalizeText(value) {
+  return String(value || '').replace(/\s+/g, '').toLowerCase();
+}
+
 function row(cells) {
   return `<tr>${cells.map(cell => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`;
 }
@@ -739,7 +743,10 @@ function renderTables() {
       <td>${escapeHtml(item.recommendation)}</td>
       <td>${escapeHtml(item.source)}</td>
       <td>${escapeHtml(item.account_name)}</td>
-      <td><button class="secondary small" data-candidate-index="${index}">查看</button></td>
+      <td>
+        <button class="secondary small" data-candidate-index="${index}">查看</button>
+        <button class="secondary small" data-candidate-job-index="${index}">岗位库</button>
+      </td>
     </tr>
   `).join('') || row(['-', '暂无数据', '-', '-', '-', '-', '-', '-', '-', '-', '-']);
 
@@ -778,13 +785,24 @@ function renderTables() {
     });
   });
 
+  document.querySelectorAll('[data-candidate-job-index]').forEach(button => {
+    button.addEventListener('click', () => {
+      const item = state.candidates[Number(button.dataset.candidateJobIndex)];
+      openJobEditorForRole(item?.role || '', item?.account_name || '');
+    });
+  });
+
   $('jobRequirementList').innerHTML = state.jobRequirements.slice(0, 100).map((item, index) => `
     <article class="report">
       <div>
         <h3>${escapeHtml(item.role || '未识别岗位')}</h3>
         <p>${escapeHtml(item.source || '')}｜${escapeHtml(item.account_name || '')}｜${escapeHtml(item.updated_at || '')}</p>
       </div>
-      <button class="secondary small" data-job-index="${index}">查看要求</button>
+      <div class="report-actions">
+        <button class="secondary small" data-job-index="${index}">查看要求</button>
+        <button class="secondary small" data-job-edit-index="${index}">编辑</button>
+        <button class="secondary small" data-job-match-index="${index}">匹配候选人</button>
+      </div>
     </article>
   `).join('') || '<p class="empty">暂无岗位要求。插件首次遇到新岗位时会尝试打开职位详情并保存。</p>';
 
@@ -794,6 +812,45 @@ function renderTables() {
       openDialog(`${item.role || '岗位要求'}`, item.requirement || '');
     });
   });
+
+  document.querySelectorAll('[data-job-edit-index]').forEach(button => {
+    button.addEventListener('click', () => {
+      const item = state.jobRequirements[Number(button.dataset.jobEditIndex)];
+      fillJobEditor(item);
+    });
+  });
+
+  document.querySelectorAll('[data-job-match-index]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const item = state.jobRequirements[Number(button.dataset.jobMatchIndex)];
+      await matchJobRequirement(item);
+    });
+  });
+}
+
+function fillJobEditor(item = {}) {
+  showModule('jobs');
+  $('jobRoleInput').value = item.role || '';
+  $('jobSourceInput').value = item.source || '手动录入';
+  $('jobAccountInput').value = item.account_name || '';
+  $('jobRequirementInput').value = item.requirement || '';
+  $('jobRoleInput').focus();
+  toast('已载入岗位要求，可直接编辑后保存');
+}
+
+function openJobEditorForRole(role = '', account = '') {
+  showModule('jobs');
+  const existing = state.jobRequirements.find(item => normalizeText(item.role) === normalizeText(role));
+  if (existing) {
+    fillJobEditor(existing);
+  } else {
+    $('jobRoleInput').value = role || '';
+    $('jobSourceInput').value = '手动录入';
+    $('jobAccountInput').value = account || '';
+    $('jobRequirementInput').value = '';
+    $('jobRequirementInput').focus();
+    toast('岗位库中暂无该岗位，请补充 JD 后保存', 'warning');
+  }
 }
 
 function buildCandidateDetail(item) {
@@ -949,6 +1006,15 @@ async function matchAllJobRequirements() {
   });
   await loadData();
   toast(`已重新匹配 ${result.updated || 0} 位候选人，跳过 ${result.skipped || 0} 位`);
+}
+
+async function matchJobRequirement(item = {}) {
+  const result = await api('/api/job-requirements/match-candidates', {
+    method: 'POST',
+    body: JSON.stringify({ role: item.role || '', account: state.filters.account }),
+  });
+  await loadData();
+  toast(`${item.role || '该岗位'} 已匹配 ${result.updated || 0} 位候选人`);
 }
 
 async function previewSummary() {

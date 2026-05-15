@@ -432,6 +432,7 @@ def init_db() -> None:
             );
             """
         )
+        cleanup_job_requirements(conn)
 
 
 def normalize_host_header(value: str) -> str:
@@ -792,6 +793,10 @@ def normalize_account_name(account_name: Any) -> str:
     return re.sub(r"\s+", "", str(account_name or "").strip().lower())
 
 
+def job_requirement_role_key(role: str) -> str:
+    return normalize_role(role)
+
+
 def account_label(account_name: Any) -> str:
     return str(account_name or "").strip() or "未识别"
 
@@ -888,9 +893,52 @@ def delete_managed_account(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def scoped_role_key(role: str, account_name: Any = "") -> str:
-    role_key = normalize_role(role)
-    account_key = normalize_account_name(account_name)
-    return f"{account_key}::{role_key}" if account_key else role_key
+    return job_requirement_role_key(role)
+
+
+def sanitize_job_requirement_text(requirement: str) -> str:
+    text = re.sub(r"\s+", " ", str(requirement or "")).strip()
+    if not text:
+        return ""
+    text = re.sub(
+        r"(工作内容|工作职责|岗位职责|职位描述|工作要求|任职要求|岗位要求|职位要求)",
+        r" \1 ",
+        text,
+    )
+    stop_markers = [
+        "薪资详情", "职位福利", "工作地点", "公司介绍", "工商信息", "竞争力分析",
+        "相似职位", "推荐职位", "沟通职位", "立即沟通", "在线沟通", "全部职位",
+        "新招呼", "沟通中", "账号权益", "招聘规范", "我的客服", "招聘数据",
+    ]
+
+    def section(start_titles: list[str], stop_titles: list[str]) -> str:
+        start_index = -1
+        title = ""
+        for candidate_title in start_titles:
+            index = text.find(candidate_title)
+            if index >= 0:
+                start_index = index
+                title = candidate_title
+                break
+        if start_index < 0:
+            return ""
+        body_start = start_index + len(title)
+        stops = [(text.find(marker, body_start), marker) for marker in stop_titles if text.find(marker, body_start) >= 0]
+        end = sorted(stops, key=lambda item: item[0])[0][0] if stops else min(len(text), body_start + 2600)
+        body = re.sub(r"^[：:，,\s-]+", "", text[body_start:end]).strip()
+        if len(body) < 20:
+            return ""
+        return f"{title}：{body[:3000]}"
+
+    content = section(
+        ["工作内容", "工作职责", "岗位职责", "职位描述"],
+        ["工作要求", "任职要求", "岗位要求", "职位要求", *stop_markers],
+    )
+    requirement_text = section(
+        ["工作要求", "任职要求", "职位要求", "岗位要求"],
+        stop_markers,
+    )
+    return "\n".join(part for part in (content, requirement_text) if part).strip()[:12000]
 
 
 def is_valid_job_requirement_text(requirement: str) -> bool:
@@ -900,19 +948,23 @@ def is_valid_job_requirement_text(requirement: str) -> bool:
     has_job_section = bool(re.search(r"工作内容|工作职责|岗位职责|职位描述|工作要求|任职要求|岗位要求|职位要求", text))
     polluted_markers = [
         "新招呼", "沟通中", "全部职位", "账号权益", "招聘规范", "BOSS您好", "Boss，您好",
-        "您好，我叫", "进一步沟通", "期待进一步", "我的简历", "详细简历",
+        "您好，我叫", "您好，我是", "您好！我是", "你好，我是", "进一步沟通",
+        "期待进一步", "我的简历", "详细简历", "完全匹配", "挺适合",
+        "对贵公司", "对贵岗位", "方便发一份您的简历",
     ]
     if any(marker in text for marker in polluted_markers):
         return False
     repeated_roles = set(re.findall(r"[\u4e00-\u9fa5A-Za-z/+-]+(?:工程师|分析|开发|产品|运营)[^\s，。|]{0,18}\(J\d+\)", text))
     if len(repeated_roles) >= 2:
         return False
-    return has_job_section
+    has_content = bool(re.search(r"工作内容|工作职责|岗位职责|职位描述", text))
+    has_requirement = bool(re.search(r"工作要求|任职要求|职位要求", text))
+    return has_job_section and (has_content or has_requirement)
 
 
 def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     role = str(payload.get("role") or "").strip()
-    requirement = str(payload.get("requirement") or payload.get("jobRequirement") or "").strip()
+    requirement = sanitize_job_requirement_text(payload.get("requirement") or payload.get("jobRequirement") or "")
     account_name = str(payload.get("accountName") or payload.get("account_name") or "").strip()
     if not role:
         return {"success": False, "message": "岗位名称不能为空"}
@@ -947,6 +999,53 @@ def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
         )
     matched = match_candidates_with_job_requirements(role, account_name)
     return {"success": True, "id": item_id, "matchedCandidates": matched["updated"]}
+
+
+def cleanup_job_requirements(conn: sqlite3.Connection) -> None:
+    rows = [dict(row) for row in conn.execute("SELECT * FROM job_requirements").fetchall()]
+    if not rows:
+        return
+    by_role: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        role = str(row.get("role") or "").strip()
+        requirement = sanitize_job_requirement_text(row.get("requirement") or "")
+        if not role or not is_valid_job_requirement_text(requirement):
+            continue
+        key = job_requirement_role_key(role)
+        existing = by_role.get(key)
+        if (
+            not existing
+            or len(requirement) > len(str(existing.get("requirement") or ""))
+            or str(row.get("updated_at") or "") > str(existing.get("updated_at") or "")
+        ):
+            by_role[key] = {
+                **row,
+                "id": hashlib.sha1(key.encode()).hexdigest(),
+                "normalized_role": key,
+                "requirement": requirement[:12000],
+            }
+
+    conn.execute("DELETE FROM job_requirements")
+    for item in by_role.values():
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO job_requirements
+            (id, role, normalized_role, source, account_name, requirement, source_url, raw_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.get("id"),
+                item.get("role", ""),
+                item.get("normalized_role", ""),
+                item.get("source", ""),
+                item.get("account_name", ""),
+                item.get("requirement", ""),
+                item.get("source_url", ""),
+                item.get("raw_json", ""),
+                item.get("created_at") or now_iso(),
+                item.get("updated_at") or now_iso(),
+            ),
+        )
 
 
 def get_job_requirement(role: str, account_name: str = "") -> dict[str, Any] | None:
@@ -1937,7 +2036,8 @@ def clean_page_intelligence_result(parsed: dict[str, Any]) -> dict[str, Any]:
             if key in {"summary", "topLevelText"}:
                 cleaned[key] = text[:1500]
             elif key == "jobRequirement":
-                cleaned[key] = text[:12000]
+                requirement = sanitize_job_requirement_text(text)
+                cleaned[key] = requirement[:12000] if is_valid_job_requirement_text(requirement) else ""
             else:
                 cleaned[key] = text[:260]
     return cleaned

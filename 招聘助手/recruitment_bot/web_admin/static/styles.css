@@ -574,6 +574,12 @@ th {
   padding: 12px;
 }
 .report p { margin-top: 5px; color: var(--muted); font-size: 12px; }
+.report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
 
 .empty { color: var(--muted); font-size: 13px; }
 

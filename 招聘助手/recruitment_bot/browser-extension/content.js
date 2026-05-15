@@ -84,7 +84,7 @@ const RESUME_ACTIONS = {
   },
   request: {
     label: '索要简历',
-    keywords: ['索要简历', '求简历', '请求简历', '要简历', '获取简历', '请求发送简历', '请发简历', '让TA发简历', '让他发简历', '让她发简历', '索要附件', '求附件', '发送附件简历'],
+    keywords: ['索要简历', '求简历', '请求简历', '要简历', '获取简历', '请求发送简历', '请发简历', '请发送简历', '发简历', '让TA发简历', '让他发简历', '让她发简历', '索要附件', '求附件', '求附件简历', '发送附件简历'],
     blockedKeywords: ['已索要', '已请求', '已获取', '等待对方'],
   },
 };
@@ -141,7 +141,8 @@ async function init() {
 async function loadJobRequirements() {
   return new Promise((resolve) => {
     chrome.storage.local.get(['jobRequirements'], (result) => {
-      cachedJobRequirements = result.jobRequirements || {};
+      cachedJobRequirements = dedupeCachedJobRequirements(result.jobRequirements || {});
+      chrome.storage.local.set({ jobRequirements: cachedJobRequirements });
       resolve();
     });
   });
@@ -757,8 +758,11 @@ async function ensureChatJobRequirement(resumeInfo) {
       await simulateMouseMove(trigger);
       await sleep(900 + Math.random() * 1400);
       simulateHumanClick(trigger);
-      await sleep(1800 + Math.random() * 2200);
-      requirement = extractJobRequirementFromPage(document.body, resumeInfo.role);
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 9000 && !requirement) {
+        await sleep(600 + Math.random() * 700);
+        requirement = extractJobRequirementFromPage(document.body, resumeInfo.role);
+      }
     }
   }
 
@@ -794,10 +798,13 @@ async function openJobDetailAndExtractRequirement(card, role) {
   await simulateMouseMove(trigger);
   await sleep(500 + Math.random() * 900);
   simulateHumanClick(trigger);
-  await sleep(1800 + Math.random() * 2200);
-  const requirement = extractJobRequirementFromPage(document.body, role);
-  if (requirement && normalizeText(document.body.textContent || '') !== previousText) {
-    return requirement;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 9000) {
+    await sleep(600 + Math.random() * 700);
+    const requirement = extractJobRequirementFromPage(document.body, role);
+    if (requirement && normalizeText(document.body.textContent || '') !== previousText) {
+      return requirement;
+    }
   }
   return '';
 }
@@ -818,8 +825,17 @@ function findJobDetailTrigger(card, role) {
   }
   const roleText = normalizeText(role || '');
   if (!roleText) return null;
-  const elements = Array.from(card.querySelectorAll('a, button, span, div'));
-  return elements.find(el => isActionableElement(el) && normalizeText(el.textContent || '').includes(roleText)) || null;
+  const roots = [card, document].filter(Boolean);
+  for (const root of roots) {
+    const elements = Array.from(root.querySelectorAll?.('a, button, span, div, [role="button"]') || []);
+    const target = elements
+      .filter(isActionableElement)
+      .map(el => ({ el, text: normalizeText(el.textContent || '') }))
+      .filter(item => item.text.includes(roleText) || (item.text.includes('沟通职位') && item.text.length <= 120))
+      .sort((a, b) => a.text.length - b.text.length)[0]?.el;
+    if (target) return target;
+  }
+  return null;
 }
 
 // ============================================================
@@ -929,7 +945,7 @@ function getClickableText(element) {
 }
 
 function matchResumeAction(text, element) {
-  if (!text || text.length > 40) return null;
+  if (!text || text.length > 80) return null;
 
   for (const [type, config] of Object.entries(RESUME_ACTIONS)) {
     if (config.blockedKeywords.some(keyword => text.includes(keyword))) {
@@ -961,8 +977,26 @@ function getActionKey(type, element, text) {
   return `${type}_${hashString(`${path}|${text}|${position}`)}`;
 }
 
-function findExistingResumeRequestStatus() {
-  const text = normalizeText(document.body.textContent || '');
+function getActiveConversationText() {
+  const panel = findCandidateSummaryPanel();
+  if (!panel) return '';
+  const rect = panel.getBoundingClientRect();
+  const visibleText = Array.from(document.querySelectorAll('section, article, div, [class*="chat"], [class*="message"]'))
+    .filter(isActionableElement)
+    .map(element => {
+      const itemRect = element.getBoundingClientRect();
+      const text = normalizeText(element.innerText || element.textContent || '');
+      return { text, rect: itemRect };
+    })
+    .filter(item => item.text && item.text.length <= 3000 && item.rect.left >= rect.left - 80 && item.rect.top >= rect.top - 120)
+    .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left)
+    .map(item => item.text)
+    .join(' ');
+  return normalizeText(`${panel.textContent || ''} ${visibleText}`).slice(0, 5000);
+}
+
+function findExistingResumeRequestStatus(scopeText = '') {
+  const text = normalizeText(scopeText || getActiveConversationText());
   if (/已索要|已请求|已求简历|等待对方.*简历|简历.*等待对方/.test(text)) {
     return '已索要简历';
   }
@@ -1095,7 +1129,7 @@ function getChatInputText(input) {
   return normalizeText(input.value || '');
 }
 
-async function sendResumeRequestFallbackMessage(contextName = '候选人', reason = '') {
+async function sendResumeRequestFallbackMessage(contextName = '候选人', reason = '', contextKey = '') {
   const summary = {
     executed: 0,
     skipped: 0,
@@ -1115,7 +1149,7 @@ async function sendResumeRequestFallbackMessage(contextName = '候选人', reaso
     return { ...summary, skipped: 1, reason: '未找到聊天输入框' };
   }
 
-  const actionKey = `request_message_${hashString(`${window.location.pathname}|${contextName}|${RESUME_REQUEST_FALLBACK_MESSAGE}`)}`;
+  const actionKey = `request_message_${hashString(`${window.location.pathname}|${contextKey || contextName}|${RESUME_REQUEST_FALLBACK_MESSAGE}`)}`;
   if (processedActionKeys.has(actionKey) || findExistingResumeRequestStatus()) {
     return { ...summary, executed: 1, alreadyRequested: true, reason: '已发送求简历消息' };
   }
@@ -1363,20 +1397,34 @@ function normalizeAccountKey(accountName) {
 }
 
 function jobRequirementCacheKey(role, accountName = '') {
-  const roleKey = normalizeRoleKey(role);
-  const accountKey = normalizeAccountKey(accountName);
-  return accountKey ? `${accountKey}::${roleKey}` : roleKey;
+  return normalizeRoleKey(role);
+}
+
+function dedupeCachedJobRequirements(items = {}) {
+  const deduped = {};
+  Object.values(items || {}).forEach((item) => {
+    if (!item?.role || !item?.requirement || !looksLikeJobRequirement(item.requirement, item.role)) return;
+    const key = jobRequirementCacheKey(item.role);
+    const existing = deduped[key];
+    const existingLength = normalizeText(existing?.requirement || '').length;
+    const nextLength = normalizeText(item.requirement || '').length;
+    if (!existing || nextLength > existingLength || String(item.updatedAt || '') > String(existing.updatedAt || '')) {
+      deduped[key] = { ...item, accountName: item.accountName || '' };
+    }
+  });
+  return deduped;
 }
 
 function cacheJobRequirement(role, requirement, meta = {}) {
-  const key = jobRequirementCacheKey(role, meta.accountName);
+  const key = jobRequirementCacheKey(role);
   if (!key || !requirement || requirement.length < 20) return;
-  if (!looksLikeJobRequirement(requirement)) return;
+  const cleanedRequirement = extractStructuredJobRequirementText(requirement, role);
+  if (!looksLikeJobRequirement(cleanedRequirement, role)) return;
   const existing = cachedJobRequirements[key];
-  if (existing && existing.requirement && existing.requirement.length >= requirement.length) return;
+  if (existing && existing.requirement && existing.requirement.length >= cleanedRequirement.length) return;
   const item = {
     role,
-    requirement: requirement.slice(0, 12000),
+    requirement: cleanedRequirement.slice(0, 12000),
     source: meta.source || 'BOSS直聘',
     accountName: meta.accountName || '',
     sourceUrl: meta.sourceUrl || window.location.href,
@@ -1391,7 +1439,14 @@ function cacheJobRequirement(role, requirement, meta = {}) {
 }
 
 function extractJobRequirementFromPage(card, role) {
+  const detailContainer = findLikelyJobDetailContainer(role, card);
+  const detailText = extractStructuredJobRequirementText(detailContainer, role);
+  if (detailText) return detailText;
+
   const selectors = [
+    '[class*="job-sec"]',
+    '[class*="job-primary"]',
+    '[class*="job-box"]',
     '[class*="job-detail"]',
     '[class*="job-desc"]',
     '[class*="job-require"]',
@@ -1438,7 +1493,7 @@ function extractStructuredJobRequirementText(source, role = '') {
   if (!sections.length) return '';
 
   const result = sections.join('\n').slice(0, 12000).trim();
-  if (!looksLikeJobRequirement(result)) return '';
+  if (!looksLikeJobRequirement(result, role)) return '';
   if (isPollutedJobRequirementText(result, role)) return '';
   return result;
 }
@@ -1450,7 +1505,7 @@ const JOB_REQUIREMENT_STOP_MARKERS = [
 ];
 
 function extractJobTextSection(text, startTitles, stopTitles) {
-  const start = findEarliestMarker(text, startTitles, 0);
+  const start = findPreferredMarker(text, startTitles, 0);
   if (!start) return '';
   const contentStart = start.index + start.title.length;
   const stop = findEarliestMarker(text, stopTitles, contentStart);
@@ -1458,6 +1513,14 @@ function extractJobTextSection(text, startTitles, stopTitles) {
   const body = text.slice(contentStart, end).replace(/^[：:，,\s-]+/, '').trim();
   if (body.length < 20) return '';
   return `${start.title}：${body}`.slice(0, 3000);
+}
+
+function findPreferredMarker(text, markers, fromIndex = 0) {
+  for (const title of markers) {
+    const index = text.indexOf(title, fromIndex);
+    if (index >= 0) return { title, index };
+  }
+  return null;
 }
 
 function findEarliestMarker(text, markers, fromIndex = 0) {
@@ -1471,10 +1534,47 @@ function isPollutedJobRequirementText(text, role = '') {
   const normalized = normalizeText(text || '');
   const pageMarkers = ['新招呼', '沟通中', '全部职位', '账号权益', '招聘规范', '推荐牛人', '招聘数据']
     .filter(marker => normalized.includes(marker)).length;
-  const chatMarkers = ['BOSS您好', 'Boss，您好', '您好，我叫', '方便沟通', '进一步沟通', '期待进一步', '我的简历', '详细简历']
+  const chatMarkers = [
+    'BOSS您好', 'Boss，您好', '您好，我叫', '您好，我是', '您好！我是', '你好，我是',
+    '方便沟通', '进一步沟通', '期待进一步', '我的简历', '详细简历',
+    '完全匹配', '挺适合', '对贵公司', '对贵岗位', '方便发一份您的简历',
+  ]
     .filter(marker => normalized.includes(marker)).length;
   const repeatedRoles = new Set(normalized.match(/[\u4e00-\u9fa5A-Za-z/+-]+(?:工程师|分析|开发|产品|运营)[^\s，。|]{0,18}\(J\d+\)/g) || []).size;
   return pageMarkers >= 1 || chatMarkers >= 1 || repeatedRoles >= 2;
+}
+
+function findLikelyJobDetailContainer(role = '', scope = document) {
+  const roleText = normalizeText(role || '');
+  const documentRoots = Array.from(document.querySelectorAll([
+    '[role="dialog"]',
+    '[class*="dialog"]',
+    '[class*="modal"]',
+    '[class*="drawer"]',
+    '[class*="popup"]',
+    '[class*="job-detail"]',
+    '[class*="job-primary"]',
+    '[class*="job-sec"]',
+    '[class*="detail-content"]',
+    'section',
+    'article',
+  ].join(',')));
+  const scopedRoots = scope?.querySelectorAll
+    ? Array.from(scope.querySelectorAll('section, article, [class*="job"], [class*="detail"]'))
+    : [];
+  return [...documentRoots, ...scopedRoots]
+    .filter(isActionableElement)
+    .map(element => {
+      const text = normalizeText(element.innerText || element.textContent || '');
+      const hasContent = /(工作内容|工作职责|岗位职责|职位描述)/.test(text);
+      const hasRequirement = /(工作要求|任职要求|职位要求)/.test(text);
+      const hasGenericRequirement = /岗位要求/.test(text) && (hasContent || hasRequirement);
+      const roleScore = roleText && text.includes(roleText) ? 3 : 0;
+      const sectionScore = (hasContent ? 4 : 0) + (hasRequirement ? 4 : 0) + (hasGenericRequirement ? 1 : 0);
+      return { element, text, score: roleScore + sectionScore };
+    })
+    .filter(item => item.score >= 4 && item.text.length >= 40 && item.text.length <= 16000 && !isPollutedJobRequirementText(item.text, role))
+    .sort((a, b) => b.score - a.score || a.text.length - b.text.length)[0]?.element || null;
 }
 
 function extractTextLong(container, selectors, options = {}) {
@@ -1493,12 +1593,14 @@ function extractTextLong(container, selectors, options = {}) {
   return '';
 }
 
-function looksLikeJobRequirement(text) {
+function looksLikeJobRequirement(text, role = '') {
   if (!text || text.length < 40) return false;
-  if (isPollutedJobRequirementText(text)) {
+  if (isPollutedJobRequirementText(text, role)) {
     return false;
   }
-  return /(工作内容|工作要求|岗位职责|职位描述|任职要求|岗位要求|工作职责|职位要求)/.test(text);
+  const hasContent = /(工作内容|工作职责|岗位职责|职位描述)/.test(text);
+  const hasRequirement = /(工作要求|任职要求|职位要求)/.test(text);
+  return hasContent || hasRequirement;
 }
 
 function extractText(container, selectors) {
@@ -2397,7 +2499,12 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
           await closeResumeOverlayIfPresent();
           await prepareCommunicationActionsForRequest();
         }
-        const requestResult = await clickResumeActionType('request', finalCandidate.name || target?.name || '候选人');
+        const requestContextKey = getCurrentWorkflowKey(finalCandidate);
+        const requestResult = await clickResumeActionType(
+          'request',
+          finalCandidate.name || target?.name || '候选人',
+          { contextKey: requestContextKey }
+        );
         finalCandidate.resumeRequestExecuted = requestResult.executed > 0;
         finalCandidate.resumeRequestStatus = requestResult.executed > 0
           ? (requestResult.viaMessage ? '已发送求简历消息' : (requestResult.alreadyRequested ? (requestResult.reason || '已索要简历') : '已点击求简历'))
@@ -2478,8 +2585,10 @@ async function acceptAttachmentResumeIfPresent(contextName = '候选人') {
   return clickResumeActionType('accept', contextName);
 }
 
-async function clickResumeActionType(type, contextName = '候选人') {
-  let target = findActionTargets(document).find(item => item.type === type && !processedActionKeys.has(item.key));
+async function clickResumeActionType(type, contextName = '候选人', options = {}) {
+  const contextKey = normalizeText(options.contextKey || '');
+  const effectiveActionKey = (item) => contextKey ? `${item.key}_${hashString(contextKey)}` : item.key;
+  let target = findActionTargets(document).find(item => item.type === type && !processedActionKeys.has(effectiveActionKey(item)));
   const summary = { executed: 0, skipped: 0, reason: '', targetText: '' };
   const existingStatus = type === 'request' ? findExistingResumeRequestStatus() : '';
   if (!target && existingStatus) {
@@ -2496,12 +2605,12 @@ async function clickResumeActionType(type, contextName = '候选人') {
   if (!target && type === 'request') {
     await closeResumeOverlayIfPresent();
     await prepareCommunicationActionsForRequest();
-    target = findActionTargets(document).find(item => item.type === type && !processedActionKeys.has(item.key));
+    target = findActionTargets(document).find(item => item.type === type && !processedActionKeys.has(effectiveActionKey(item)));
   }
   if (!target) {
     const availableActions = findActionTargets(document).map(item => `${item.type}:${item.text}`).slice(0, 8);
     if (type === 'request') {
-      const fallback = await sendResumeRequestFallbackMessage(contextName, '未找到求简历按钮');
+      const fallback = await sendResumeRequestFallbackMessage(contextName, '未找到求简历按钮', contextKey);
       if (fallback.executed > 0) {
         return {
           ...fallback,
@@ -2532,7 +2641,7 @@ async function clickResumeActionType(type, contextName = '候选人') {
   const success = simulateHumanClick(target.button);
   summary.targetText = target.text;
   if (success) {
-    processedActionKeys.add(target.key);
+    processedActionKeys.add(effectiveActionKey(target));
     recordOperation();
     summary.executed = 1;
     notifyPopup('resumeActionExecuted', {
@@ -2543,7 +2652,7 @@ async function clickResumeActionType(type, contextName = '候选人') {
     await simulateActionDwell();
   } else {
     if (type === 'request') {
-      const fallback = await sendResumeRequestFallbackMessage(contextName, `求简历按钮“${target.text}”点击未生效`);
+      const fallback = await sendResumeRequestFallbackMessage(contextName, `求简历按钮“${target.text}”点击未生效`, contextKey);
       if (fallback.executed > 0) return fallback;
     }
     summary.skipped = 1;
