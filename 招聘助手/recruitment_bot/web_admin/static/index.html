@@ -25,6 +25,7 @@
     <button class="module-tab" data-module="delivery">钉钉推送</button>
     <button class="module-tab" data-module="automation">自动化策略</button>
     <button class="module-tab" data-module="qa">问答 Agent</button>
+    <button class="module-tab" data-module="security">安全白名单</button>
     <button class="module-tab" data-module="settings">系统配置</button>
   </nav>
 
@@ -123,6 +124,46 @@
         <button id="addAccountBtn" class="secondary">新增/更新账号</button>
       </div>
       <div id="managedAccountList" class="account-list"></div>
+    </section>
+
+    <section class="panel module-section" data-module="security">
+      <div class="panel-title">
+        <h2>安全白名单</h2>
+        <span id="securityStatus" class="badge">未加载</span>
+      </div>
+      <div class="security-summary" id="securityRuntimeInfo"></div>
+      <div class="form-grid security-grid">
+        <label class="textarea-field">
+          Host 白名单
+          <textarea id="securityAllowedHosts" rows="5" placeholder="每行一个域名或 IP，例如：10.100.60.5"></textarea>
+        </label>
+        <label class="textarea-field">
+          Origin 白名单
+          <textarea id="securityAllowedOrigins" rows="5" placeholder="每行一个来源，例如：http://10.100.60.5:8787"></textarea>
+        </label>
+        <label class="textarea-field">
+          客户端 IP 白名单
+          <textarea id="securityAllowedClientIps" rows="5" placeholder="留空允许所有客户端；支持 10.100.60.0/24"></textarea>
+        </label>
+        <label>
+          每分钟接口请求上限
+          <input id="securityRateLimit" type="number" min="0" max="10000" />
+        </label>
+        <label>
+          JSON 请求体上限（字节）
+          <input id="securityMaxJsonBodyBytes" type="number" min="1024" max="20971520" step="1024" />
+        </label>
+        <label class="checkbox-row">
+          <input id="securityKeepCurrentAccess" type="checkbox" checked />
+          保存时保留当前访问地址
+        </label>
+      </div>
+      <div class="actions">
+        <button id="saveSecurityBtn">保存白名单</button>
+        <button id="addCurrentSecurityBtn" class="secondary">加入当前访问地址</button>
+        <button id="loadSecurityBtn" class="secondary">重新加载</button>
+      </div>
+      <p class="hint">Host 控制允许访问后台的域名/IP；Origin 控制浏览器跨域来源；客户端 IP 留空表示不限制内网访问，填写后只允许列表内 IP 或网段。</p>
     </section>
 
     <section class="stats-grid module-section active" data-module="overview">

@@ -10,6 +10,7 @@ const state = {
   conversations: [],
   accounts: [],
   behaviorPolicy: {},
+  security: {},
   filters: {
     q: '',
     source: '',
@@ -180,6 +181,26 @@ function queryString() {
   return params.toString();
 }
 
+function linesFromText(value) {
+  return String(value || '')
+    .split(/\n|,|，/)
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function setTextareaLines(id, items) {
+  const el = $(id);
+  if (el) el.value = (items || []).join('\n');
+}
+
+function appendUniqueTextareaLine(id, value) {
+  const text = String(value || '').trim();
+  if (!text) return;
+  const items = linesFromText($(id).value);
+  if (!items.includes(text)) items.push(text);
+  setTextareaLines(id, items);
+}
+
 async function loadHealth() {
   try {
     await api('/api/health');
@@ -275,6 +296,60 @@ async function loadAccounts() {
   state.accounts = result.items || [];
   renderAccountScope();
   renderManagedAccountList();
+}
+
+async function loadSecurityConfig() {
+  const result = await api('/api/security/allowlist');
+  state.security = result;
+  const editable = result.editable || {};
+  const effective = result.effective || {};
+  const current = result.current || {};
+  setTextareaLines('securityAllowedHosts', editable.allowedHosts || []);
+  setTextareaLines('securityAllowedOrigins', editable.allowedOrigins || []);
+  setTextareaLines('securityAllowedClientIps', editable.allowedClientIps || []);
+  $('securityRateLimit').value = editable.rateLimitPerMinute ?? effective.rateLimitPerMinute ?? 240;
+  $('securityMaxJsonBodyBytes').value = editable.maxJsonBodyBytes ?? effective.maxJsonBodyBytes ?? 1048576;
+  $('securityKeepCurrentAccess').checked = true;
+  $('securityStatus').textContent = effective.clientIpAllowlistEnabled ? 'IP已限制' : '内网开放';
+  $('securityStatus').className = effective.clientIpAllowlistEnabled ? 'badge warning' : 'badge ok';
+  $('securityRuntimeInfo').innerHTML = [
+    ['当前 Host', current.host || '-'],
+    ['当前 Origin', current.origin || '-'],
+    ['当前客户端 IP', current.clientIp || '-'],
+    ['生效 Host 数', (effective.allowedHosts || []).length],
+    ['生效 Origin 数', (effective.allowedOrigins || []).length],
+    ['配置文件', result.filePath || '-'],
+  ].map(([label, value]) => `
+    <div>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `).join('');
+}
+
+function addCurrentSecurityAccess() {
+  const current = state.security.current || {};
+  appendUniqueTextareaLine('securityAllowedHosts', current.host);
+  appendUniqueTextareaLine('securityAllowedOrigins', current.origin);
+  toast('已加入当前访问 Host/Origin');
+}
+
+async function saveSecurityConfig() {
+  const payload = {
+    allowedHosts: linesFromText($('securityAllowedHosts').value),
+    allowedOrigins: linesFromText($('securityAllowedOrigins').value),
+    allowedClientIps: linesFromText($('securityAllowedClientIps').value),
+    rateLimitPerMinute: Number($('securityRateLimit').value || 0),
+    maxJsonBodyBytes: Number($('securityMaxJsonBodyBytes').value || 1048576),
+    keepCurrentAccess: $('securityKeepCurrentAccess').checked,
+  };
+  const result = await api('/api/security/allowlist', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  state.security = result;
+  await loadSecurityConfig();
+  toast('白名单配置已保存并立即生效');
 }
 
 function renderAccountScope() {
@@ -914,6 +989,9 @@ function bindEvents() {
   $('exportSummaryExcelBtn').addEventListener('click', exportSummaryExcel);
   $('saveBehaviorBtn').addEventListener('click', () => saveBehaviorPolicy().catch(showError));
   $('loadBehaviorBtn').addEventListener('click', () => loadBehaviorPolicy().catch(showError));
+  $('saveSecurityBtn').addEventListener('click', () => saveSecurityConfig().catch(showError));
+  $('loadSecurityBtn').addEventListener('click', () => loadSecurityConfig().catch(showError));
+  $('addCurrentSecurityBtn').addEventListener('click', addCurrentSecurityAccess);
   $('saveJobRequirementBtn').addEventListener('click', () => saveJobRequirement().catch(showError));
   $('matchJobsBtn').addEventListener('click', () => matchAllJobRequirements().catch(showError));
   $('previewSummaryBtn').addEventListener('click', () => previewSummary().catch(showError));
@@ -965,7 +1043,7 @@ function bindEvents() {
 
 async function refreshAll() {
   renderApiBase();
-  await Promise.all([loadHealth(), loadSettings(), loadAccounts(), loadExtensionPackageInfo()]);
+  await Promise.all([loadHealth(), loadSettings(), loadAccounts(), loadSecurityConfig(), loadExtensionPackageInfo()]);
   await loadBehaviorPolicy();
   await loadData();
 }

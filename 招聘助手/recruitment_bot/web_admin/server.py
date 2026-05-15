@@ -110,6 +110,73 @@ ALLOWED_CLIENT_IPS = [
 REQUEST_BUCKETS: dict[str, list[float]] = {}
 
 
+def split_config_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = re.split(r"[\n,，]+", str(value or ""))
+    return [str(item).strip() for item in raw_items if str(item).strip()]
+
+
+def normalize_origin_value(value: Any) -> str:
+    return str(value or "").strip().rstrip("/")
+
+
+def clean_allowed_hosts(values: Any) -> list[str]:
+    return sorted({
+        normalize_host_header(item)
+        for item in split_config_list(values)
+        if normalize_host_header(item)
+    })
+
+
+def clean_allowed_origins(values: Any) -> list[str]:
+    return sorted({
+        normalize_origin_value(item)
+        for item in split_config_list(values)
+        if normalize_origin_value(item)
+    })
+
+
+def clean_allowed_client_ips(values: Any) -> list[str]:
+    cleaned: list[str] = []
+    for item in split_config_list(values):
+        try:
+            cleaned.append(str(ipaddress.ip_network(item, strict=False)))
+        except ValueError:
+            try:
+                cleaned.append(str(ipaddress.ip_address(item)))
+            except ValueError:
+                raise ValueError(f"无效的客户端 IP/CIDR：{item}") from None
+    return sorted(set(cleaned))
+
+
+def reload_security_runtime(config: dict[str, Any] | None = None) -> None:
+    global SECURITY_ALLOWLIST, ALLOWED_HOSTS, ALLOWED_ORIGINS, ALLOWED_CLIENT_IPS, RATE_LIMIT_PER_MINUTE, MAX_JSON_BODY_BYTES
+    SECURITY_ALLOWLIST = config if config is not None else _load_security_allowlist()
+    ALLOWED_HOSTS = sorted({
+        *clean_allowed_hosts(SECURITY_ALLOWLIST.get("allowedHosts", [])),
+        *clean_allowed_hosts(_split_env_list("RECRUITMENT_ALLOWED_HOSTS")),
+    })
+    ALLOWED_ORIGINS = sorted({
+        *clean_allowed_origins(SECURITY_ALLOWLIST.get("allowedOrigins", [])),
+        *clean_allowed_origins(_split_env_list("RECRUITMENT_ALLOWED_ORIGINS")),
+    })
+    ALLOWED_CLIENT_IPS = sorted({
+        *clean_allowed_client_ips(SECURITY_ALLOWLIST.get("allowedClientIps", [])),
+        *clean_allowed_client_ips(_split_env_list("RECRUITMENT_ALLOWED_CLIENT_IPS")),
+        *clean_allowed_client_ips(_split_env_list("RECRUITMENT_IP_ALLOWLIST")),
+    })
+    RATE_LIMIT_PER_MINUTE = int(os.environ.get(
+        "RECRUITMENT_RATE_LIMIT_PER_MINUTE",
+        str(SECURITY_ALLOWLIST.get("rateLimitPerMinute") or 240),
+    ))
+    MAX_JSON_BODY_BYTES = int(os.environ.get(
+        "RECRUITMENT_MAX_JSON_BODY_BYTES",
+        os.environ.get("RECRUITMENT_MAX_BODY_BYTES", str(SECURITY_ALLOWLIST.get("maxJsonBodyBytes") or 1024 * 1024)),
+    ))
+
+
 def parse_ip_allowlist(value: str) -> list[Any]:
     networks: list[Any] = []
     for item in str(value or "").split(","):
@@ -468,6 +535,85 @@ def guard_request(handler: SimpleHTTPRequestHandler) -> bool:
             json_response(handler, {"success": False, "message": "缺少管理令牌"}, 401)
             return False
     return True
+
+
+def current_security_request(handler: SimpleHTTPRequestHandler) -> dict[str, str]:
+    origin = normalize_origin_value(handler.headers.get("Origin"))
+    return {
+        "host": normalize_host_header(handler.headers.get("Host", "")),
+        "origin": origin or request_base_url(handler),
+        "clientIp": client_ip(handler),
+    }
+
+
+def get_security_allowlist_config(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
+    return {
+        "success": True,
+        "filePath": str(SECURITY_ALLOWLIST_PATH),
+        "editable": {
+            "allowedHosts": clean_allowed_hosts(SECURITY_ALLOWLIST.get("allowedHosts", [])),
+            "allowedOrigins": clean_allowed_origins(SECURITY_ALLOWLIST.get("allowedOrigins", [])),
+            "allowedClientIps": clean_allowed_client_ips(SECURITY_ALLOWLIST.get("allowedClientIps", [])),
+            "rateLimitPerMinute": int(SECURITY_ALLOWLIST.get("rateLimitPerMinute") or RATE_LIMIT_PER_MINUTE),
+            "maxJsonBodyBytes": int(SECURITY_ALLOWLIST.get("maxJsonBodyBytes") or MAX_JSON_BODY_BYTES),
+        },
+        "effective": {
+            "allowedHosts": ALLOWED_HOSTS,
+            "allowedOrigins": ALLOWED_ORIGINS,
+            "allowedClientIps": ALLOWED_CLIENT_IPS,
+            "clientIpAllowlistEnabled": bool(ALLOWED_CLIENT_IPS),
+            "rateLimitPerMinute": RATE_LIMIT_PER_MINUTE,
+            "maxJsonBodyBytes": MAX_JSON_BODY_BYTES,
+        },
+        "current": current_security_request(handler),
+        "env": {
+            "allowedHosts": _split_env_list("RECRUITMENT_ALLOWED_HOSTS"),
+            "allowedOrigins": _split_env_list("RECRUITMENT_ALLOWED_ORIGINS"),
+            "allowedClientIps": [
+                *_split_env_list("RECRUITMENT_ALLOWED_CLIENT_IPS"),
+                *_split_env_list("RECRUITMENT_IP_ALLOWLIST"),
+            ],
+        },
+    }
+
+
+def save_security_allowlist_config(payload: dict[str, Any], handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
+    try:
+        hosts = clean_allowed_hosts(payload.get("allowedHosts", []))
+        origins = clean_allowed_origins(payload.get("allowedOrigins", []))
+        client_ips = clean_allowed_client_ips(payload.get("allowedClientIps", []))
+    except ValueError as exc:
+        return {"success": False, "message": str(exc)}
+
+    if payload.get("keepCurrentAccess", True):
+        current = current_security_request(handler)
+        current_host = normalize_host_header(current.get("host", ""))
+        current_origin = normalize_origin_value(current.get("origin", ""))
+        if current_host and current_host not in hosts:
+            hosts.append(current_host)
+        if current_origin and current_origin not in origins:
+            origins.append(current_origin)
+
+    try:
+        rate_limit = int(payload.get("rateLimitPerMinute") or RATE_LIMIT_PER_MINUTE or 0)
+    except (TypeError, ValueError):
+        rate_limit = RATE_LIMIT_PER_MINUTE
+    try:
+        max_json = int(payload.get("maxJsonBodyBytes") or MAX_JSON_BODY_BYTES or 1048576)
+    except (TypeError, ValueError):
+        max_json = MAX_JSON_BODY_BYTES
+
+    next_config = {
+        "allowedHosts": sorted(set(hosts)),
+        "allowedOrigins": sorted(set(origins)),
+        "allowedClientIps": sorted(set(client_ips)),
+        "rateLimitPerMinute": max(0, min(rate_limit, 10000)),
+        "maxJsonBodyBytes": max(1024, min(max_json, 20 * 1024 * 1024)),
+    }
+    SECURITY_ALLOWLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SECURITY_ALLOWLIST_PATH.write_text(json.dumps(next_config, ensure_ascii=False, indent=2) + "\n", "utf-8")
+    reload_security_runtime(next_config)
+    return get_security_allowlist_config(handler)
 
 
 def json_response(handler: SimpleHTTPRequestHandler, payload: Any, status: int = 200) -> None:
@@ -2777,6 +2923,8 @@ class Handler(SimpleHTTPRequestHandler):
                         "rateLimitPerMinute": RATE_LIMIT_PER_MINUTE,
                     },
                 })
+            elif parsed.path == "/api/security/allowlist":
+                json_response(self, get_security_allowlist_config(self))
             elif parsed.path == "/api/extension/config":
                 backend_url = configured_backend_url(self, query.get("backendUrl", [""])[0])
                 _, meta = build_configured_extension_package(backend_url)
@@ -2928,6 +3076,8 @@ class Handler(SimpleHTTPRequestHandler):
                     json_response(self, delete_managed_account(payload))
                 else:
                     json_response(self, save_managed_account(payload))
+            elif parsed.path == "/api/security/allowlist":
+                json_response(self, save_security_allowlist_config(payload, self))
             elif parsed.path == "/api/llm/config":
                 json_response(self, save_llm_config(payload))
             elif parsed.path == "/api/llm/config/reset":

@@ -324,6 +324,50 @@ code { background: #eef3f8; padding: 2px 5px; border-radius: 4px; }
   grid-template-columns: repeat(5, minmax(120px, 1fr));
 }
 
+.security-grid {
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+}
+
+.security-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.security-summary div {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcff;
+}
+
+.security-summary span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.security-summary strong {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 42px;
+}
+
+.checkbox-row input {
+  width: auto;
+}
+
 .config-stack {
   display: grid;
   gap: 12px;
@@ -388,6 +432,7 @@ code { background: #eef3f8; padding: 2px 5px; border-radius: 4px; }
 }
 
 .badge.ok { background: #fff6a8; color: #423a00; }
+.badge.warning { background: #fff7e8; color: #8a4b00; }
 .badge.danger { background: #fff1f0; color: var(--danger); }
 
 .breakdown { display: grid; gap: 10px; }
@@ -562,6 +607,7 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.42); }
   .account-scope { grid-template-columns: 1fr; }
   .account-list-item { grid-template-columns: 1fr; }
   .account-grid, .dingtalk-grid, .schedule-grid { grid-template-columns: 1fr; }
+  .security-grid, .security-summary { grid-template-columns: 1fr; }
   .llm-connection-grid, .llm-model-grid, .plugin-install { grid-template-columns: 1fr; }
   .connection-row { grid-template-columns: 1fr; }
   .search-box { grid-template-columns: 1fr; }
