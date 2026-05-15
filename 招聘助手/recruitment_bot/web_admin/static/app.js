@@ -14,6 +14,7 @@ const state = {
     q: '',
     source: '',
     account: '',
+    accountExact: '',
   },
 };
 
@@ -255,6 +256,7 @@ async function loadAccounts() {
   const result = await api('/api/accounts');
   state.accounts = result.items || [];
   renderAccountScope();
+  renderManagedAccountList();
 }
 
 function renderAccountScope() {
@@ -274,16 +276,58 @@ function renderAccountScope() {
   ].join('');
   select.value = selected;
   if ($('accountFilter')) $('accountFilter').value = selected;
+  if ($('accountScopeSearch')) $('accountScopeSearch').value = selected;
+  if ($('accountOptions')) {
+    $('accountOptions').innerHTML = accounts.map(item => (
+      `<option value="${escapeHtml(item.name || '未识别')}">${escapeHtml(item.platform || 'BOSS直聘')}</option>`
+    )).join('');
+  }
   $('accountScopeHint').textContent = selected
     ? `当前只显示账号「${selected}」的数据`
     : '当前显示全部账号数据';
 }
 
+function renderManagedAccountList() {
+  const container = $('managedAccountList');
+  if (!container) return;
+  if (!state.accounts.length) {
+    container.innerHTML = '<div class="empty-state">暂无账号，可在上方手动新增。</div>';
+    return;
+  }
+  container.innerHTML = state.accounts.map(item => `
+    <div class="account-list-item">
+      <strong>${escapeHtml(item.name || '未识别')}</strong>
+      <span>${escapeHtml(item.platform || 'BOSS直聘')}</span>
+      <span>${Number(item.count || 0)} 条</span>
+      <button class="secondary small" data-account-select="${escapeHtml(item.name || '')}">编辑/筛选</button>
+    </div>
+  `).join('');
+  container.querySelectorAll('[data-account-select]').forEach(button => {
+    button.addEventListener('click', () => {
+      const name = button.dataset.accountSelect || '';
+      const account = state.accounts.find(item => item.name === name) || {};
+      $('accountName').value = name;
+      $('accountPlatform').value = account.platform || 'BOSS直聘';
+      setAccountScope(name);
+      showModule('settings');
+    });
+  });
+}
+
 function setAccountScope(account, reload = true) {
   state.filters.account = String(account || '').trim();
+  state.filters.accountExact = state.accounts.some(item => item.name === state.filters.account) ? '1' : '';
   if ($('accountFilter')) $('accountFilter').value = state.filters.account;
+  if ($('accountScopeSearch')) $('accountScopeSearch').value = state.filters.account;
   renderAccountScope();
-  if (reload) loadData().catch(showError);
+  if (reload) {
+    Promise.all([loadData(), loadBehaviorPolicy()]).catch(showError);
+  }
+}
+
+function exactAccountScope() {
+  const account = state.filters.account || '';
+  return state.accounts.some(item => item.name === account) ? account : '';
 }
 
 async function saveLlmConfig(showToast = true) {
@@ -360,7 +404,8 @@ function formatAgentMode(agent = {}) {
 }
 
 async function loadBehaviorPolicy() {
-  const policy = await api('/api/behavior-policy');
+  const account = exactAccountScope();
+  const policy = await api(`/api/behavior-policy${account ? `?account=${encodeURIComponent(account)}` : ''}`);
   state.behaviorPolicy = policy;
   $('workTimeEnabled').value = policy.workTimeEnabled ? 'true' : 'false';
   $('workStartTime').value = policy.workStartTime || '09:00';
@@ -382,6 +427,13 @@ async function loadBehaviorPolicy() {
   $('searchKeywordPool').value = (policy.searchKeywordPool || []).join('\n');
   $('behaviorStatus').textContent = policy.behaviorPolicyEnabled ? '已开启' : '已关闭';
   $('behaviorStatus').className = policy.behaviorPolicyEnabled ? 'badge ok' : 'badge';
+  if ($('behaviorAccountHint')) {
+    $('behaviorAccountHint').textContent = account
+      ? `当前编辑账号「${account}」的自动化策略和关键词分散池。`
+      : (state.filters.account
+        ? `当前账号搜索「${state.filters.account}」不是完整账号名，正在编辑全部账号默认策略。`
+        : '当前编辑全部账号的默认自动化策略；选择具体账号后可单独配置。');
+  }
 }
 
 async function saveBehaviorPolicy() {
@@ -406,6 +458,7 @@ async function saveBehaviorPolicy() {
       detailClick: Number($('detailClickWeight').value || 35),
       filterReview: Number($('filterReviewWeight').value || 25),
     },
+    accountName: exactAccountScope(),
     searchKeywordPool: $('searchKeywordPool').value,
   };
   const result = await api('/api/behavior-policy', {
@@ -440,6 +493,23 @@ async function saveSettings(showToast = true) {
   });
   await loadSettings();
   if (showToast) toast('配置已保存');
+  await loadAccounts();
+}
+
+async function addManagedAccount() {
+  const name = $('accountName').value.trim();
+  const platform = $('accountPlatform').value.trim() || 'BOSS直聘';
+  if (!name) {
+    toast('请输入账号名称', 'warning');
+    return;
+  }
+  await api('/api/accounts', {
+    method: 'POST',
+    body: JSON.stringify({ name, platform }),
+  });
+  await loadAccounts();
+  setAccountScope(name);
+  toast('账号已新增/更新');
 }
 
 async function toggleSchedule() {
@@ -664,10 +734,12 @@ function buildCandidateDetail(item) {
 }
 
 function applyFilters() {
+  const account = $('accountFilter').value.trim();
   state.filters = {
     q: $('searchInput').value.trim(),
     source: $('sourceFilter').value.trim(),
-    account: $('accountFilter').value.trim(),
+    account,
+    accountExact: state.accounts.some(item => item.name === account) ? '1' : '',
   };
   renderAccountScope();
   loadData().catch(showError);
@@ -813,6 +885,7 @@ function bindEvents() {
   $('refreshBtn').addEventListener('click', () => refreshAll().catch(showError));
   $('saveSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
   $('saveAccountSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
+  $('addAccountBtn').addEventListener('click', () => addManagedAccount().catch(showError));
   $('saveLlmBtn').addEventListener('click', () => saveLlmConfig().catch(showError));
   $('testLlmBtn').addEventListener('click', () => testLlm().catch(showError));
   $('resetLlmBtn').addEventListener('click', () => resetLlmConfig().catch(showError));
@@ -833,6 +906,10 @@ function bindEvents() {
   $('exportCandidatesBtn').addEventListener('click', () => exportCsv('candidates'));
   $('exportRecommendationsBtn').addEventListener('click', () => exportCsv('recommendations'));
   $('accountScopeSelect').addEventListener('change', () => setAccountScope($('accountScopeSelect').value));
+  $('accountScopeApplyBtn').addEventListener('click', () => setAccountScope($('accountScopeSearch').value));
+  $('accountScopeSearch').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') setAccountScope($('accountScopeSearch').value);
+  });
   $('accountFilter').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') applyFilters();
   });
@@ -867,7 +944,8 @@ function bindEvents() {
 
 async function refreshAll() {
   renderApiBase();
-  await Promise.all([loadHealth(), loadSettings(), loadBehaviorPolicy(), loadAccounts(), loadExtensionPackageInfo()]);
+  await Promise.all([loadHealth(), loadSettings(), loadAccounts(), loadExtensionPackageInfo()]);
+  await loadBehaviorPolicy();
   await loadData();
 }
 

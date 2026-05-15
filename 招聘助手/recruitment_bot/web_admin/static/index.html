@@ -35,7 +35,13 @@
         <option value="">全部账号</option>
       </select>
     </label>
+    <label>
+      账号搜索
+      <input id="accountScopeSearch" type="search" placeholder="输入账号名筛选数据" list="accountOptions" />
+    </label>
+    <button id="accountScopeApplyBtn" class="secondary">按账号筛选</button>
     <span id="accountScopeHint">当前显示全部账号数据</span>
+    <datalist id="accountOptions"></datalist>
   </section>
 
   <main>
@@ -113,8 +119,10 @@
         </label>
       </div>
       <div class="actions">
-        <button id="saveAccountSettingsBtn">保存账号配置</button>
+        <button id="saveAccountSettingsBtn">保存当前账号</button>
+        <button id="addAccountBtn" class="secondary">新增/更新账号</button>
       </div>
+      <div id="managedAccountList" class="account-list"></div>
     </section>
 
     <section class="stats-grid module-section active" data-module="overview">
@@ -233,6 +241,7 @@
         <h2>操作节奏策略</h2>
         <span id="behaviorStatus" class="badge">未加载</span>
       </div>
+      <p id="behaviorAccountHint" class="hint">当前编辑全部账号的默认策略。</p>
       <div class="form-grid behavior-grid">
         <label>
           工作时间限制

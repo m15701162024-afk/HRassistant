@@ -642,6 +642,97 @@ def account_label(account_name: Any) -> str:
     return str(account_name or "").strip() or "未识别"
 
 
+def normalize_managed_account(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        name = str(value.get("name") or value.get("accountName") or value.get("account_name") or "").strip()
+        platform = str(value.get("platform") or value.get("accountPlatform") or "BOSS直聘").strip() or "BOSS直聘"
+        source = str(value.get("source") or "manual").strip() or "manual"
+    else:
+        name = str(value or "").strip()
+        platform = "BOSS直聘"
+        source = "manual"
+    if not name:
+        return None
+    return {
+        "name": name,
+        "platform": platform,
+        "source": source,
+        "updatedAt": now_iso(),
+    }
+
+
+def managed_accounts_from_settings(settings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    settings = settings or get_settings()
+    by_key: dict[str, dict[str, Any]] = {}
+
+    def add(value: Any, default_source: str = "manual") -> None:
+        item = normalize_managed_account(value)
+        if not item:
+            return
+        if default_source and item.get("source") == "manual":
+            item["source"] = default_source
+        key = normalize_account_name(item["name"])
+        if key and key not in by_key:
+            by_key[key] = item
+
+    for item in settings.get("managedAccounts") or []:
+        add(item, "manual")
+    add({
+        "name": settings.get("accountName"),
+        "platform": settings.get("accountPlatform") or "BOSS直聘",
+        "source": "current",
+    }, "current")
+    detected = settings.get("detectedAccount") if isinstance(settings.get("detectedAccount"), dict) else {}
+    add({
+        "name": detected.get("name"),
+        "platform": detected.get("platform") or settings.get("accountPlatform") or "BOSS直聘",
+        "source": detected.get("source") or "detected",
+    }, "detected")
+    return sorted(by_key.values(), key=lambda item: item["name"])
+
+
+def save_managed_account(payload: dict[str, Any]) -> dict[str, Any]:
+    item = normalize_managed_account({
+        "name": payload.get("name") or payload.get("accountName"),
+        "platform": payload.get("platform") or payload.get("accountPlatform"),
+        "source": "manual",
+    })
+    if not item:
+        return {"success": False, "message": "账号名称不能为空"}
+    settings = get_settings()
+    accounts = managed_accounts_from_settings(settings)
+    by_key = {normalize_account_name(account["name"]): account for account in accounts}
+    by_key[normalize_account_name(item["name"])] = item
+    save_settings({
+        "managedAccounts": sorted(by_key.values(), key=lambda account: account["name"]),
+        "accountName": item["name"],
+        "accountPlatform": item["platform"],
+        "accountNameManual": True,
+    })
+    return {"success": True, "account": item, "items": get_accounts()}
+
+
+def delete_managed_account(payload: dict[str, Any]) -> dict[str, Any]:
+    name = str(payload.get("name") or payload.get("accountName") or "").strip()
+    if not name:
+        return {"success": False, "message": "账号名称不能为空"}
+    target = normalize_account_name(name)
+    settings = get_settings()
+    accounts = [
+        account for account in managed_accounts_from_settings(settings)
+        if normalize_account_name(account["name"]) != target
+    ]
+    updates: dict[str, Any] = {"managedAccounts": accounts}
+    if normalize_account_name(settings.get("accountName")) == target:
+        updates.update({
+            "accountName": accounts[0]["name"] if accounts else "",
+            "accountPlatform": accounts[0]["platform"] if accounts else "BOSS直聘",
+            "accountNameManual": bool(accounts),
+        })
+    save_settings(updates)
+    return {"success": True, "items": get_accounts()}
+
+
 def scoped_role_key(role: str, account_name: Any = "") -> str:
     role_key = normalize_role(role)
     account_key = normalize_account_name(account_name)
@@ -937,6 +1028,7 @@ def list_rows(
     q = (filters.get("q") or "").strip()
     source = (filters.get("source") or "").strip()
     account = (filters.get("account") or "").strip()
+    account_exact = str(filters.get("accountExact") or filters.get("account_exact") or "").strip().lower() in {"1", "true", "yes"}
     if q:
         searchable = {
             "candidates": ["name", "role", "education", "experience", "expected_salary", "recommendation", "raw_json"],
@@ -953,11 +1045,12 @@ def list_rows(
             where.append("source LIKE ?")
         params.append(f"%{source}%")
     if account:
+        operator = "=" if account_exact else "LIKE"
         if table == "reports":
-            where.append("COALESCE(NULLIF(c.account_name, ''), '未识别') = ?")
+            where.append(f"COALESCE(NULLIF(c.account_name, ''), '未识别') {operator} ?")
         elif table in {"candidates", "recommendations", "job_requirements"}:
-            where.append("COALESCE(NULLIF(account_name, ''), '未识别') = ?")
-        params.append(account)
+            where.append(f"COALESCE(NULLIF(account_name, ''), '未识别') {operator} ?")
+        params.append(account if account_exact else f"%{account}%")
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += f" ORDER BY {order_field} DESC LIMIT ?"
@@ -980,6 +1073,7 @@ def list_recommendation_details(
     q = str(filters.get("q") or "").strip()
     source = str(filters.get("source") or "").strip()
     account = str(filters.get("account") or "").strip()
+    account_exact = str(filters.get("accountExact") or filters.get("account_exact") or "").strip().lower() in {"1", "true", "yes"}
     if q:
         fields = ["r.name", "r.role", "r.recommendation", "r.next_step", "r.raw_json", "c.education", "c.experience"]
         where.append("(" + " OR ".join(f"{field} LIKE ?" for field in fields) + ")")
@@ -988,8 +1082,9 @@ def list_recommendation_details(
         where.append("COALESCE(NULLIF(c.source, ''), NULLIF(r.source, ''), '未知来源') LIKE ?")
         params.append(f"%{source}%")
     if account:
-        where.append("COALESCE(NULLIF(c.account_name, ''), NULLIF(r.account_name, ''), '未识别') = ?")
-        params.append(account)
+        operator = "=" if account_exact else "LIKE"
+        where.append(f"COALESCE(NULLIF(c.account_name, ''), NULLIF(r.account_name, ''), '未识别') {operator} ?")
+        params.append(account if account_exact else f"%{account}%")
     sql = """
         SELECT
             r.*,
@@ -1133,7 +1228,7 @@ def get_range_dataset(
 ) -> dict[str, Any]:
     settings = get_settings()
     start_dt, end_dt, label = resolve_push_range(scope, start, end, settings)
-    filters = {"account": str(account or "").strip()} if str(account or "").strip() else {}
+    filters = {"account": str(account or "").strip(), "accountExact": "1"} if str(account or "").strip() else {}
     candidates_all = list_rows("candidates", limit=100000, filters=filters)
     recommendations_all = list_recommendation_details(limit=100000, filters=filters)
     candidates = [
@@ -1168,17 +1263,42 @@ def get_range_dataset(
 
 
 def get_accounts() -> list[dict[str, Any]]:
-    accounts: dict[str, int] = {}
+    accounts: dict[str, dict[str, Any]] = {}
+
+    def add_account(name_value: Any, count: int = 0, platform: str = "BOSS直聘", source: str = "data") -> None:
+        name = account_label(name_value)
+        key = normalize_account_name(name)
+        if not key:
+            return
+        current = accounts.setdefault(key, {
+            "name": name,
+            "platform": platform or "BOSS直聘",
+            "count": 0,
+            "sources": set(),
+            "manual": False,
+        })
+        if source == "data":
+            current["count"] = int(current.get("count") or 0) + int(count or 0)
+        elif not int(current.get("count") or 0):
+            current["count"] = int(count or 0)
+        current["platform"] = current.get("platform") or platform or "BOSS直聘"
+        current["sources"].add(source)
+        if source == "manual":
+            current["manual"] = True
+
     with connect() as conn:
         candidate_rows = conn.execute(
             """
-            SELECT COALESCE(NULLIF(account_name, ''), '未识别') AS name, COUNT(*) AS count
+            SELECT
+              COALESCE(NULLIF(account_name, ''), '未识别') AS name,
+              COALESCE(MAX(NULLIF(account_platform, '')), 'BOSS直聘') AS platform,
+              COUNT(*) AS count
             FROM candidates
             GROUP BY COALESCE(NULLIF(account_name, ''), '未识别')
             """
         ).fetchall()
         for row in candidate_rows:
-            accounts[str(row["name"])] = int(row["count"] or 0)
+            add_account(row["name"], int(row["count"] or 0), str(row["platform"] or "BOSS直聘"), "data")
         for table in ("recommendations", "job_requirements"):
             rows = conn.execute(
                 f"""
@@ -1188,19 +1308,19 @@ def get_accounts() -> list[dict[str, Any]]:
                 """
             ).fetchall()
             for row in rows:
-                name = str(row["name"])
-                accounts.setdefault(name, int(row["count"] or 0))
+                add_account(row["name"], int(row["count"] or 0), "BOSS直聘", table)
     settings = get_settings()
-    for value in (
-        settings.get("accountName"),
-        (settings.get("detectedAccount") or {}).get("name") if isinstance(settings.get("detectedAccount"), dict) else "",
-    ):
-        name = str(value or "").strip()
-        if name:
-            accounts.setdefault(name, 0)
+    for item in managed_accounts_from_settings(settings):
+        add_account(item["name"], 0, item.get("platform", "BOSS直聘"), item.get("source", "manual"))
     return [
-        {"name": name, "count": count}
-        for name, count in sorted(accounts.items(), key=lambda item: (-item[1], item[0]))
+        {
+            "name": item["name"],
+            "platform": item.get("platform") or "BOSS直聘",
+            "count": int(item.get("count") or 0),
+            "manual": bool(item.get("manual")),
+            "sources": sorted(item.get("sources") or []),
+        }
+        for item in sorted(accounts.values(), key=lambda item: (-int(item.get("count") or 0), item["name"]))
     ]
 
 
@@ -1592,6 +1712,18 @@ def get_settings() -> dict[str, Any]:
 
 def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
     current = get_settings()
+    account_name = str(payload.get("accountName") or "").strip()
+    if account_name:
+        item = normalize_managed_account({
+            "name": account_name,
+            "platform": payload.get("accountPlatform") or current.get("accountPlatform") or "BOSS直聘",
+            "source": "manual" if payload.get("accountNameManual") else "current",
+        })
+        if item:
+            accounts = managed_accounts_from_settings({**current, **payload})
+            by_key = {normalize_account_name(account["name"]): account for account in accounts}
+            by_key[normalize_account_name(item["name"])] = item
+            payload = {**payload, "managedAccounts": sorted(by_key.values(), key=lambda account: account["name"])}
     with connect() as conn:
         for key, value in payload.items():
             if key in {"dingtalkAppKey", "dingtalkAppSecret"} and str(value or "").strip() in {"", "********"} and current.get(key):
@@ -1672,20 +1804,33 @@ def reset_llm_config() -> dict[str, Any]:
     return {"success": True, "llm": get_llm_config(mask_key=True)}
 
 
-def get_behavior_policy() -> dict[str, Any]:
+def behavior_policy_key(account: Any) -> str:
+    return normalize_account_name(account_label(account))
+
+
+def get_behavior_policy(account: str = "") -> dict[str, Any]:
     settings = get_settings()
     saved = settings.get("behaviorPolicy") if isinstance(settings.get("behaviorPolicy"), dict) else {}
-    policy = {**DEFAULT_BEHAVIOR_POLICY, **saved}
+    account_name = account_label(account) if str(account or "").strip() else ""
+    account_map = settings.get("behaviorPoliciesByAccount") if isinstance(settings.get("behaviorPoliciesByAccount"), dict) else {}
+    account_saved = account_map.get(behavior_policy_key(account_name), {}) if account_name else {}
+    if not isinstance(account_saved, dict):
+        account_saved = {}
+    policy = {**DEFAULT_BEHAVIOR_POLICY, **saved, **account_saved}
     interaction_modes = {
         **DEFAULT_BEHAVIOR_POLICY["interactionModes"],
         **(saved.get("interactionModes", {}) if isinstance(saved.get("interactionModes"), dict) else {}),
+        **(account_saved.get("interactionModes", {}) if isinstance(account_saved.get("interactionModes"), dict) else {}),
     }
     policy["interactionModes"] = interaction_modes
+    policy["accountName"] = account_name
+    policy["scope"] = "account" if account_name else "global"
     return policy
 
 
 def save_behavior_policy(payload: dict[str, Any]) -> dict[str, Any]:
-    current = get_behavior_policy()
+    account_name = str(payload.get("accountName") or payload.get("account") or "").strip()
+    current = get_behavior_policy(account_name)
     next_policy = {**current}
     numeric_fields = [
         "requestDelayMin", "requestDelayMax", "detailDwellMin", "detailDwellMax",
@@ -1732,7 +1877,16 @@ def save_behavior_policy(payload: dict[str, Any]) -> dict[str, Any]:
             if 1 <= day <= 7
         ] or DEFAULT_BEHAVIOR_POLICY["workDays"]
 
-    save_settings({"behaviorPolicy": next_policy})
+    next_policy.pop("scope", None)
+    next_policy["accountName"] = account_name
+    if account_name:
+        settings = get_settings()
+        account_map = settings.get("behaviorPoliciesByAccount") if isinstance(settings.get("behaviorPoliciesByAccount"), dict) else {}
+        account_map[behavior_policy_key(account_name)] = next_policy
+        save_settings({"behaviorPoliciesByAccount": account_map})
+    else:
+        next_policy.pop("accountName", None)
+        save_settings({"behaviorPolicy": next_policy})
     return {"success": True, "behaviorPolicy": next_policy}
 
 
@@ -2628,6 +2782,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
+                    "accountExact": query.get("accountExact", [""])[0],
                 }))
             elif parsed.path == "/api/accounts":
                 json_response(self, {"items": get_accounts()})
@@ -2649,24 +2804,27 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/llm/config":
                 json_response(self, get_llm_config(mask_key=True))
             elif parsed.path == "/api/behavior-policy":
-                json_response(self, get_behavior_policy())
+                json_response(self, get_behavior_policy(query.get("account", [""])[0]))
             elif parsed.path == "/api/candidates":
                 json_response(self, {"items": list_rows("candidates", int(query.get("limit", ["200"])[0]), filters={
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
+                    "accountExact": query.get("accountExact", [""])[0],
                 })})
             elif parsed.path == "/api/recommendations":
                 json_response(self, {"items": list_recommendation_details(int(query.get("limit", ["200"])[0]), filters={
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
+                    "accountExact": query.get("accountExact", [""])[0],
                 })})
             elif parsed.path == "/api/reports":
                 json_response(self, {"items": list_rows("reports", int(query.get("limit", ["100"])[0]), filters={
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
+                    "accountExact": query.get("accountExact", [""])[0],
                 })})
             elif parsed.path == "/api/job-requirements":
                 role = query.get("role", [""])[0]
@@ -2678,6 +2836,7 @@ class Handler(SimpleHTTPRequestHandler):
                         "q": query.get("q", [""])[0],
                         "source": query.get("source", [""])[0],
                         "account": account,
+                        "accountExact": query.get("accountExact", [""])[0],
                     })})
             elif parsed.path == "/api/agent/conversations":
                 json_response(self, {"items": list_agent_conversations(int(query.get("limit", ["100"])[0]))})
@@ -2710,6 +2869,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
+                    "accountExact": query.get("accountExact", [""])[0],
                 })
                 text_response(self, rows_to_csv(rows, [
                     ("received_date", "日期"),
@@ -2729,6 +2889,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
+                    "accountExact": query.get("accountExact", [""])[0],
                 })
                 text_response(self, rows_to_csv(rows, [
                     ("created_at", "推荐时间"),
@@ -2755,6 +2916,12 @@ class Handler(SimpleHTTPRequestHandler):
             payload = read_json(self)
             if parsed.path == "/api/settings":
                 json_response(self, save_settings(payload))
+            elif parsed.path == "/api/accounts":
+                action = str(payload.get("action") or "save").strip().lower()
+                if action == "delete":
+                    json_response(self, delete_managed_account(payload))
+                else:
+                    json_response(self, save_managed_account(payload))
             elif parsed.path == "/api/llm/config":
                 json_response(self, save_llm_config(payload))
             elif parsed.path == "/api/llm/config/reset":

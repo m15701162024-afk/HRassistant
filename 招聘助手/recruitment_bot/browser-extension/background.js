@@ -306,8 +306,10 @@ async function fetchFromBackend(path) {
 
 async function syncBehaviorPolicyFromBackend() {
   try {
-    const policy = await fetchFromBackend('/api/behavior-policy');
     const { settings = DEFAULT_SETTINGS } = await chrome.storage.local.get(['settings']);
+    const mergedBaseSettings = { ...DEFAULT_SETTINGS, ...settings };
+    const accountName = String(mergedBaseSettings.accountName || '').trim();
+    const policy = await fetchFromBackend(`/api/behavior-policy${accountName ? `?account=${encodeURIComponent(accountName)}` : ''}`);
     const mergedSettings = {
       ...DEFAULT_SETTINGS,
       ...settings,
