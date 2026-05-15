@@ -1,0 +1,6 @@
+.DS_Store
+__pycache__/
+*.pyc
+web_admin/recruitment_history.db
+web_admin/exports/
+web_admin/data/

@@ -16,9 +16,10 @@
     "https://www.zhipin.com/*",
     "https://www.bosszhipin.com/*",
     "https://oapi.dingtalk.com/*",
-    "http://localhost:*/*",
-    "http://127.0.0.1:*/*",
-    "https://*/*"
+    "https://api.dingtalk.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "http://10.100.60.5/*"
   ],
   "background": {
     "service_worker": "background.js"

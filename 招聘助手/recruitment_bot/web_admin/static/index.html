@@ -68,6 +68,33 @@
 
     <section class="panel module-section" data-module="settings">
       <div class="panel-title">
+        <h2>内网插件安装包</h2>
+        <span id="extensionPackageStatus" class="badge">待生成</span>
+      </div>
+      <div class="plugin-install">
+        <div>
+          <span>插件后端地址</span>
+          <strong id="pluginBackendUrl">自动识别</strong>
+          <p class="hint">下载的插件包会预置该地址和浏览器访问权限，内网用户安装后无需再填写后端配置。</p>
+        </div>
+        <div class="plugin-install-steps">
+          <span>安装步骤</span>
+          <ol>
+            <li>下载插件包并解压。</li>
+            <li>Chrome/Edge 打开扩展管理页并开启开发者模式。</li>
+            <li>选择“加载已解压的扩展程序”，选择解压后的文件夹。</li>
+            <li>登录 BOSS 直聘，打开沟通页后点击插件“一键开始执行任务”。</li>
+          </ol>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="downloadExtensionPackageBtn">下载已配置插件包</button>
+        <button id="refreshExtensionPackageBtn" class="secondary">刷新插件配置</button>
+      </div>
+    </section>
+
+    <section class="panel module-section" data-module="settings">
+      <div class="panel-title">
         <h2>招聘账号</h2>
         <span>插件识别失败时可手动修正</span>
       </div>

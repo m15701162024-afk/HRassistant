@@ -181,6 +181,37 @@ code { background: #eef3f8; padding: 2px 5px; border-radius: 4px; }
   gap: 8px;
 }
 
+.plugin-install {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.2fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.plugin-install strong {
+  display: block;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #efe37b;
+  border-radius: 6px;
+  background: #fffdf0;
+  color: var(--brand-ink);
+  word-break: break-all;
+}
+
+.plugin-install span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.plugin-install ol {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
 .search-box {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) 180px 180px;
@@ -502,7 +533,7 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.42); }
   .dashboard-grid, .form-grid, .toolbar { grid-template-columns: 1fr; }
   .account-scope { grid-template-columns: 1fr; }
   .account-grid, .dingtalk-grid, .schedule-grid { grid-template-columns: 1fr; }
-  .llm-connection-grid, .llm-model-grid { grid-template-columns: 1fr; }
+  .llm-connection-grid, .llm-model-grid, .plugin-install { grid-template-columns: 1fr; }
   .connection-row { grid-template-columns: 1fr; }
   .search-box { grid-template-columns: 1fr; }
   .toolbar-actions, .actions { flex-wrap: wrap; }

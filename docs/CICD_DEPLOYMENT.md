@@ -105,3 +105,37 @@ browser-extension-<commit>.zip
 ```
 
 可在 GitHub Actions 对应运行记录的 `Artifacts` 中下载，用于浏览器扩展安装或分发。
+
+## 内网插件分发与安全白名单
+
+Web 管理后台提供动态插件包：
+
+```text
+GET /api/extension/package
+```
+
+内网用户访问 `http://10.100.60.5:8787/` 后，可在 `系统配置 -> 内网插件安装包` 下载已配置 zip。该 zip 会预置后端地址，并在 `manifest.json` 中只加入当前后端主机的访问权限。
+
+服务端白名单配置位于：
+
+```text
+招聘助手/recruitment_bot/web_admin/security_allowlist.json
+```
+
+默认允许：
+
+- Host：`10.100.60.5`、`127.0.0.1`、`localhost`
+- Origin：`http://10.100.60.5:8787`、本机调试地址
+- Chrome 扩展来源：`chrome-extension://...`
+
+可通过环境变量覆盖：
+
+| 变量 | 说明 |
+| --- | --- |
+| `RECRUITMENT_ALLOWED_HOSTS` | 逗号分隔 Host 白名单 |
+| `RECRUITMENT_ALLOWED_ORIGINS` | 逗号分隔 Origin 白名单 |
+| `RECRUITMENT_ALLOWED_CLIENT_IPS` | 逗号分隔 IP/CIDR 白名单，留空表示不限制客户端 IP |
+| `RECRUITMENT_IP_ALLOWLIST` | 兼容本地部署脚本的 IP/CIDR 白名单变量 |
+| `RECRUITMENT_RATE_LIMIT_PER_MINUTE` | 每 IP 每接口每分钟请求上限 |
+| `RECRUITMENT_MAX_JSON_BODY_BYTES` | JSON 请求体大小上限 |
+| `RECRUITMENT_ADMIN_TOKEN` | 可选管理令牌，开启后 POST 需携带 `X-Admin-Token` |

@@ -56,6 +56,27 @@ docker compose up -d --build
 recruitment_bot/web_admin/data/recruitment_history.db
 ```
 
+## 内网插件分发
+
+台式机部署完成后，内网用户访问：
+
+```text
+http://10.100.60.5:8787/
+```
+
+进入 `系统配置 -> 内网插件安装包`，点击 `下载已配置插件包`。下载包会自动写入：
+
+```text
+http://10.100.60.5:8787
+```
+
+并只增加该后端主机的浏览器访问权限。用户解压后在 Chrome/Edge 扩展页开启开发者模式，选择 `加载已解压的扩展程序` 即可使用，无需再填写后端地址。
+
+对应接口：
+
+- `GET /api/extension/config` 查看即将生成的插件配置
+- `GET /api/extension/package` 下载已配置插件 zip
+
 ## 生产镜像部署
 
 ```bash
@@ -125,6 +146,7 @@ curl -X POST http://127.0.0.1:8787/api/dingtalk/callback \
 
 ## API
 
+- `GET /api/extension/package` 下载已配置浏览器插件
 - `POST /api/candidates` 保存候选人
 - `POST /api/recommendations` 保存推荐和报告
 - `GET /api/candidates` 查询候选人

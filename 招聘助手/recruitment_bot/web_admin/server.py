@@ -26,6 +26,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 import threading
 from datetime import datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -34,10 +35,14 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT.parent
 STATIC_DIR = ROOT / "static"
 TEMPLATE_DIR = ROOT / "templates"
 EXPORT_DIR = ROOT / "exports"
 EXPORT_MANIFEST = EXPORT_DIR / "manifest.json"
+EXTENSION_DIR = Path(os.environ.get("RECRUITMENT_EXTENSION_DIR", "")).expanduser() if os.environ.get("RECRUITMENT_EXTENSION_DIR") else (
+    ROOT / "browser-extension" if (ROOT / "browser-extension").exists() else PROJECT_ROOT / "browser-extension"
+)
 RECOMMENDATION_TEMPLATE = TEMPLATE_DIR / "定时推送候选人推荐表模板.xlsx"
 DB_PATH = Path(os.environ.get("RECRUITMENT_DB", ROOT / "recruitment_history.db"))
 HOST = os.environ.get("RECRUITMENT_HOST", "0.0.0.0")
@@ -52,6 +57,55 @@ DEFAULT_PUBLIC_BASE_URL = os.environ.get(
     "https://unconfuted-superbusily-ryan.ngrok-free.dev",
 ).rstrip("/")
 EXPORT_FILENAME_PATTERN = re.compile(r"^候选人推荐表_\d{8}_\d{6}\.xlsx$")
+SECURITY_ALLOWLIST_PATH = Path(os.environ.get("RECRUITMENT_SECURITY_ALLOWLIST", ROOT / "security_allowlist.json"))
+ADMIN_TOKEN = os.environ.get("RECRUITMENT_ADMIN_TOKEN", "").strip()
+RATE_BUCKETS: dict[tuple[str, str], list[float]] = {}
+RATE_LOCK = threading.Lock()
+
+
+def _split_env_list(name: str) -> list[str]:
+    return [item.strip() for item in os.environ.get(name, "").split(",") if item.strip()]
+
+
+def _load_security_allowlist() -> dict[str, Any]:
+    if not SECURITY_ALLOWLIST_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(SECURITY_ALLOWLIST_PATH.read_text("utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception as exc:
+        print(f"[security] allowlist load failed: {exc}")
+        return {}
+
+
+SECURITY_ALLOWLIST = _load_security_allowlist()
+MAX_JSON_BODY_BYTES = int(os.environ.get(
+    "RECRUITMENT_MAX_JSON_BODY_BYTES",
+    os.environ.get("RECRUITMENT_MAX_BODY_BYTES", str(SECURITY_ALLOWLIST.get("maxJsonBodyBytes") or 1024 * 1024)),
+))
+RATE_LIMIT_PER_MINUTE = int(os.environ.get(
+    "RECRUITMENT_RATE_LIMIT_PER_MINUTE",
+    str(SECURITY_ALLOWLIST.get("rateLimitPerMinute") or 240),
+))
+ALLOWED_HOSTS = sorted({
+    str(item).strip().lower()
+    for item in [*SECURITY_ALLOWLIST.get("allowedHosts", []), *_split_env_list("RECRUITMENT_ALLOWED_HOSTS")]
+    if str(item).strip()
+})
+ALLOWED_ORIGINS = sorted({
+    str(item).strip().rstrip("/")
+    for item in [*SECURITY_ALLOWLIST.get("allowedOrigins", []), *_split_env_list("RECRUITMENT_ALLOWED_ORIGINS")]
+    if str(item).strip()
+})
+ALLOWED_CLIENT_IPS = [
+    str(item).strip()
+    for item in [
+        *SECURITY_ALLOWLIST.get("allowedClientIps", []),
+        *_split_env_list("RECRUITMENT_ALLOWED_CLIENT_IPS"),
+        *_split_env_list("RECRUITMENT_IP_ALLOWLIST"),
+    ]
+    if str(item).strip()
+]
 
 REQUEST_BUCKETS: dict[str, list[float]] = {}
 
@@ -306,13 +360,120 @@ def init_db() -> None:
         )
 
 
+def normalize_host_header(value: str) -> str:
+    host = str(value or "").strip().lower()
+    if not host:
+        return ""
+    if host.startswith("[") and "]" in host:
+        return host[1:host.index("]")]
+    return host.split(":", 1)[0]
+
+
+def is_allowed_host(handler: SimpleHTTPRequestHandler) -> bool:
+    if not ALLOWED_HOSTS:
+        return True
+    host = normalize_host_header(handler.headers.get("Host", ""))
+    return not host or host in ALLOWED_HOSTS
+
+
+def is_allowed_origin_value(origin: str) -> bool:
+    origin = str(origin or "").strip().rstrip("/")
+    if not origin:
+        return True
+    if origin.startswith("chrome-extension://"):
+        return True
+    if not ALLOWED_ORIGINS:
+        return True
+    return origin in ALLOWED_ORIGINS
+
+
+def cors_origin(handler: SimpleHTTPRequestHandler) -> str:
+    origin = str(handler.headers.get("Origin") or "").strip().rstrip("/")
+    if origin and is_allowed_origin_value(origin):
+        return origin
+    return ALLOWED_ORIGINS[0] if ALLOWED_ORIGINS else "*"
+
+
+def client_ip(handler: SimpleHTTPRequestHandler) -> str:
+    return handler.client_address[0] if handler.client_address else ""
+
+
+def is_allowed_client_ip(handler: SimpleHTTPRequestHandler) -> bool:
+    if not ALLOWED_CLIENT_IPS:
+        return True
+    ip_text = client_ip(handler)
+    try:
+        ip = ipaddress.ip_address(ip_text)
+    except ValueError:
+        return False
+    for rule in ALLOWED_CLIENT_IPS:
+        try:
+            if "/" in rule and ip in ipaddress.ip_network(rule, strict=False):
+                return True
+            if ip == ipaddress.ip_address(rule):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def is_rate_limited(handler: SimpleHTTPRequestHandler) -> bool:
+    if RATE_LIMIT_PER_MINUTE <= 0:
+        return False
+    parsed = urllib.parse.urlparse(handler.path)
+    if not parsed.path.startswith("/api/"):
+        return False
+    key = (client_ip(handler), parsed.path)
+    now = time.time()
+    with RATE_LOCK:
+        bucket = [stamp for stamp in RATE_BUCKETS.get(key, []) if now - stamp < 60]
+        if len(bucket) >= RATE_LIMIT_PER_MINUTE:
+            RATE_BUCKETS[key] = bucket
+            return True
+        bucket.append(now)
+        RATE_BUCKETS[key] = bucket
+    return False
+
+
+def write_common_headers(handler: SimpleHTTPRequestHandler) -> None:
+    handler.send_header("Access-Control-Allow-Origin", cors_origin(handler))
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token")
+    handler.send_header("Access-Control-Allow-Methods", "GET,HEAD,POST,OPTIONS")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("X-Frame-Options", "DENY")
+    handler.send_header("Referrer-Policy", "same-origin")
+    handler.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    handler.send_header("Cache-Control", "no-store")
+
+
+def guard_request(handler: SimpleHTTPRequestHandler) -> bool:
+    origin = str(handler.headers.get("Origin") or "")
+    if not is_allowed_host(handler):
+        json_response(handler, {"success": False, "message": "Host 不在白名单内"}, 403)
+        return False
+    if not is_allowed_origin_value(origin):
+        json_response(handler, {"success": False, "message": "Origin 不在白名单内"}, 403)
+        return False
+    if not is_allowed_client_ip(handler):
+        json_response(handler, {"success": False, "message": "客户端 IP 不在白名单内"}, 403)
+        return False
+    if is_rate_limited(handler):
+        json_response(handler, {"success": False, "message": "请求过于频繁，请稍后再试"}, 429)
+        return False
+    if ADMIN_TOKEN and handler.command in {"POST", "PUT", "PATCH", "DELETE"}:
+        parsed = urllib.parse.urlparse(handler.path)
+        public_paths = {"/api/dingtalk/callback", "/api/dingtalk/callback-test"}
+        if parsed.path not in public_paths and handler.headers.get("X-Admin-Token", "") != ADMIN_TOKEN:
+            json_response(handler, {"success": False, "message": "缺少管理令牌"}, 401)
+            return False
+    return True
+
+
 def json_response(handler: SimpleHTTPRequestHandler, payload: Any, status: int = 200) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type")
-    handler.send_header("Access-Control-Allow-Methods", "GET,HEAD,POST,OPTIONS")
+    write_common_headers(handler)
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -328,7 +489,7 @@ def text_response(
     data = body.encode("utf-8-sig")
     handler.send_response(status)
     handler.send_header("Content-Type", content_type)
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    write_common_headers(handler)
     if filename:
         handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
     handler.send_header("Content-Length", str(len(data)))
@@ -345,7 +506,7 @@ def binary_response(
 ) -> None:
     handler.send_response(200)
     handler.send_header("Content-Type", content_type)
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    write_common_headers(handler)
     if filename:
         quoted = urllib.parse.quote(filename)
         handler.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quoted}")
@@ -361,6 +522,8 @@ def read_json(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
         raise ValueError(f"request body too large, max {MAX_BODY_BYTES} bytes")
     if length <= 0:
         return {}
+    if length > MAX_JSON_BODY_BYTES:
+        raise ValueError(f"请求体过大，最大允许 {MAX_JSON_BODY_BYTES} 字节")
     raw = handler.rfile.read(length).decode("utf-8")
     return json.loads(raw or "{}")
 
@@ -1613,6 +1776,113 @@ def usable_base_url(value: Any) -> str:
     return base if parsed.scheme in {"http", "https"} and parsed.netloc else ""
 
 
+def configured_backend_url(handler: SimpleHTTPRequestHandler, override: str = "") -> str:
+    candidates = [
+        override,
+        request_base_url(handler),
+        usable_base_url(get_settings().get("adminBaseUrl")),
+        "http://10.100.60.5:8787",
+    ]
+    for value in candidates:
+        base = usable_base_url(value)
+        if base:
+            return base
+    raise ValueError("无法识别插件后端地址")
+
+
+def extension_match_pattern(base_url: str) -> str:
+    parsed = urllib.parse.urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("插件后端地址必须是 http/https URL")
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{parsed.scheme}://{host}/*"
+
+
+def normalize_extension_permission(pattern: str) -> str:
+    return (
+        str(pattern or "")
+        .replace("http://localhost:*/*", "http://localhost/*")
+        .replace("http://127.0.0.1:*/*", "http://127.0.0.1/*")
+    )
+
+
+def extension_package_filename(base_url: str) -> str:
+    parsed = urllib.parse.urlparse(base_url)
+    host = (parsed.hostname or "backend").replace(":", "_")
+    port = f"_{parsed.port}" if parsed.port else ""
+    return f"招聘助手插件_{host}{port}.zip"
+
+
+def patch_extension_javascript(text: str, backend_url: str) -> str:
+    return re.sub(
+        r"backendUrl:\s*'[^']*'",
+        f"backendUrl: '{backend_url}'",
+        text,
+    )
+
+
+def build_configured_extension_package(base_url: str) -> tuple[bytes, dict[str, Any]]:
+    if not EXTENSION_DIR.exists():
+        raise FileNotFoundError(f"浏览器插件目录不存在：{EXTENSION_DIR}")
+
+    backend_url = usable_base_url(base_url)
+    if not backend_url:
+        raise ValueError("插件后端地址无效")
+    backend_permission = extension_match_pattern(backend_url)
+    manifest_path = EXTENSION_DIR / "manifest.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    permissions = list(dict.fromkeys(
+        item for item in [*(normalize_extension_permission(p) for p in manifest.get("host_permissions", [])), backend_permission]
+        if item
+    ))
+    manifest["host_permissions"] = permissions
+
+    install_notes = f"""招聘助手浏览器插件安装说明
+
+后端服务地址：{backend_url}
+
+安装步骤：
+1. 解压本 zip 文件。
+2. Chrome 或 Edge 打开扩展管理页面。
+3. 开启开发者模式。
+4. 选择“加载已解压的扩展程序”，选择解压后的文件夹。
+5. 打开 BOSS 直聘沟通页面，点击插件“一键开始执行任务”。
+
+本安装包已内置后端地址和浏览器访问权限，安装后无需再填写后端配置。
+"""
+
+    config = {
+        "backendUrl": backend_url,
+        "generatedAt": now_iso(),
+        "hostPermission": backend_permission,
+        "source": "web-admin",
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(EXTENSION_DIR.rglob("*")):
+            if path.is_dir() or path.name == ".DS_Store":
+                continue
+            rel = path.relative_to(EXTENSION_DIR).as_posix()
+            if rel == "manifest.json":
+                archive.writestr(rel, json.dumps(manifest, ensure_ascii=False, indent=2))
+                continue
+            if rel in {"background.js", "popup.js"}:
+                archive.writestr(rel, patch_extension_javascript(path.read_text("utf-8"), backend_url))
+                continue
+            archive.write(path, rel)
+        archive.writestr("extension-config.json", json.dumps(config, ensure_ascii=False, indent=2))
+        archive.writestr("安装说明.txt", install_notes)
+
+    return buffer.getvalue(), {
+        "backendUrl": backend_url,
+        "filename": extension_package_filename(backend_url),
+        "hostPermission": backend_permission,
+        "generatedAt": config["generatedAt"],
+    }
+
+
 def export_url(path: Path, base_url: str | None = None) -> str:
     settings = get_settings()
     base = (
@@ -2277,32 +2547,23 @@ def recover_missing_export(filename: str) -> Path | None:
 
 class Handler(SimpleHTTPRequestHandler):
     server_version = "HRassistant"
-
-    def end_headers(self) -> None:
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-        self.send_header("Cache-Control", "no-store")
-        super().end_headers()
-
-    def security_check(self) -> bool:
-        client_ip = client_ip_from_handler(self)
-        if not ip_is_allowed(client_ip):
-            json_response(self, {"success": False, "message": "forbidden"}, 403)
-            print(f"[security] blocked ip={client_ip} path={self.path}")
-            return False
-        if not rate_limit_allows(client_ip):
-            json_response(self, {"success": False, "message": "too many requests"}, 429)
-            print(f"[security] rate limited ip={client_ip} path={self.path}")
-            return False
-        return True
+    sys_version = ""
 
     def translate_path(self, path: str) -> str:
         parsed = urllib.parse.urlparse(path)
         if parsed.path == "/":
             return str(STATIC_DIR / "index.html")
         return str(STATIC_DIR / parsed.path.lstrip("/"))
+
+    def serve_extension_package(self, query: dict[str, list[str]]) -> None:
+        backend_url = configured_backend_url(self, query.get("backendUrl", [""])[0])
+        data, meta = build_configured_extension_package(backend_url)
+        binary_response(
+            self,
+            data,
+            "application/zip",
+            str(meta["filename"]),
+        )
 
     def serve_export(self, path_value: str, head_only: bool = False) -> bool:
         filename = Path(urllib.parse.unquote(path_value.split("/exports/", 1)[1])).name
@@ -2323,12 +2584,12 @@ class Handler(SimpleHTTPRequestHandler):
         return True
 
     def do_OPTIONS(self) -> None:
-        if not self.security_check():
+        if not guard_request(self):
             return
         json_response(self, {"success": True})
 
     def do_HEAD(self) -> None:
-        if not self.security_check():
+        if not guard_request(self):
             return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/exports/"):
@@ -2337,7 +2598,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_HEAD()
 
     def do_GET(self) -> None:
-        if not self.security_check():
+        if not guard_request(self):
             return
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
@@ -2349,7 +2610,19 @@ class Handler(SimpleHTTPRequestHandler):
                     "time": now_iso(),
                     "callback": "/api/dingtalk/callback",
                     "dingtalkTargetConfigured": bool(settings.get("dingtalkOpenConversationId") or settings.get("dingtalkChatId")),
+                    "security": {
+                        "allowedHosts": ALLOWED_HOSTS,
+                        "allowedOrigins": ALLOWED_ORIGINS,
+                        "clientIpAllowlistEnabled": bool(ALLOWED_CLIENT_IPS),
+                        "rateLimitPerMinute": RATE_LIMIT_PER_MINUTE,
+                    },
                 })
+            elif parsed.path == "/api/extension/config":
+                backend_url = configured_backend_url(self, query.get("backendUrl", [""])[0])
+                _, meta = build_configured_extension_package(backend_url)
+                json_response(self, {"success": True, **meta})
+            elif parsed.path == "/api/extension/package":
+                self.serve_extension_package(query)
             elif parsed.path == "/api/stats":
                 json_response(self, get_stats({
                     "q": query.get("q", [""])[0],
@@ -2475,7 +2748,7 @@ class Handler(SimpleHTTPRequestHandler):
             json_response(self, {"success": False, "message": str(exc)}, 500)
 
     def do_POST(self) -> None:
-        if not self.security_check():
+        if not guard_request(self):
             return
         parsed = urllib.parse.urlparse(self.path)
         try:

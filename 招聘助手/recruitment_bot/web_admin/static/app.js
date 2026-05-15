@@ -178,6 +178,33 @@ function renderApiBase() {
   $('apiBaseHint').textContent = base ? `使用 ${base}` : '使用当前域名';
 }
 
+function currentBackendUrl() {
+  const base = normalizeApiBase(getApiBase());
+  if (base) return base;
+  if (/^https?:$/i.test(location.protocol)) return normalizeApiBase(location.origin);
+  return 'http://10.100.60.5:8787';
+}
+
+async function loadExtensionPackageInfo() {
+  const backendUrl = currentBackendUrl();
+  if ($('pluginBackendUrl')) $('pluginBackendUrl').textContent = backendUrl;
+  if (!$('extensionPackageStatus')) return;
+  try {
+    const result = await api(`/api/extension/config?backendUrl=${encodeURIComponent(backendUrl)}`);
+    $('extensionPackageStatus').textContent = `可下载｜${result.hostPermission || backendUrl}`;
+    $('extensionPackageStatus').className = 'badge ok';
+  } catch (err) {
+    $('extensionPackageStatus').textContent = '生成失败';
+    $('extensionPackageStatus').className = 'badge danger';
+  }
+}
+
+function downloadExtensionPackage() {
+  const backendUrl = currentBackendUrl();
+  const path = `/api/extension/package?backendUrl=${encodeURIComponent(backendUrl)}`;
+  window.location.href = apiUrl(path);
+}
+
 async function loadSettings() {
   const settings = await api('/api/settings');
   state.settings = settings;
@@ -824,6 +851,8 @@ function bindEvents() {
     renderApiBase();
     refreshAll().catch(showError);
   });
+  $('downloadExtensionPackageBtn').addEventListener('click', downloadExtensionPackage);
+  $('refreshExtensionPackageBtn').addEventListener('click', () => loadExtensionPackageInfo().catch(showError));
   $('closeDialogBtn').addEventListener('click', () => $('detailDialog').close());
   $('searchInput').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') applyFilters();
@@ -838,7 +867,7 @@ function bindEvents() {
 
 async function refreshAll() {
   renderApiBase();
-  await Promise.all([loadHealth(), loadSettings(), loadBehaviorPolicy(), loadAccounts()]);
+  await Promise.all([loadHealth(), loadSettings(), loadBehaviorPolicy(), loadAccounts(), loadExtensionPackageInfo()]);
   await loadData();
 }
 

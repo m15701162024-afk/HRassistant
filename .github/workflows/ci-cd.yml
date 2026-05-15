@@ -52,7 +52,8 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: ${{ env.WEB_ADMIN_DIR }}
+          context: 招聘助手/recruitment_bot
+          file: ${{ env.WEB_ADMIN_DIR }}/Dockerfile
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:latest

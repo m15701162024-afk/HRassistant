@@ -1,0 +1,17 @@
+{
+  "allowedHosts": [
+    "10.100.60.5",
+    "127.0.0.1",
+    "localhost",
+    "unconfuted-superbusily-ryan.ngrok-free.dev"
+  ],
+  "allowedOrigins": [
+    "http://10.100.60.5:8787",
+    "http://127.0.0.1:8787",
+    "http://localhost:8787",
+    "https://unconfuted-superbusily-ryan.ngrok-free.dev"
+  ],
+  "allowedClientIps": [],
+  "rateLimitPerMinute": 240,
+  "maxJsonBodyBytes": 1048576
+}
