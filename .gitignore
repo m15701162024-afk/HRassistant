@@ -14,6 +14,7 @@ __pycache__/
 # Browser/plugin exported local data
 resumes_*.json
 *.json.done
+logs/
 
 # Secrets and local env
 .env

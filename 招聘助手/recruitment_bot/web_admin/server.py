@@ -15,6 +15,7 @@ import base64
 import csv
 import hashlib
 import hmac
+import ipaddress
 import io
 import json
 import os
@@ -41,11 +42,76 @@ RECOMMENDATION_TEMPLATE = TEMPLATE_DIR / "定时推送候选人推荐表模板.x
 DB_PATH = Path(os.environ.get("RECRUITMENT_DB", ROOT / "recruitment_history.db"))
 HOST = os.environ.get("RECRUITMENT_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RECRUITMENT_PORT", "8787"))
+IP_ALLOWLIST_RAW = os.environ.get("RECRUITMENT_IP_ALLOWLIST", "127.0.0.1/32,::1/128")
+TRUST_PROXY_HEADERS = os.environ.get("RECRUITMENT_TRUST_PROXY_HEADERS", "0").lower() in {"1", "true", "yes", "on"}
+MAX_BODY_BYTES = int(os.environ.get("RECRUITMENT_MAX_BODY_BYTES", str(2 * 1024 * 1024)))
+RATE_LIMIT_PER_MINUTE = int(os.environ.get("RECRUITMENT_RATE_LIMIT_PER_MINUTE", "120"))
+RATE_LIMIT_WINDOW_SECONDS = 60
 DEFAULT_PUBLIC_BASE_URL = os.environ.get(
     "RECRUITMENT_PUBLIC_BASE_URL",
     "https://unconfuted-superbusily-ryan.ngrok-free.dev",
 ).rstrip("/")
 EXPORT_FILENAME_PATTERN = re.compile(r"^候选人推荐表_\d{8}_\d{6}\.xlsx$")
+
+REQUEST_BUCKETS: dict[str, list[float]] = {}
+
+
+def parse_ip_allowlist(value: str) -> list[Any]:
+    networks: list[Any] = []
+    for item in str(value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            print(f"[security] ignored invalid allowlist entry: {item}")
+    return networks
+
+
+IP_ALLOWLIST = parse_ip_allowlist(IP_ALLOWLIST_RAW)
+
+
+def client_ip_from_handler(handler: SimpleHTTPRequestHandler) -> str:
+    remote_ip = handler.client_address[0] if handler.client_address else ""
+    if TRUST_PROXY_HEADERS and remote_ip in {"127.0.0.1", "::1"}:
+        forwarded = (
+            handler.headers.get("CF-Connecting-IP")
+            or handler.headers.get("X-Real-IP")
+            or handler.headers.get("X-Forwarded-For", "").split(",")[0]
+        )
+        forwarded = str(forwarded or "").strip()
+        if forwarded:
+            return forwarded
+    return remote_ip
+
+
+def ip_is_allowed(ip_value: str) -> bool:
+    if not IP_ALLOWLIST:
+        return True
+    try:
+        ip_obj = ipaddress.ip_address(ip_value)
+    except ValueError:
+        return False
+    return any(ip_obj in network for network in IP_ALLOWLIST)
+
+
+def rate_limit_allows(ip_value: str) -> bool:
+    if RATE_LIMIT_PER_MINUTE <= 0:
+        return True
+    now = time.time()
+    cutoff = now - RATE_LIMIT_WINDOW_SECONDS
+    bucket = REQUEST_BUCKETS.setdefault(ip_value, [])
+    bucket[:] = [stamp for stamp in bucket if stamp >= cutoff]
+    if len(bucket) >= RATE_LIMIT_PER_MINUTE:
+        return False
+    bucket.append(now)
+    if len(REQUEST_BUCKETS) > 2048:
+        for key in list(REQUEST_BUCKETS.keys())[:512]:
+            if not REQUEST_BUCKETS[key] or REQUEST_BUCKETS[key][-1] < cutoff:
+                REQUEST_BUCKETS.pop(key, None)
+    return True
+
 
 DEFAULT_BEHAVIOR_POLICY: dict[str, Any] = {
     "behaviorPolicyEnabled": True,
@@ -291,6 +357,8 @@ def binary_response(
 
 def read_json(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
     length = int(handler.headers.get("Content-Length", "0") or "0")
+    if length > MAX_BODY_BYTES:
+        raise ValueError(f"request body too large, max {MAX_BODY_BYTES} bytes")
     if length <= 0:
         return {}
     raw = handler.rfile.read(length).decode("utf-8")
@@ -2208,6 +2276,28 @@ def recover_missing_export(filename: str) -> Path | None:
 
 
 class Handler(SimpleHTTPRequestHandler):
+    server_version = "HRassistant"
+
+    def end_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def security_check(self) -> bool:
+        client_ip = client_ip_from_handler(self)
+        if not ip_is_allowed(client_ip):
+            json_response(self, {"success": False, "message": "forbidden"}, 403)
+            print(f"[security] blocked ip={client_ip} path={self.path}")
+            return False
+        if not rate_limit_allows(client_ip):
+            json_response(self, {"success": False, "message": "too many requests"}, 429)
+            print(f"[security] rate limited ip={client_ip} path={self.path}")
+            return False
+        return True
+
     def translate_path(self, path: str) -> str:
         parsed = urllib.parse.urlparse(path)
         if parsed.path == "/":
@@ -2233,9 +2323,13 @@ class Handler(SimpleHTTPRequestHandler):
         return True
 
     def do_OPTIONS(self) -> None:
+        if not self.security_check():
+            return
         json_response(self, {"success": True})
 
     def do_HEAD(self) -> None:
+        if not self.security_check():
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/exports/"):
             self.serve_export(parsed.path, head_only=True)
@@ -2243,6 +2337,8 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_HEAD()
 
     def do_GET(self) -> None:
+        if not self.security_check():
+            return
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
         try:
@@ -2373,10 +2469,14 @@ class Handler(SimpleHTTPRequestHandler):
                 ]), content_type="text/csv; charset=utf-8", filename="recommendations.csv")
             else:
                 super().do_GET()
+        except ValueError as exc:
+            json_response(self, {"success": False, "message": str(exc)}, 413)
         except Exception as exc:
             json_response(self, {"success": False, "message": str(exc)}, 500)
 
     def do_POST(self) -> None:
+        if not self.security_check():
+            return
         parsed = urllib.parse.urlparse(self.path)
         try:
             payload = read_json(self)
@@ -2470,6 +2570,8 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, {"success": True, "question": question, "answer": answer, "agent": agent_meta})
             else:
                 json_response(self, {"success": False, "message": "not found"}, 404)
+        except ValueError as exc:
+            json_response(self, {"success": False, "message": str(exc)}, 413)
         except Exception as exc:
             json_response(self, {"success": False, "message": str(exc)}, 500)
 
