@@ -13,5 +13,5 @@
   ],
   "allowedClientIps": [],
   "rateLimitPerMinute": 240,
-  "maxJsonBodyBytes": 1048576
+  "maxJsonBodyBytes": 4194304
 }

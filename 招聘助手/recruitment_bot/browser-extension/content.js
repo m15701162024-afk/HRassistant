@@ -56,6 +56,8 @@ let settings = {
     filterReview: 25,
   },
   searchKeywordPool: [],
+  pageIntelligenceEnabled: true,
+  pageIntelligenceUseScreenshot: false,
   accountName: '',
   accountPlatform: 'BOSS直聘',
   accountNameManual: false,
@@ -661,6 +663,7 @@ async function handleReceivePage() {
     if (settings.autoScrape) {
       resumeInfo = scrapeResumeInfo(card, resumeId);
       if (resumeInfo) {
+        resumeInfo = await enhanceCandidateWithPageIntelligence(resumeInfo, card, 'resume-card');
         await ensureJobRequirementForResume(card, resumeInfo);
         const saveResult = await saveResumeData(resumeInfo);
         if (saveResult.saved) {
@@ -1583,6 +1586,116 @@ function extractCandidateTopLevelText(scope = document, candidateName = '') {
   return candidates[0]?.text || '';
 }
 
+function collectVisibleTextBlocks(limit = 80) {
+  return Array.from(document.querySelectorAll('section, header, article, [class*="card"], [class*="geek"], [class*="resume"], [class*="profile"], [class*="job"], [class*="chat"], li, div, span'))
+    .filter(isActionableElement)
+    .map(element => {
+      const rect = element.getBoundingClientRect();
+      const text = normalizeText(element.innerText || element.textContent || '');
+      return {
+        text,
+        x: Math.round(rect.left),
+        y: Math.round(rect.top),
+        w: Math.round(rect.width),
+        h: Math.round(rect.height),
+      };
+    })
+    .filter(item => item.text.length >= 8 && item.text.length <= 600 && item.w >= 80 && item.h >= 12)
+    .sort((a, b) => a.y - b.y || a.x - b.x || a.text.length - b.text.length)
+    .slice(0, limit);
+}
+
+function buildPageIntelligencePayload(candidate = {}, scope = document, task = 'candidate-extract') {
+  const panelText = scope?.textContent ? cleanCandidateTopLevelText(scope.textContent) : '';
+  const bodyText = normalizeText(document.body.innerText || document.body.textContent || '');
+  const role = candidate.role || extractCommunicationRole(bodyText) || '';
+  return {
+    task,
+    url: window.location.href,
+    includeScreenshot: Boolean(settings.pageIntelligenceUseScreenshot),
+    currentCandidate: candidate,
+    candidatePanelText: panelText,
+    topLevelText: candidate.topLevelText || extractCandidateTopLevelText(scope, candidate.name) || '',
+    roleContext: extractCommunicationRoleContext(bodyText, role),
+    pageText: bodyText.slice(0, 16000),
+    textBlocks: collectVisibleTextBlocks(),
+  };
+}
+
+function shouldReplaceCandidateField(currentValue, aiValue, field = '') {
+  const current = normalizeText(currentValue || '');
+  const next = normalizeText(aiValue || '');
+  if (!next) return false;
+  if (!current) return true;
+  if (field === 'topLevelText') return next.length > current.length && !isPollutedCandidateText(next);
+  if (field === 'jobRequirement') return looksLikeJobRequirement(next) && next.length > current.length;
+  return current.length < 3 || current === '候选人' || current === '待确认';
+}
+
+function mergePageIntelligenceCandidate(candidate, extracted = {}) {
+  const merged = { ...candidate };
+  const fieldMap = {
+    name: 'name',
+    role: 'role',
+    education: 'education',
+    experience: 'experience',
+    expectedSalary: 'expectedSalary',
+    ageGender: 'ageGender',
+    currentCompany: 'currentCompany',
+    summary: 'summary',
+    topLevelText: 'topLevelText',
+    jobRequirement: 'jobRequirement',
+    resumeStatus: 'resumeStatus',
+  };
+  Object.entries(fieldMap).forEach(([sourceField, targetField]) => {
+    const value = extracted[sourceField];
+    if (shouldReplaceCandidateField(merged[targetField], value, targetField)) {
+      merged[targetField] = value;
+    }
+  });
+  if (extracted.topLevelText && !isPollutedCandidateText(extracted.topLevelText)) {
+    merged.rawText = extracted.topLevelText;
+  }
+  if (extracted.jobRequirement && looksLikeJobRequirement(extracted.jobRequirement)) {
+    merged.jobRequirement = extracted.jobRequirement;
+  }
+  merged.pageIntelligence = {
+    provider: extracted.provider || '',
+    confidence: Number(extracted.confidence || 0),
+    evidence: extracted.evidence || [],
+    enhancedAt: new Date().toISOString(),
+  };
+  merged.qualityScore = calculateResumeQuality(merged);
+  merged.evaluation = evaluateCandidate(merged);
+  return merged;
+}
+
+async function enhanceCandidateWithPageIntelligence(candidate, scope = document, task = 'candidate-extract') {
+  if (!candidate || settings.pageIntelligenceEnabled === false) return candidate;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      action: 'extractPageIntelligence',
+      payload: buildPageIntelligencePayload(candidate, scope, task),
+    });
+    if (!response?.success || response.skipped || !response.extracted) {
+      return candidate;
+    }
+    const extracted = {
+      ...response.extracted,
+      provider: response.provider || response.model || '',
+    };
+    const enhanced = mergePageIntelligenceCandidate(candidate, extracted);
+    notifyPopup('log', {
+      message: `GLM页面识别增强：${enhanced.name || '候选人'}｜置信度 ${enhanced.pageIntelligence?.confidence || 0}%`,
+      type: 'success',
+    });
+    return enhanced;
+  } catch (err) {
+    console.warn('[招聘助手] 页面智能识别失败，使用本地规则:', err.message);
+    return candidate;
+  }
+}
+
 function hashString(text) {
   let hash = 0;
   for (let i = 0; i < text.length; i++) {
@@ -2456,7 +2569,7 @@ async function scrapeVisibleOnlineResumeInfo(baseCandidate = {}) {
   const topLevelText = extractCandidateTopLevelText(document, baseCandidate.name) ||
                        cleanCandidateTopLevelText(findCandidateSummaryPanel()?.textContent || '');
   if (!topLevelText) return null;
-  const resumeInfo = {
+  let resumeInfo = {
     ...baseCandidate,
     source: baseCandidate.source || 'BOSS直聘',
     sourceUrl: window.location.href,
@@ -2484,6 +2597,7 @@ async function scrapeVisibleOnlineResumeInfo(baseCandidate = {}) {
   if (!resumeInfo.name) {
     resumeInfo.name = extractChatCandidateName(topLevelText, topLevelText);
   }
+  resumeInfo = await enhanceCandidateWithPageIntelligence(resumeInfo, document, 'online-resume');
   await ensureChatJobRequirement(resumeInfo);
   resumeInfo.qualityScore = calculateResumeQuality(resumeInfo);
   resumeInfo.evaluation = evaluateCandidate(resumeInfo);
@@ -2527,8 +2641,9 @@ async function scanCurrentPage({ notify = false } = {}) {
     const resumeId = extractResumeId(card);
     if (!resumeId) continue;
 
-    const resumeInfo = scrapeResumeInfo(card, resumeId);
+    let resumeInfo = scrapeResumeInfo(card, resumeId);
     if (!resumeInfo) continue;
+    resumeInfo = await enhanceCandidateWithPageIntelligence(resumeInfo, card, 'resume-card');
 
     results.push(resumeInfo);
     if (settings.autoScrape) {
@@ -2605,11 +2720,11 @@ async function scrapeChatCandidateInfo() {
   const bodyText = normalizeText(document.body.textContent || '');
   const role = extractCommunicationRole(bodyText);
   const name = extractChatCandidateName(text, bodyText);
-  if (!name || !role) return null;
+  if (!name && !role && !text) return null;
 
-  const resumeInfo = {
+  let resumeInfo = {
     id: `chat_${hashString(`${window.location.pathname}|${name}|${role}|${bodyText.slice(0, 500)}`)}`,
-    name: name || '候选人',
+    name: name || '',
     role: role || extractExpectedRole(bodyText),
     source: 'BOSS直聘',
     sourceUrl: window.location.href,
@@ -2631,6 +2746,7 @@ async function scrapeChatCandidateInfo() {
     summary: text,
   };
 
+  resumeInfo = await enhanceCandidateWithPageIntelligence(resumeInfo, panel, 'chat-candidate');
   await ensureChatJobRequirement(resumeInfo);
   resumeInfo.qualityScore = calculateResumeQuality(resumeInfo);
   resumeInfo.evaluation = evaluateCandidate(resumeInfo);

@@ -49,7 +49,7 @@ HOST = os.environ.get("RECRUITMENT_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RECRUITMENT_PORT", "8787"))
 IP_ALLOWLIST_RAW = os.environ.get("RECRUITMENT_IP_ALLOWLIST", "127.0.0.1/32,::1/128")
 TRUST_PROXY_HEADERS = os.environ.get("RECRUITMENT_TRUST_PROXY_HEADERS", "0").lower() in {"1", "true", "yes", "on"}
-MAX_BODY_BYTES = int(os.environ.get("RECRUITMENT_MAX_BODY_BYTES", str(2 * 1024 * 1024)))
+MAX_BODY_BYTES = int(os.environ.get("RECRUITMENT_MAX_BODY_BYTES", str(6 * 1024 * 1024)))
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("RECRUITMENT_RATE_LIMIT_PER_MINUTE", "120"))
 RATE_LIMIT_WINDOW_SECONDS = 60
 DEFAULT_PUBLIC_BASE_URL = os.environ.get(
@@ -319,6 +319,13 @@ LLM_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "apiBase": "https://api.siliconflow.cn/v1",
         "model": "deepseek-ai/DeepSeek-V3.2",
         "keyUrl": "https://cloud.siliconflow.cn/me/account/ak",
+    },
+    "zhipu": {
+        "label": "清华系智谱 GLM",
+        "protocol": "openai-chat",
+        "apiBase": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4.5v",
+        "keyUrl": "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
     },
     "deepseek": {
         "label": "DeepSeek",
@@ -1800,6 +1807,212 @@ def call_llm_chat(question: str, context: str) -> str:
         raise
 
 
+PAGE_INTELLIGENCE_FIELDS = {
+    "name", "role", "education", "experience", "expectedSalary", "ageGender",
+    "currentCompany", "summary", "topLevelText", "jobRequirement", "resumeStatus",
+    "confidence", "evidence",
+}
+
+
+def build_page_intelligence_system_prompt() -> str:
+    return (
+        "你是招聘助手的页面 OCR/NLP 识别引擎，负责从 BOSS 直聘页面文本和截图中抽取候选人信息。"
+        "只允许根据输入材料抽取，不要编造。需要过滤导航栏、账号权益、职位管理、聊天历史、推荐列表等噪声。"
+        "岗位 JD 只抽取“工作内容/工作职责/岗位职责”和“工作要求/任职要求/岗位要求”下的介绍文字。"
+        "必须只输出 JSON 对象，不要输出 markdown。"
+    )
+
+
+def build_page_intelligence_user_prompt(payload: dict[str, Any]) -> str:
+    current = payload.get("currentCandidate") if isinstance(payload.get("currentCandidate"), dict) else {}
+    text_blocks = payload.get("textBlocks") if isinstance(payload.get("textBlocks"), list) else []
+    compact_blocks = []
+    for item in text_blocks[:80]:
+        if not isinstance(item, dict):
+            continue
+        compact_blocks.append({
+            "text": str(item.get("text") or "")[:260],
+            "x": item.get("x"),
+            "y": item.get("y"),
+            "w": item.get("w"),
+            "h": item.get("h"),
+        })
+    context = {
+        "task": str(payload.get("task") or "candidate-extract"),
+        "url": str(payload.get("url") or ""),
+        "currentCandidate": {
+            key: current.get(key)
+            for key in [
+                "name", "role", "education", "experience", "expectedSalary", "ageGender",
+                "currentCompany", "summary", "topLevelText", "jobRequirement", "resumeStatus",
+            ]
+            if current.get(key)
+        },
+        "candidatePanelText": str(payload.get("candidatePanelText") or "")[:3500],
+        "topLevelText": str(payload.get("topLevelText") or "")[:3500],
+        "roleContext": str(payload.get("roleContext") or "")[:2000],
+        "pageText": str(payload.get("pageText") or "")[:12000],
+        "textBlocks": compact_blocks,
+    }
+    schema = {
+        "name": "候选人姓名，无法确认则空字符串",
+        "role": "沟通职位/申请职位，保留 J 编号",
+        "education": "学历，如 本科/硕士/大专",
+        "experience": "工作经验，如 4年/应届",
+        "expectedSalary": "期望薪资，如 20-30K",
+        "ageGender": "年龄性别，如 28岁 男/女",
+        "currentCompany": "当前或最近公司",
+        "summary": "候选人顶层信息摘要，200字以内",
+        "topLevelText": "只保留候选人详情顶层页面信息，不要混入下层页面/聊天历史",
+        "jobRequirement": "如果页面展示 JD，仅提取工作内容和工作要求正文，否则空字符串",
+        "resumeStatus": "有附件简历/无附件简历/仅沟通信息/未识别",
+        "confidence": "0-100 的识别置信度",
+        "evidence": ["用于判断的简短证据，最多5条"],
+    }
+    return (
+        "请从以下页面材料中抽取候选人信息，并按指定 JSON schema 输出。\n"
+        f"JSON schema 示例：{json.dumps(schema, ensure_ascii=False)}\n\n"
+        f"页面材料：\n{json.dumps(context, ensure_ascii=False)}"
+    )
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    start = raw.find("{")
+    if start < 0:
+        return {}
+    depth = 0
+    in_string = False
+    escape = False
+    for index, char in enumerate(raw[start:], start):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(raw[start:index + 1])
+                    return parsed if isinstance(parsed, dict) else {}
+                except json.JSONDecodeError:
+                    return {}
+    return {}
+
+
+def clean_page_intelligence_result(parsed: dict[str, Any]) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    for key in PAGE_INTELLIGENCE_FIELDS:
+        value = parsed.get(key)
+        if key == "confidence":
+            try:
+                cleaned[key] = max(0, min(100, int(float(value or 0))))
+            except (TypeError, ValueError):
+                cleaned[key] = 0
+        elif key == "evidence":
+            if isinstance(value, list):
+                cleaned[key] = [str(item).strip()[:160] for item in value if str(item).strip()][:5]
+            elif value:
+                cleaned[key] = [str(value).strip()[:160]]
+            else:
+                cleaned[key] = []
+        else:
+            text = str(value or "").strip()
+            if key in {"summary", "topLevelText"}:
+                cleaned[key] = text[:1500]
+            elif key == "jobRequirement":
+                cleaned[key] = text[:12000]
+            else:
+                cleaned[key] = text[:260]
+    return cleaned
+
+
+def extract_page_intelligence(payload: dict[str, Any]) -> dict[str, Any]:
+    config = get_llm_config(mask_key=False)
+    if not config.get("llmEnabled") or not config.get("llmApiKey"):
+        return {
+            "success": True,
+            "skipped": True,
+            "message": "大模型未启用或 API Key 未配置，已跳过页面智能识别",
+            "extracted": {},
+        }
+    if config.get("llmProtocol") not in {"openai-chat", "openai-responses"}:
+        return {
+            "success": True,
+            "skipped": True,
+            "message": "页面智能识别目前使用 OpenAI-compatible/Responses 模式，请选择智谱 GLM、硅基流动或 OpenAI-compatible 平台",
+            "extracted": {},
+        }
+
+    screenshot = str(payload.get("screenshotDataUrl") or "").strip()
+    if screenshot and (len(screenshot) > 4 * 1024 * 1024 or not screenshot.startswith("data:image/")):
+        screenshot = ""
+    system_prompt = build_page_intelligence_system_prompt()
+    user_prompt = build_page_intelligence_user_prompt(payload)
+
+    if config.get("llmProtocol") == "openai-responses":
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": user_prompt}]
+        if screenshot:
+            content.append({"type": "input_image", "image_url": screenshot})
+        request_payload = {
+            "model": config["llmModel"],
+            "instructions": system_prompt,
+            "input": [{"role": "user", "content": content}],
+            "max_output_tokens": min(int(config.get("llmMaxTokens") or 1000), 1800),
+        }
+        body = request_llm_json(f"{str(config['llmApiBase']).rstrip('/')}/responses", request_payload, config)
+        answer = extract_responses_answer(body)
+    else:
+        content: Any = user_prompt
+        if screenshot:
+            content = [
+                {"type": "text", "text": user_prompt},
+                {"type": "image_url", "image_url": {"url": screenshot}},
+            ]
+        request_payload = {
+            "model": config["llmModel"],
+            "temperature": min(float(config.get("llmTemperature") or 0.1), 0.3),
+            "max_tokens": min(int(config.get("llmMaxTokens") or 1000), 1800),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+        }
+        body = request_llm_json(f"{str(config['llmApiBase']).rstrip('/')}/chat/completions", request_payload, config)
+        choices = body.get("choices") or []
+        if not choices:
+            raise RuntimeError("页面智能识别模型未返回 choices")
+        answer = str((choices[0].get("message") or {}).get("content") or "").strip()
+
+    parsed = extract_json_object(answer)
+    if not parsed:
+        raise RuntimeError("页面智能识别模型未返回有效 JSON")
+    return {
+        "success": True,
+        "skipped": False,
+        "provider": config.get("llmProvider"),
+        "model": config.get("llmModel"),
+        "usedScreenshot": bool(screenshot),
+        "extracted": clean_page_intelligence_result(parsed),
+    }
+
+
 def should_use_fast_rules(question: str) -> bool:
     normalized = str(question or "").strip()
     if not normalized:
@@ -1924,6 +2137,10 @@ def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
         "llmMaxTokens": max(100, min(int(payload.get("llmMaxTokens", current["llmMaxTokens"]) or 1000), 8000)),
         "llmTimeoutSeconds": max(30, min(int(payload.get("llmTimeoutSeconds", current.get("llmTimeoutSeconds", 90)) or 90), 180)),
     }
+    if "pageIntelligenceEnabled" in payload:
+        config["pageIntelligenceEnabled"] = bool(payload.get("pageIntelligenceEnabled"))
+    if "pageIntelligenceUseScreenshot" in payload:
+        config["pageIntelligenceUseScreenshot"] = bool(payload.get("pageIntelligenceUseScreenshot"))
     api_key = str(payload.get("llmApiKey") or "").strip()
     if api_key and api_key != "********":
         config["llmApiKey"] = api_key
@@ -1947,6 +2164,8 @@ def reset_llm_config() -> dict[str, Any]:
         "llmMaxContextItems": DEFAULT_LLM_CONFIG["llmMaxContextItems"],
         "llmMaxTokens": DEFAULT_LLM_CONFIG["llmMaxTokens"],
         "llmTimeoutSeconds": DEFAULT_LLM_CONFIG["llmTimeoutSeconds"],
+        "pageIntelligenceEnabled": True,
+        "pageIntelligenceUseScreenshot": False,
     })
     return {"success": True, "llm": get_llm_config(mask_key=True)}
 
@@ -1970,6 +2189,8 @@ def get_behavior_policy(account: str = "") -> dict[str, Any]:
         **(account_saved.get("interactionModes", {}) if isinstance(account_saved.get("interactionModes"), dict) else {}),
     }
     policy["interactionModes"] = interaction_modes
+    policy["pageIntelligenceEnabled"] = bool(settings.get("pageIntelligenceEnabled", True))
+    policy["pageIntelligenceUseScreenshot"] = bool(settings.get("pageIntelligenceUseScreenshot", False))
     policy["accountName"] = account_name
     policy["scope"] = "account" if account_name else "global"
     return policy
@@ -3084,6 +3305,8 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, reset_llm_config())
             elif parsed.path == "/api/behavior-policy":
                 json_response(self, save_behavior_policy(payload))
+            elif parsed.path == "/api/page-intelligence/extract":
+                json_response(self, extract_page_intelligence(payload))
             elif parsed.path == "/api/candidates":
                 json_response(self, upsert_candidate(payload))
             elif parsed.path == "/api/recommendations":

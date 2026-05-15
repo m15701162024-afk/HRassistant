@@ -28,6 +28,12 @@ const LLM_PROVIDER_DEFAULTS = {
     keyUrl: 'https://cloud.siliconflow.cn/me/account/ak',
     description: '使用硅基流动 OpenAI-compatible Chat Completions，适合无 OpenAI 额度时调用。',
   },
+  zhipu: {
+    apiBase: 'https://open.bigmodel.cn/api/paas/v4',
+    model: 'glm-4.5v',
+    keyUrl: 'https://bigmodel.cn/usercenter/proj-mgmt/apikeys',
+    description: '清华系智谱 GLM，支持页面 OCR/视觉理解与中文 NLP 抽取，适合增强插件识别候选人界面。',
+  },
   'openai-codex': {
     apiBase: 'https://api.openai.com/v1',
     model: 'gpt-5.2-codex',
@@ -276,6 +282,8 @@ async function loadSettings() {
   $('llmMaxContextItems').value = settings.llmMaxContextItems ?? 80;
   $('llmMaxTokens').value = settings.llmMaxTokens ?? 1000;
   if ($('llmTimeoutSeconds')) $('llmTimeoutSeconds').value = settings.llmTimeoutSeconds ?? 90;
+  if ($('pageIntelligenceEnabled')) $('pageIntelligenceEnabled').value = settings.pageIntelligenceEnabled === false ? 'false' : 'true';
+  if ($('pageIntelligenceUseScreenshot')) $('pageIntelligenceUseScreenshot').value = settings.pageIntelligenceUseScreenshot ? 'true' : 'false';
   renderLlmProviderHint();
   const providerName = $('llmProvider').selectedOptions?.[0]?.textContent || settings.llmProvider || '硅基流动';
   $('llmStatus').textContent = settings.llmEnabled
@@ -433,6 +441,8 @@ async function saveLlmConfig(showToast = true) {
     llmMaxContextItems: Number($('llmMaxContextItems').value || 80),
     llmMaxTokens: Number($('llmMaxTokens').value || 1000),
     llmTimeoutSeconds: Number(($('llmTimeoutSeconds')?.value || 90)),
+    pageIntelligenceEnabled: $('pageIntelligenceEnabled')?.value !== 'false',
+    pageIntelligenceUseScreenshot: $('pageIntelligenceUseScreenshot')?.value === 'true',
   };
   const apiKey = $('llmApiKey').value.trim();
   if (apiKey) payload.llmApiKey = apiKey;
@@ -582,6 +592,8 @@ async function saveSettings(showToast = true) {
       scheduledPushStart: $('scheduledPushStart').value,
       scheduledPushEnd: $('scheduledPushEnd').value,
       publicBaseUrl: $('publicBaseUrl').value.trim(),
+      pageIntelligenceEnabled: $('pageIntelligenceEnabled')?.value !== 'false',
+      pageIntelligenceUseScreenshot: $('pageIntelligenceUseScreenshot')?.value === 'true',
     }),
   });
   await loadSettings();
@@ -625,6 +637,8 @@ async function toggleSchedule() {
       scheduledPushStart: $('scheduledPushStart').value,
       scheduledPushEnd: $('scheduledPushEnd').value,
       publicBaseUrl: $('publicBaseUrl').value.trim(),
+      pageIntelligenceEnabled: $('pageIntelligenceEnabled')?.value !== 'false',
+      pageIntelligenceUseScreenshot: $('pageIntelligenceUseScreenshot')?.value === 'true',
       scheduledPushEnabled: !settings.scheduledPushEnabled,
     }),
   });

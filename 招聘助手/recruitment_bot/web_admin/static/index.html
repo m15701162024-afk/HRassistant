@@ -394,6 +394,7 @@
               模型平台
               <select id="llmProvider">
                 <option value="siliconflow">硅基流动</option>
+                <option value="zhipu">清华系智谱 GLM</option>
                 <option value="openai-codex">Codex GPT-5.2</option>
                 <option value="openai">OpenAI</option>
                 <option value="claude">Claude</option>
@@ -437,6 +438,20 @@
               API 超时秒数
               <input id="llmTimeoutSeconds" type="number" min="30" max="180" step="10" />
             </label>
+            <label>
+              插件页面智能识别
+              <select id="pageIntelligenceEnabled">
+                <option value="true">开启</option>
+                <option value="false">关闭</option>
+              </select>
+            </label>
+            <label>
+              截图 OCR/视觉识别
+              <select id="pageIntelligenceUseScreenshot">
+                <option value="false">仅文本解析</option>
+                <option value="true">文本 + 截图</option>
+              </select>
+            </label>
           </div>
         </div>
       </div>
@@ -445,7 +460,7 @@
         <button id="testLlmBtn" class="secondary">测试问答</button>
         <button id="resetLlmBtn" class="secondary">清空大模型配置</button>
       </div>
-      <p class="hint">硅基流动使用 OpenAI-compatible Chat Completions，默认 API Base URL 为 <code>https://api.siliconflow.cn/v1</code>。钉钉机器人提问时会检索历史数据后调用模型，调用失败时自动使用本地规则回答。</p>
+      <p class="hint">选择“清华系智谱 GLM”后，可使用 GLM 的中文 NLP/视觉理解能力增强插件候选人识别；开启截图 OCR 后会把当前 BOSS 页面截图发送到已配置的大模型平台。</p>
     </section>
 
     <section class="panel module-section" data-module="qa">

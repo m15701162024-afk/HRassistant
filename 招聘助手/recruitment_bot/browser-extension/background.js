@@ -51,6 +51,8 @@ const DEFAULT_SETTINGS = {
     filterReview: 25,
   },
   searchKeywordPool: [],
+  pageIntelligenceEnabled: true,
+  pageIntelligenceUseScreenshot: false,
   longBreakEvery: 3,
   longBreakMin: 60000,
   longBreakMax: 150000,
@@ -304,6 +306,34 @@ async function fetchFromBackend(path) {
   return body;
 }
 
+async function captureVisibleTabDataUrl(senderTab, enabled = false) {
+  if (!enabled || !senderTab?.windowId) return '';
+  try {
+    const dataUrl = await chrome.tabs.captureVisibleTab(senderTab.windowId, {
+      format: 'jpeg',
+      quality: 55,
+    });
+    // 保持在默认 4MB JSON 限制内，过大的截图会改走文本 NLP。
+    return dataUrl && dataUrl.length < 3_200_000 ? dataUrl : '';
+  } catch (err) {
+    console.warn('[招聘助手] 页面截图 OCR 捕获失败:', err.message);
+    return '';
+  }
+}
+
+async function extractPageIntelligence(payload = {}, sender = {}) {
+  const { settings = DEFAULT_SETTINGS } = await chrome.storage.local.get(['settings']);
+  const mergedSettings = { ...DEFAULT_SETTINGS, ...settings };
+  const screenshotDataUrl = await captureVisibleTabDataUrl(
+    sender.tab,
+    Boolean(mergedSettings.pageIntelligenceUseScreenshot && payload.includeScreenshot)
+  );
+  return syncToBackend('/api/page-intelligence/extract', {
+    ...payload,
+    screenshotDataUrl,
+  });
+}
+
 async function syncBehaviorPolicyFromBackend() {
   try {
     const { settings = DEFAULT_SETTINGS } = await chrome.storage.local.get(['settings']);
@@ -336,6 +366,8 @@ async function syncBehaviorPolicyFromBackend() {
       longBreakMax: Number(policy.longBreakMax || DEFAULT_SETTINGS.longBreakMax),
       interactionModes: policy.interactionModes || DEFAULT_SETTINGS.interactionModes,
       searchKeywordPool: policy.searchKeywordPool || [],
+      pageIntelligenceEnabled: policy.pageIntelligenceEnabled !== false,
+      pageIntelligenceUseScreenshot: Boolean(policy.pageIntelligenceUseScreenshot),
     };
     await chrome.storage.local.set({ settings: mergedSettings, behaviorPolicy: policy });
     const tabs = await chrome.tabs.query({ url: ['https://www.zhipin.com/*', 'https://www.bosszhipin.com/*'] });
@@ -600,6 +632,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'syncJobRequirementToBackend') {
     syncToBackend('/api/job-requirements', message.jobRequirement || {})
+      .then(sendResponse)
+      .catch(err => sendResponse({ success: false, message: err.message }));
+    return true;
+  }
+
+  if (message.action === 'extractPageIntelligence') {
+    extractPageIntelligence(message.payload || {}, sender)
       .then(sendResponse)
       .catch(err => sendResponse({ success: false, message: err.message }));
     return true;
