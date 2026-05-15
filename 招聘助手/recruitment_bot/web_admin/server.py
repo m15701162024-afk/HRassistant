@@ -960,12 +960,16 @@ def sanitize_job_requirement_text(requirement: str) -> str:
     if not text:
         return ""
     text = re.sub(
-        r"(工作内容|工作职责|岗位职责|职位描述|工作要求|任职要求|岗位要求|职位要求)",
+        r"(工作内容|工作职责|岗位职责|职位职责|职位描述|工作要求|任职要求|岗位要求|职位要求)",
         r" \1 ",
         text,
     )
+    has_resume_markers = bool(re.search(r"工作经历|项目经验|项目经历|教育经历|期望职位|求职期望", text))
+    has_job_detail_markers = bool(re.search(r"职位详情|职位描述|职位职责|任职要求|岗位要求|职位要求|薪资详情|工作地址|职位发布", text))
+    if has_resume_markers and not has_job_detail_markers:
+        return ""
     stop_markers = [
-        "薪资详情", "职位福利", "工作地点", "公司介绍", "工商信息", "竞争力分析",
+        "薪资详情", "职位福利", "工作地点", "工作地址", "职位发布", "公司介绍", "工商信息", "竞争力分析",
         "相似职位", "推荐职位", "沟通职位", "立即沟通", "在线沟通", "全部职位",
         "新招呼", "沟通中", "账号权益", "招聘规范", "我的客服", "招聘数据",
     ]
@@ -990,7 +994,7 @@ def sanitize_job_requirement_text(requirement: str) -> str:
         return f"{title}：{body[:3000]}"
 
     content = section(
-        ["工作内容", "工作职责", "岗位职责", "职位描述"],
+        ["工作内容", "工作职责", "岗位职责", "职位职责", "职位描述"],
         ["工作要求", "任职要求", "岗位要求", "职位要求", *stop_markers],
     )
     requirement_text = section(
@@ -1004,7 +1008,7 @@ def is_valid_job_requirement_text(requirement: str) -> bool:
     text = re.sub(r"\s+", " ", str(requirement or "")).strip()
     if len(text) < 20:
         return False
-    has_job_section = bool(re.search(r"工作内容|工作职责|岗位职责|职位描述|工作要求|任职要求|岗位要求|职位要求", text))
+    has_job_section = bool(re.search(r"工作内容|工作职责|岗位职责|职位职责|职位描述|工作要求|任职要求|岗位要求|职位要求", text))
     polluted_markers = [
         "新招呼", "沟通中", "全部职位", "账号权益", "招聘规范", "BOSS您好", "Boss，您好",
         "您好，我叫", "您好，我是", "您好！我是", "你好，我是", "进一步沟通",
@@ -1016,7 +1020,7 @@ def is_valid_job_requirement_text(requirement: str) -> bool:
     repeated_roles = set(re.findall(r"[\u4e00-\u9fa5A-Za-z/+-]+(?:工程师|分析|开发|产品|运营)[^\s，。|]{0,18}\(J\d+\)", text))
     if len(repeated_roles) >= 2:
         return False
-    has_content = bool(re.search(r"工作内容|工作职责|岗位职责|职位描述", text))
+    has_content = bool(re.search(r"工作内容|工作职责|岗位职责|职位职责|职位描述", text))
     has_requirement = bool(re.search(r"工作要求|任职要求|职位要求", text))
     return has_job_section and (has_content or has_requirement)
 
@@ -2000,7 +2004,7 @@ def build_page_intelligence_system_prompt() -> str:
     return (
         "你是招聘助手的页面 OCR/NLP 识别引擎，负责从 BOSS 直聘页面文本和截图中抽取候选人信息。"
         "只允许根据输入材料抽取，不要编造。需要过滤导航栏、账号权益、职位管理、聊天历史、推荐列表等噪声。"
-        "岗位 JD 只抽取“工作内容/工作职责/岗位职责”和“工作要求/任职要求/岗位要求”下的介绍文字。"
+        "岗位 JD 只抽取“工作内容/工作职责/岗位职责/职位职责”和“工作要求/任职要求/岗位要求”下的介绍文字。"
         "必须只输出 JSON 对象，不要输出 markdown。"
     )
 

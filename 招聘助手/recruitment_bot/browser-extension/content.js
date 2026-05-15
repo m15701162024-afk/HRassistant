@@ -91,6 +91,13 @@ const RESUME_ACTIONS = {
 
 const RESUME_REQUEST_FALLBACK_MESSAGE = '方便发一份您的简历过来吗？';
 
+const WORKBENCH_TEXT = {
+  sidebarNoise: /职位管理|推荐牛人|深度搜索|搜索|意向沟通|互动|牛人管理|道具|项目外包|直播招聘|更多/,
+  listNoise: /心仪牛人不回应|顾问帮您打电话|全部职位|批量|未读/,
+  candidateListSignal: /J\d+|工程师|开发|分析|运营|产品|实习|经理|算法|测试|前端|后端|结构|电气|工艺|SQE|DevOps|PLM|ERP/,
+  candidateSummarySignal: /牛人分析器|在线|刚刚活跃|岁|本科|大专|硕士|博士|工作经历|期望职位/,
+};
+
 const AGENTS_EVALUATION_RULES = {
   hard: 20,
   skills: 30,
@@ -761,6 +768,7 @@ async function ensureChatJobRequirement(resumeInfo) {
       const startedAt = Date.now();
       while (Date.now() - startedAt < 9000 && !requirement) {
         await sleep(600 + Math.random() * 700);
+        await expandCurrentJobDetail(resumeInfo.role);
         requirement = extractJobRequirementFromPage(document.body, resumeInfo.role);
       }
     }
@@ -801,12 +809,37 @@ async function openJobDetailAndExtractRequirement(card, role) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 9000) {
     await sleep(600 + Math.random() * 700);
+    await expandCurrentJobDetail(role);
     const requirement = extractJobRequirementFromPage(document.body, role);
     if (requirement && normalizeText(document.body.textContent || '') !== previousText) {
       return requirement;
     }
   }
   return '';
+}
+
+async function expandCurrentJobDetail(role = '') {
+  const detailContainer = findLikelyJobDetailContainer(role, document.body);
+  if (!detailContainer) return false;
+  return clickExpandableText(detailContainer, ['展开全部', '查看更多', '展开']);
+}
+
+async function clickExpandableText(container, labels = []) {
+  const targets = Array.from(container.querySelectorAll('button, a, [role="button"], span, div'))
+    .filter(isActionableElement)
+    .filter(element => {
+      const text = getClickableText(element);
+      return labels.some(label => text === label || text.includes(label)) && text.length <= 40;
+    })
+    .sort((a, b) => getClickableText(a).length - getClickableText(b).length);
+  if (!targets.length) return false;
+  await simulateMouseMove(targets[0]);
+  await sleep(300 + Math.random() * 600);
+  const clicked = simulateHumanClick(targets[0]);
+  if (clicked) {
+    await sleep(800 + Math.random() * 1000);
+  }
+  return clicked;
 }
 
 function findJobDetailTrigger(card, role) {
@@ -891,9 +924,8 @@ function findAcceptButton(card) {
 }
 
 function findActionTargets(scope = document) {
-  const roots = scope === document
-    ? [document]
-    : [scope];
+  const panel = scope === document ? findWorkbenchConversationPanel() : scope;
+  const roots = panel === document ? [document] : [panel || document];
   const targets = [];
   const seen = new Set();
 
@@ -920,7 +952,19 @@ function findActionTargets(scope = document) {
     });
   });
 
-  return targets;
+  return targets.sort((a, b) => scoreResumeActionTarget(b) - scoreResumeActionTarget(a));
+}
+
+function scoreResumeActionTarget(target) {
+  const rect = target.button.getBoundingClientRect();
+  let score = 0;
+  if (/^(同意|接收|求简历|索要简历|请求简历)$/.test(target.text)) score += 8;
+  if (target.button.tagName && /button/i.test(target.button.tagName)) score += 3;
+  if (target.type === 'request' && rect.top > window.innerHeight * 0.55) score += 4;
+  if (target.type === 'accept' && rect.top > window.innerHeight * 0.25) score += 2;
+  if (rect.width >= 48 && rect.width <= 180) score += 2;
+  if (target.text.length > 20) score -= 4;
+  return score;
 }
 
 function isActionableElement(element) {
@@ -933,6 +977,74 @@ function isActionableElement(element) {
   }
   const rect = element.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
+}
+
+function getElementText(element) {
+  return normalizeText(element?.innerText || element?.textContent || '');
+}
+
+function rectInside(inner, outer, tolerance = 8) {
+  if (!inner || !outer) return false;
+  return inner.left >= outer.left - tolerance &&
+    inner.right <= outer.right + tolerance &&
+    inner.top >= outer.top - tolerance &&
+    inner.bottom <= outer.bottom + tolerance;
+}
+
+function containsElement(container, element) {
+  if (!container || !element) return false;
+  return container === element || container.contains(element);
+}
+
+function findWorkbenchCandidateListPanel() {
+  const candidates = Array.from(document.querySelectorAll('section, aside, article, div, ul'))
+    .filter(isActionableElement)
+    .map(element => {
+      const text = getElementText(element);
+      const rect = element.getBoundingClientRect();
+      let score = 0;
+      if (/全部职位/.test(text)) score += 5;
+      if (/未读/.test(text)) score += 3;
+      if (/批量/.test(text)) score += 2;
+      if (/\d{1,2}:\d{2}/.test(text)) score += 3;
+      if ((text.match(/\(J\d+\)/g) || []).length >= 3) score += 6;
+      if (rect.height > window.innerHeight * 0.45) score += 2;
+      if (rect.width >= 240 && rect.width <= 520) score += 2;
+      if (WORKBENCH_TEXT.sidebarNoise.test(text)) score -= 8;
+      return { element, text, rect, score };
+    })
+    .filter(item => item.score >= 7 && item.text.length >= 80 && item.text.length <= 12000)
+    .sort((a, b) => b.score - a.score || a.rect.left - b.rect.left || a.text.length - b.text.length);
+  return candidates[0]?.element || null;
+}
+
+function findWorkbenchConversationPanel() {
+  const listPanel = findWorkbenchCandidateListPanel();
+  const listRect = listPanel?.getBoundingClientRect();
+  const candidates = Array.from(document.querySelectorAll('main, section, article, div, [class*="chat"], [class*="conversation"], [class*="im"]'))
+    .filter(isActionableElement)
+    .map(element => {
+      const text = getElementText(element);
+      const rect = element.getBoundingClientRect();
+      let score = 0;
+      if (/沟通职位/.test(text)) score += 6;
+      if (/在线简历/.test(text)) score += 5;
+      if (/求简历|换电话|换微信|约面试|不合适/.test(text)) score += 4;
+      if (/牛人分析器|刚刚活跃|期望/.test(text)) score += 3;
+      if (listRect && rect.left >= listRect.right - 20) score += 3;
+      if (rect.width > 520 && rect.height > window.innerHeight * 0.45) score += 2;
+      if (WORKBENCH_TEXT.sidebarNoise.test(text) && !/沟通职位/.test(text)) score -= 8;
+      if (/全部职位/.test(text) && /批量/.test(text)) score -= 4;
+      return { element, text, rect, score };
+    })
+    .filter(item => item.score >= 8 && item.text.length >= 80 && item.text.length <= 30000)
+    .sort((a, b) => b.score - a.score || b.rect.width * b.rect.height - a.rect.width * a.rect.height);
+  return candidates[0]?.element || document.body;
+}
+
+function findElementsInWorkbenchScope(scope, selector) {
+  const root = scope && scope !== document ? scope : findWorkbenchConversationPanel();
+  return Array.from(root?.querySelectorAll?.(selector) || document.querySelectorAll(selector));
 }
 
 function getClickableText(element) {
@@ -961,13 +1073,24 @@ function matchResumeAction(text, element) {
 
 function findCommunicationJobTrigger(role = '') {
   const roleText = normalizeText(role || '');
-  const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], [class*="job"], [class*="position"], [class*="chat"], div, span'));
-  return candidates.find((element) => {
-    if (!isActionableElement(element)) return false;
-    const text = normalizeText(element.textContent || '');
-    if (!text || text.length > 120) return false;
-    return text.includes('沟通职位') || (roleText && text.includes(roleText) && /\(J\d+\)|J\d+|职位/.test(text));
-  }) || null;
+  const panel = findWorkbenchConversationPanel();
+  const candidates = findElementsInWorkbenchScope(panel, 'button, a, [role="button"], [class*="job"], [class*="position"], [class*="chat"], div, span')
+    .filter(isActionableElement)
+    .map(element => {
+      const text = getElementText(element);
+      const rect = element.getBoundingClientRect();
+      let score = 0;
+      if (/沟通职位/.test(text)) score += 8;
+      if (roleText && text.includes(roleText)) score += 6;
+      if (/\(J\d+\)|J\d+/.test(text)) score += 3;
+      if (text.length <= 90) score += 2;
+      if (rect.top < window.innerHeight * 0.35) score += 2;
+      if (/您好|BOSS|求简历|在线简历|附件简历/.test(text)) score -= 6;
+      return { element, text, score };
+    })
+    .filter(item => item.score >= 8 && item.text.length > 0 && item.text.length <= 140)
+    .sort((a, b) => b.score - a.score || a.text.length - b.text.length);
+  return candidates[0]?.element || null;
 }
 
 function getActionKey(type, element, text) {
@@ -1027,7 +1150,9 @@ async function closeResumeOverlayIfPresent() {
 }
 
 async function prepareCommunicationActionsForRequest() {
-  const input = document.querySelector('textarea, input[type="text"], [contenteditable="true"], [class*="input"], [class*="editor"]');
+  const panel = findWorkbenchConversationPanel();
+  const input = panel?.querySelector?.('textarea, input[type="text"], [contenteditable="true"], [class*="input"], [class*="editor"]') ||
+    document.querySelector('textarea, input[type="text"], [contenteditable="true"], [class*="input"], [class*="editor"]');
   if (input?.scrollIntoView) {
     input.scrollIntoView({ block: 'center', inline: 'nearest' });
     await sleep(500 + Math.random() * 700);
@@ -1055,7 +1180,9 @@ function isLikelyChatInput(element) {
 }
 
 function findChatMessageInput() {
-  const inputs = Array.from(document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"]'))
+  const panel = findWorkbenchConversationPanel();
+  const roots = panel && panel !== document.body ? [panel, document.body] : [document.body];
+  const inputs = roots.flatMap(root => Array.from(root.querySelectorAll('textarea, input[type="text"], [contenteditable="true"]')))
     .filter(isLikelyChatInput)
     .sort((a, b) => {
       const aRect = a.getBoundingClientRect();
@@ -1199,6 +1326,8 @@ async function sendResumeRequestFallbackMessage(contextName = '候选人', reaso
 }
 
 function findCandidateNavigationTargets() {
+  const listPanel = findWorkbenchCandidateListPanel();
+  const roots = listPanel ? [listPanel] : [document];
   const selectors = [
     '.geek-item',
     '.resume-list-item',
@@ -1214,12 +1343,15 @@ function findCandidateNavigationTargets() {
   const targets = [];
   const seen = new Set();
 
-  selectors.forEach(selector => {
-    document.querySelectorAll(selector).forEach(card => {
+  roots.forEach(root => {
+    selectors.forEach(selector => {
+      root.querySelectorAll(selector).forEach(card => {
       if (!isActionableElement(card)) return;
       const text = normalizeText(card.textContent || '');
       if (!text || text.length < 2) return;
       if (/^(同意|接收|接收简历|索要简历|请求简历)$/.test(text)) return;
+      if (!isLikelyCandidateListItemText(text)) return;
+      if (listPanel && !containsElement(listPanel, card)) return;
 
       const clickable = findCardClickable(card);
       if (!clickable) return;
@@ -1236,8 +1368,20 @@ function findCandidateNavigationTargets() {
       });
     });
   });
+  });
 
   return targets;
+}
+
+function isLikelyCandidateListItemText(text) {
+  if (!text || text.length < 8 || text.length > 360) return false;
+  if (WORKBENCH_TEXT.sidebarNoise.test(text)) return false;
+  if (/心仪牛人不回应|顾问帮您打电话/.test(text)) return false;
+  const hasRole = WORKBENCH_TEXT.candidateListSignal.test(text);
+  const hasChatSnippet = /您好|你好|Boss|BOSS|面试官|刚刚|希望|可以|方便/.test(text);
+  const hasTime = /\d{1,2}:\d{2}/.test(text);
+  const hasName = Boolean(extractCandidateNameFromText(text));
+  return hasName && (hasRole || hasChatSnippet || hasTime);
 }
 
 function findCardClickable(card) {
@@ -1480,9 +1624,12 @@ function extractStructuredJobRequirementText(source, role = '') {
     : (source.innerText || source.textContent || '');
   let text = normalizeText(rawText);
   if (!text || text.length < 40) return '';
-  text = text.replace(/(工作内容|工作职责|岗位职责|职位描述|工作要求|任职要求|岗位要求|职位要求)/g, ' $1 ');
+  const hasResumeMarkers = /(工作经历|项目经验|项目经历|教育经历|期望职位|求职期望)/.test(text);
+  const hasJobDetailMarkers = /(职位详情|职位描述|职位职责|任职要求|岗位要求|职位要求|薪资详情|工作地址|职位发布)/.test(text);
+  if (hasResumeMarkers && !hasJobDetailMarkers) return '';
+  text = text.replace(/(工作内容|工作职责|岗位职责|职位职责|职位描述|工作要求|任职要求|岗位要求|职位要求)/g, ' $1 ');
 
-  const content = extractJobTextSection(text, ['工作内容', '工作职责', '岗位职责', '职位描述'], [
+  const content = extractJobTextSection(text, ['工作内容', '工作职责', '岗位职责', '职位职责', '职位描述'], [
     '工作要求', '任职要求', '岗位要求', '职位要求',
     ...JOB_REQUIREMENT_STOP_MARKERS,
   ]);
@@ -1497,7 +1644,7 @@ function extractStructuredJobRequirementText(source, role = '') {
 }
 
 const JOB_REQUIREMENT_STOP_MARKERS = [
-  '薪资详情', '职位福利', '工作地点', '公司介绍', '工商信息', '竞争力分析',
+  '薪资详情', '职位福利', '工作地点', '工作地址', '职位发布', '公司介绍', '工商信息', '竞争力分析',
   '相似职位', '推荐职位', '沟通职位', '立即沟通', '在线沟通', '全部职位',
   '新招呼', '沟通中', '账号权益', '招聘规范', '我的客服', '招聘数据',
 ];
@@ -1564,12 +1711,15 @@ function findLikelyJobDetailContainer(role = '', scope = document) {
     .filter(isActionableElement)
     .map(element => {
       const text = normalizeText(element.innerText || element.textContent || '');
-      const hasContent = /(工作内容|工作职责|岗位职责|职位描述)/.test(text);
+      const hasContent = /(工作内容|工作职责|岗位职责|职位职责|职位描述)/.test(text);
       const hasRequirement = /(工作要求|任职要求|职位要求)/.test(text);
       const hasGenericRequirement = /岗位要求/.test(text) && (hasContent || hasRequirement);
+      const hasResumeMarkers = /(工作经历|项目经验|项目经历|教育经历|期望职位|求职期望)/.test(text);
+      const hasJobDetailMarkers = /(职位详情|职位描述|职位职责|任职要求|岗位要求|职位要求|薪资详情|工作地址|职位发布)/.test(text);
       const roleScore = roleText && text.includes(roleText) ? 3 : 0;
       const sectionScore = (hasContent ? 4 : 0) + (hasRequirement ? 4 : 0) + (hasGenericRequirement ? 1 : 0);
-      return { element, text, score: roleScore + sectionScore };
+      const resumePenalty = hasResumeMarkers && !hasJobDetailMarkers ? 8 : 0;
+      return { element, text, score: roleScore + sectionScore - resumePenalty };
     })
     .filter(item => item.score >= 4 && item.text.length >= 40 && item.text.length <= 16000 && !isPollutedJobRequirementText(item.text, role))
     .sort((a, b) => b.score - a.score || a.text.length - b.text.length)[0]?.element || null;
@@ -1596,7 +1746,7 @@ function looksLikeJobRequirement(text, role = '') {
   if (isPollutedJobRequirementText(text, role)) {
     return false;
   }
-  const hasContent = /(工作内容|工作职责|岗位职责|职位描述)/.test(text);
+  const hasContent = /(工作内容|工作职责|岗位职责|职位职责|职位描述)/.test(text);
   const hasRequirement = /(工作要求|任职要求|职位要求)/.test(text);
   return hasContent || hasRequirement;
 }
@@ -1754,7 +1904,7 @@ function mergePageIntelligenceCandidate(candidate, extracted = {}) {
     }
   });
   if (extracted.topLevelText && !isPollutedCandidateText(extracted.topLevelText)) {
-    merged.rawText = extracted.topLevelText;
+    merged.rawText = merged.resumeDetailText || extracted.topLevelText;
   }
   if (extracted.jobRequirement && looksLikeJobRequirement(extracted.jobRequirement)) {
     merged.jobRequirement = extracted.jobRequirement;
@@ -1821,6 +1971,7 @@ function evaluateCandidate(info) {
     info.currentCompany,
     info.summary,
     info.jobRequirement,
+    info.resumeDetailText,
     info.rawText,
   ].filter(Boolean).join(' ');
 
@@ -2673,8 +2824,11 @@ async function openOnlineResumeIfPresent() {
 }
 
 async function scrapeVisibleOnlineResumeInfo(baseCandidate = {}) {
-  const topLevelText = extractCandidateTopLevelText(document, baseCandidate.name) ||
-                       cleanCandidateTopLevelText(findCandidateSummaryPanel()?.textContent || '');
+  const resumeContainer = findOnlineResumeContainer();
+  const detailText = await collectOnlineResumeDetailText(resumeContainer);
+  const topLevelText = extractCandidateTopLevelText(resumeContainer || document, baseCandidate.name) ||
+                       cleanCandidateTopLevelText(findCandidateSummaryPanel()?.textContent || '') ||
+                       cleanCandidateTopLevelText(detailText);
   if (!topLevelText) return null;
   let resumeInfo = {
     ...baseCandidate,
@@ -2691,7 +2845,8 @@ async function scrapeVisibleOnlineResumeInfo(baseCandidate = {}) {
     resumeStatus: '无附件简历（在线简历）',
     resumeEvidence: 'onlineResumeOpened',
     topLevelText,
-    rawText: topLevelText,
+    resumeDetailText: detailText,
+    rawText: detailText || topLevelText,
     education: extractEducationFromText(topLevelText) || baseCandidate.education || '',
     experience: extractExperienceFromText(topLevelText) || baseCandidate.experience || '',
     expectedSalary: extractExpectedSalaryFromText(topLevelText) || baseCandidate.expectedSalary || '',
@@ -2711,14 +2866,109 @@ async function scrapeVisibleOnlineResumeInfo(baseCandidate = {}) {
   return resumeInfo.name && resumeInfo.role ? resumeInfo : null;
 }
 
+function findOnlineResumeContainer() {
+  const candidates = Array.from(document.querySelectorAll([
+    '[role="dialog"]',
+    '[class*="dialog"]',
+    '[class*="modal"]',
+    '[class*="drawer"]',
+    '[class*="resume"]',
+    '[class*="geek"]',
+    'section',
+    'article',
+    'div',
+  ].join(',')))
+    .filter(isActionableElement)
+    .map(element => {
+      const text = getElementText(element);
+      const rect = element.getBoundingClientRect();
+      let score = 0;
+      if (/工作经历/.test(text)) score += 5;
+      if (/项目经验|项目经历/.test(text)) score += 4;
+      if (/教育经历|期望职位/.test(text)) score += 3;
+      if (/查看全部|继续沟通/.test(text)) score += 2;
+      if (WORKBENCH_TEXT.candidateSummarySignal.test(text)) score += 2;
+      if (/职位详情|薪资详情|工作地址/.test(text)) score -= 5;
+      if (rect.width > 420 && rect.height > window.innerHeight * 0.45) score += 2;
+      return { element, text, rect, score };
+    })
+    .filter(item => item.score >= 7 && item.text.length >= 120 && item.text.length <= 50000)
+    .sort((a, b) => b.score - a.score || b.rect.width * b.rect.height - a.rect.width * a.rect.height);
+  return candidates[0]?.element || null;
+}
+
+async function collectOnlineResumeDetailText(container) {
+  if (!container) return '';
+  await clickExpandableText(container, ['查看全部', '展开全部', '查看更多']);
+  const scrollTarget = findScrollableChild(container) || container;
+  const snapshots = new Set();
+  let previousTop = -1;
+  for (let i = 0; i < 8; i++) {
+    snapshots.add(getElementText(container));
+    if (!scrollTarget || scrollTarget.scrollHeight <= scrollTarget.clientHeight + 40) break;
+    previousTop = scrollTarget.scrollTop;
+    scrollTarget.scrollBy({
+      top: Math.max(180, scrollTarget.clientHeight * 0.72),
+      behavior: 'smooth',
+    });
+    await sleep(450 + Math.random() * 650);
+    await clickExpandableText(container, ['查看全部', '展开全部', '查看更多']);
+    if (scrollTarget.scrollTop === previousTop) break;
+  }
+  if (scrollTarget && scrollTarget.scrollTo) {
+    scrollTarget.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  return cleanOnlineResumeDetailText(Array.from(snapshots).join(' '));
+}
+
+function findScrollableChild(container) {
+  const candidates = [container, ...Array.from(container.querySelectorAll('*'))]
+    .filter(element => {
+      try {
+        const rect = element.getBoundingClientRect();
+        return rect.height > 220 && rect.width > 320 && element.scrollHeight > element.clientHeight + 80;
+      } catch (e) {
+        return false;
+      }
+    })
+    .sort((a, b) => (b.getBoundingClientRect().height * b.getBoundingClientRect().width) - (a.getBoundingClientRect().height * a.getBoundingClientRect().width));
+  return candidates[0] || null;
+}
+
+function cleanOnlineResumeDetailText(text) {
+  let normalized = normalizeText(text || '');
+  const noiseMarkers = ['收藏', '转发', '举报', '继续沟通', '不合适', '求简历', '换电话', '换微信', '约面试'];
+  noiseMarkers.forEach(marker => {
+    normalized = normalized.replace(new RegExp(marker, 'g'), ' ');
+  });
+  normalized = normalizeText(normalized);
+  const pageMarkers = ['全部职位', '新招呼', '沟通中', '账号权益', '招聘规范', '职位管理']
+    .filter(marker => normalized.includes(marker)).length;
+  const repeatedRoles = new Set(normalized.match(/[\u4e00-\u9fa5A-Za-z/+-]+(?:工程师|分析|开发|产品|运营)[^\s，。|]{0,18}\(J\d+\)/g) || []).size;
+  return pageMarkers >= 3 || repeatedRoles >= 5
+    ? cleanCandidateTopLevelText(normalized)
+    : normalized.slice(0, 20000);
+}
+
 function findClickableByText(keywords) {
-  const elements = Array.from(document.querySelectorAll('button, a, [role="button"], span, div'));
-  return elements.find(element => {
+  const panel = findWorkbenchConversationPanel();
+  const elements = findElementsInWorkbenchScope(panel, 'button, a, [role="button"], span, div');
+  return elements
+    .filter(element => {
     if (!isActionableElement(element)) return false;
     const text = getClickableText(element);
     if (!text || text.length > 40) return false;
     return keywords.some(keyword => text.includes(keyword));
-  }) || null;
+  })
+    .sort((a, b) => {
+      const aText = getClickableText(a);
+      const bText = getClickableText(b);
+      const aExact = keywords.some(keyword => aText === keyword) ? 0 : 1;
+      const bExact = keywords.some(keyword => bText === keyword) ? 0 : 1;
+      const aRect = a.getBoundingClientRect();
+      const bRect = b.getBoundingClientRect();
+      return aExact - bExact || aText.length - bText.length || aRect.top - bRect.top;
+    })[0] || null;
 }
 
 function getCurrentWorkflowKey(candidate) {
@@ -2861,21 +3111,27 @@ async function scrapeChatCandidateInfo() {
 }
 
 function findCandidateSummaryPanel() {
-  const elements = Array.from(document.querySelectorAll('section, header, article, [class*="card"], [class*="geek"], [class*="resume"], [class*="user"], [class*="profile"], div'));
+  const panel = findWorkbenchConversationPanel();
+  const elements = Array.from((panel || document).querySelectorAll('section, header, article, [class*="card"], [class*="geek"], [class*="resume"], [class*="user"], [class*="profile"], div'));
   const candidates = elements
     .filter(isActionableElement)
     .map((element) => ({
       element,
-      text: normalizeText(element.textContent || ''),
+      text: getElementText(element),
       rect: element.getBoundingClientRect(),
     }))
     .filter(({ text, rect }) => {
       if (!text || text.length < 12 || text.length > 900) return false;
       if (rect.width < 180 || rect.height < 45) return false;
       if (/全部职位|新招呼|沟通中|账号权益|招聘规范|职位管理|推荐牛人/.test(text)) return false;
-      return /(牛人分析器|在线|岁|年|本科|大专|硕士|博士)/.test(text) && /(J\d+|沟通职位|本科|大专|硕士|博士|年)/.test(text);
+      if (/工作经历|项目经验|项目经历|职位详情|工作地址/.test(text) && text.length > 500) return false;
+      return WORKBENCH_TEXT.candidateSummarySignal.test(text) && /(J\d+|沟通职位|本科|大专|硕士|博士|年|期望)/.test(text);
     })
-    .sort((a, b) => (a.text.length - b.text.length) || (b.rect.width * b.rect.height - a.rect.width * a.rect.height));
+    .sort((a, b) => {
+      const aTop = a.rect.top < window.innerHeight * 0.32 ? 0 : 1;
+      const bTop = b.rect.top < window.innerHeight * 0.32 ? 0 : 1;
+      return aTop - bTop || (a.text.length - b.text.length) || (b.rect.width * b.rect.height - a.rect.width * a.rect.height);
+    });
   return candidates[0]?.element || null;
 }
 
