@@ -462,12 +462,77 @@ def init_db() -> None:
                 finished_at TEXT,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS action_logs (
+                id TEXT PRIMARY KEY,
+                candidate_id TEXT,
+                candidate_name TEXT,
+                role TEXT,
+                account_name TEXT,
+                action_type TEXT NOT NULL,
+                button_text TEXT,
+                page_url TEXT,
+                result TEXT,
+                error_message TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT,
+                role TEXT NOT NULL DEFAULT 'user',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS account_bindings (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                username TEXT,
+                account_name TEXT NOT NULL,
+                account_platform TEXT DEFAULT 'BOSS直聘',
+                status TEXT NOT NULL DEFAULT 'pending',
+                reviewed_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS push_records (
+                id TEXT PRIMARY KEY,
+                scope_start TEXT,
+                scope_end TEXT,
+                label TEXT,
+                account_name TEXT,
+                candidate_count INTEGER DEFAULT 0,
+                resume_count INTEGER DEFAULT 0,
+                recommendation_count INTEGER DEFAULT 0,
+                excel_file TEXT,
+                excel_url TEXT,
+                delivery_status TEXT,
+                message TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            );
             """
         )
+        ensure_columns(conn, "candidates", {
+            "status": "TEXT DEFAULT '新增'",
+            "resume_status": "TEXT DEFAULT ''",
+            "has_attachment_resume": "INTEGER DEFAULT 0",
+            "resume_request_status": "TEXT DEFAULT ''",
+            "current_company": "TEXT DEFAULT ''",
+            "last_communication_at": "TEXT DEFAULT ''",
+            "top_level_text": "TEXT DEFAULT ''",
+            "resume_detail_text": "TEXT DEFAULT ''",
+        })
         ensure_columns(conn, "job_requirements", {
             "status": "TEXT DEFAULT 'active'",
             "failure_reason": "TEXT DEFAULT ''",
         })
+        ensure_default_admin_user(conn)
         cleanup_job_requirements(conn)
         cleanup_candidate_names(conn)
 
@@ -785,6 +850,126 @@ def validate_candidate_minimum(candidate: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+def candidate_resume_status(candidate: dict[str, Any]) -> str:
+    if candidate.get("resumeStatus"):
+        return str(candidate.get("resumeStatus") or "").strip()
+    if candidate.get("hasAttachmentResume") or candidate.get("resumeAttachmentType") == "attachment":
+        return "有附件简历"
+    if candidate.get("hasResume") or candidate.get("resumeEvidence") == "onlineResumeOpened":
+        return "无附件简历（在线简历）"
+    return "未获取简历"
+
+
+def candidate_status_from_payload(candidate: dict[str, Any]) -> str:
+    evaluation = candidate.get("evaluation") or {}
+    score = int(candidate.get("score") or evaluation.get("score") or 0)
+    if candidate.get("hasAttachmentResume"):
+        return "已收到简历"
+    request_status = str(candidate.get("resumeRequestStatus") or "")
+    if candidate.get("resumeRequestExecuted") or request_status in {"已点击求简历", "已索要简历", "已发送求简历消息"}:
+        return "已索要简历"
+    if score >= 40:
+        return "推荐"
+    if candidate.get("hasResume"):
+        return "已查看"
+    return str(candidate.get("status") or "新增")
+
+
+def candidate_last_communication(candidate: dict[str, Any]) -> str:
+    for key in ("lastCommunicationAt", "lastCommunicationTime", "communicationTime", "messageTime", "updatedAt"):
+        value = str(candidate.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def candidate_current_company(candidate: dict[str, Any]) -> str:
+    for key in ("currentCompany", "company", "latestCompany"):
+        value = str(candidate.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def candidate_resume_detail_text(candidate: dict[str, Any]) -> str:
+    for key in ("resumeDetailText", "resumeText", "fullResumeText", "rawText"):
+        value = str(candidate.get(key) or "").strip()
+        if value:
+            return value[:20000]
+    return ""
+
+
+def candidate_top_level_text(candidate: dict[str, Any]) -> str:
+    return sanitize_candidate_snapshot(candidate.get("topLevelText") or candidate.get("summary") or candidate.get("rawText") or "")
+
+
+def insert_action_log(
+    conn: sqlite3.Connection,
+    *,
+    candidate_id: str = "",
+    candidate_name: str = "",
+    role: str = "",
+    account_name: str = "",
+    action_type: str = "",
+    button_text: str = "",
+    page_url: str = "",
+    result: str = "",
+    error_message: str = "",
+    raw: dict[str, Any] | None = None,
+    created_at: str = "",
+) -> None:
+    if not action_type:
+        return
+    created_at = created_at or now_iso()
+    raw = raw or {}
+    source = json.dumps(raw, ensure_ascii=False, sort_keys=True)
+    item_id = hashlib.sha1(f"{candidate_id}|{action_type}|{button_text}|{created_at}|{source}".encode()).hexdigest()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO action_logs
+        (id, candidate_id, candidate_name, role, account_name, action_type, button_text, page_url, result, error_message, raw_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            item_id,
+            candidate_id,
+            candidate_name,
+            role,
+            account_name,
+            action_type,
+            button_text,
+            page_url,
+            result,
+            error_message,
+            source,
+            created_at,
+        ),
+    )
+
+
+def record_candidate_action_logs(conn: sqlite3.Connection, candidate_id: str, candidate: dict[str, Any]) -> None:
+    actions = candidate.get("workflowActions")
+    if not isinstance(actions, list):
+        return
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        insert_action_log(
+            conn,
+            candidate_id=candidate_id,
+            candidate_name=str(candidate.get("name") or ""),
+            role=str(candidate.get("role") or ""),
+            account_name=str(candidate.get("accountName") or ""),
+            action_type=str(action.get("type") or "workflowAction"),
+            button_text=str(action.get("text") or action.get("buttonText") or ""),
+            page_url=str(action.get("pageUrl") or candidate.get("sourceUrl") or ""),
+            result=str(action.get("status") or action.get("result") or ""),
+            error_message=str(action.get("error") or action.get("errorMessage") or ""),
+            raw=action,
+            created_at=str(action.get("at") or now_iso()),
+        )
+
+
 def sanitize_candidate_snapshot(text: Any) -> str:
     normalized = " ".join(str(text or "").split()).strip()
     if not normalized:
@@ -889,6 +1074,18 @@ def upsert_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     candidate = normalize_candidate_payload(candidate)
     ok, reason = validate_candidate_minimum(candidate)
     if not ok:
+        with connect() as conn:
+            insert_action_log(
+                conn,
+                candidate_id=str(candidate.get("id") or ""),
+                candidate_name=str(candidate.get("name") or ""),
+                role=str(candidate.get("role") or ""),
+                account_name=str(candidate.get("accountName") or ""),
+                action_type="candidateQualityReject",
+                result="failed",
+                error_message=reason,
+                raw=candidate,
+            )
         return {
             "success": False,
             "message": f"候选人未入库：{reason}",
@@ -896,6 +1093,12 @@ def upsert_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         }
     candidate_id = str(candidate.get("id") or hashlib.sha1(json.dumps(candidate, ensure_ascii=False).encode()).hexdigest())
     evaluation = candidate.get("evaluation") or {}
+    stored_candidate = dict(candidate)
+    if get_settings().get("saveRawResumeText") is False:
+        for key in ("resumeDetailText", "resumeText", "fullResumeText"):
+            stored_candidate.pop(key, None)
+        if len(str(stored_candidate.get("rawText") or "")) > 1200:
+            stored_candidate["rawText"] = candidate_top_level_text(candidate)
     with connect() as conn:
         existing = conn.execute("SELECT id FROM candidates WHERE id = ?", (candidate_id,)).fetchone()
         created_at = now_iso()
@@ -905,8 +1108,10 @@ def upsert_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
             """
             INSERT OR REPLACE INTO candidates
             (id, name, role, source, account_name, account_platform, education, experience,
-             expected_salary, score, recommendation, received_date, raw_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             expected_salary, score, recommendation, received_date, raw_json, status, resume_status,
+             has_attachment_resume, resume_request_status, current_company, last_communication_at,
+             top_level_text, resume_detail_text, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 candidate_id,
@@ -921,11 +1126,20 @@ def upsert_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
                 int(evaluation.get("score") or 0),
                 evaluation.get("recommendation", ""),
                 candidate.get("receivedDate", date_str()),
-                json.dumps(candidate, ensure_ascii=False),
+                json.dumps(stored_candidate, ensure_ascii=False),
+                candidate_status_from_payload(candidate),
+                candidate_resume_status(candidate),
+                1 if candidate.get("hasAttachmentResume") else 0,
+                str(candidate.get("resumeRequestStatus") or ""),
+                candidate_current_company(candidate),
+                candidate_last_communication(candidate),
+                candidate_top_level_text(candidate),
+                candidate_resume_detail_text(candidate),
                 created_at,
                 now_iso(),
             ),
         )
+        record_candidate_action_logs(conn, candidate_id, candidate)
     return {"success": True, "id": candidate_id}
 
 
@@ -1555,6 +1769,9 @@ def list_rows(
     q = (filters.get("q") or "").strip()
     source = (filters.get("source") or "").strip()
     account = (filters.get("account") or "").strip()
+    role_filter = (filters.get("role") or "").strip()
+    status_filter = (filters.get("status") or "").strip()
+    score_min = (filters.get("scoreMin") or filters.get("score_min") or "").strip()
     account_exact = str(filters.get("accountExact") or filters.get("account_exact") or "").strip().lower() in {"1", "true", "yes"}
     if q:
         searchable = {
@@ -1571,6 +1788,22 @@ def list_rows(
         elif table in {"candidates", "recommendations", "job_requirements"}:
             where.append("source LIKE ?")
         params.append(f"%{source}%")
+    if role_filter and table in {"candidates", "recommendations", "job_requirements"}:
+        where.append("role LIKE ?")
+        params.append(f"%{role_filter}%")
+    if status_filter:
+        if table == "candidates":
+            where.append("COALESCE(NULLIF(status, ''), '新增') = ?")
+            params.append(status_filter)
+        elif table == "job_requirements":
+            where.append("COALESCE(NULLIF(status, ''), 'active') = ?")
+            params.append(status_filter)
+    if score_min and table in {"candidates", "recommendations"}:
+        try:
+            where.append("score >= ?")
+            params.append(int(score_min))
+        except ValueError:
+            pass
     if account:
         operator = "=" if account_exact else "LIKE"
         if table == "reports":
@@ -1600,6 +1833,8 @@ def list_recommendation_details(
     q = str(filters.get("q") or "").strip()
     source = str(filters.get("source") or "").strip()
     account = str(filters.get("account") or "").strip()
+    role_filter = str(filters.get("role") or "").strip()
+    score_min = str(filters.get("scoreMin") or filters.get("score_min") or "").strip()
     account_exact = str(filters.get("accountExact") or filters.get("account_exact") or "").strip().lower() in {"1", "true", "yes"}
     if q:
         fields = ["r.name", "r.role", "r.recommendation", "r.next_step", "r.raw_json", "c.education", "c.experience"]
@@ -1608,6 +1843,15 @@ def list_recommendation_details(
     if source:
         where.append("COALESCE(NULLIF(c.source, ''), NULLIF(r.source, ''), '未知来源') LIKE ?")
         params.append(f"%{source}%")
+    if role_filter:
+        where.append("r.role LIKE ?")
+        params.append(f"%{role_filter}%")
+    if score_min:
+        try:
+            where.append("r.score >= ?")
+            params.append(int(score_min))
+        except ValueError:
+            pass
     if account:
         operator = "=" if account_exact else "LIKE"
         where.append(f"COALESCE(NULLIF(c.account_name, ''), NULLIF(r.account_name, ''), '未识别') {operator} ?")
@@ -2072,6 +2316,235 @@ def update_automation_task(payload: dict[str, Any]) -> dict[str, Any]:
     if not row:
         return {"success": False, "message": "任务不存在"}
     return {"success": True, "task": automation_task_row(row)}
+
+
+def ensure_default_admin_user(conn: sqlite3.Connection) -> None:
+    count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
+    if count:
+        return
+    now = now_iso()
+    conn.execute(
+        """
+        INSERT INTO users (id, username, password_hash, role, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            hashlib.sha1(b"default-admin").hexdigest(),
+            "admin",
+            "",
+            "admin",
+            "active",
+            now,
+            now,
+        ),
+    )
+
+
+def list_action_logs(limit: int = 200, filters: dict[str, str] | None = None) -> dict[str, Any]:
+    limit = clamp_int(limit, 200, 1, 1000)
+    filters = filters or {}
+    where: list[str] = []
+    params: list[Any] = []
+    q = str(filters.get("q") or "").strip()
+    account = str(filters.get("account") or "").strip()
+    action_type = str(filters.get("actionType") or filters.get("action_type") or "").strip()
+    if q:
+        fields = ["candidate_name", "role", "action_type", "button_text", "result", "error_message", "raw_json"]
+        where.append("(" + " OR ".join(f"{field} LIKE ?" for field in fields) + ")")
+        params.extend([f"%{q}%"] * len(fields))
+    if account:
+        where.append("COALESCE(NULLIF(account_name, ''), '未识别') LIKE ?")
+        params.append(f"%{account}%")
+    if action_type:
+        where.append("action_type = ?")
+        params.append(action_type)
+    sql = "SELECT * FROM action_logs"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    with connect() as conn:
+        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+    return {"success": True, "items": rows}
+
+
+def list_push_records(limit: int = 100, account: str = "") -> dict[str, Any]:
+    limit = clamp_int(limit, 100, 1, 500)
+    where: list[str] = []
+    params: list[Any] = []
+    if account:
+        where.append("COALESCE(NULLIF(account_name, ''), '全部账号') LIKE ?")
+        params.append(f"%{account}%")
+    sql = "SELECT * FROM push_records"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    with connect() as conn:
+        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+    return {"success": True, "items": rows}
+
+
+def save_push_record(payload: dict[str, Any]) -> dict[str, Any]:
+    created_at = now_iso()
+    item_id = uuid.uuid4().hex
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO push_records
+            (id, scope_start, scope_end, label, account_name, candidate_count, resume_count,
+             recommendation_count, excel_file, excel_url, delivery_status, message, raw_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item_id,
+                str(payload.get("scopeStart") or payload.get("start") or ""),
+                str(payload.get("scopeEnd") or payload.get("end") or ""),
+                str(payload.get("label") or ""),
+                str(payload.get("accountName") or payload.get("account") or ""),
+                int(payload.get("candidateCount") or 0),
+                int(payload.get("resumeCount") or 0),
+                int(payload.get("recommendationCount") or 0),
+                str(payload.get("excelFile") or payload.get("excel") or ""),
+                str(payload.get("excelUrl") or ""),
+                str(payload.get("deliveryStatus") or payload.get("excelDelivery") or ""),
+                str(payload.get("message") or ""),
+                json.dumps(payload, ensure_ascii=False),
+                created_at,
+            ),
+        )
+    return {"success": True, "id": item_id}
+
+
+def list_users() -> dict[str, Any]:
+    with connect() as conn:
+        users = [dict(row) for row in conn.execute("SELECT id, username, role, status, created_at, updated_at FROM users ORDER BY updated_at DESC").fetchall()]
+        bindings = [dict(row) for row in conn.execute("SELECT * FROM account_bindings ORDER BY updated_at DESC").fetchall()]
+    return {"success": True, "users": users, "bindings": bindings}
+
+
+def save_user(payload: dict[str, Any]) -> dict[str, Any]:
+    username = str(payload.get("username") or "").strip()
+    if not username:
+        return {"success": False, "message": "用户名不能为空"}
+    role = str(payload.get("role") or "user").strip()
+    if role not in {"admin", "user"}:
+        role = "user"
+    status = str(payload.get("status") or "pending").strip()
+    if status not in {"pending", "active", "disabled", "rejected"}:
+        status = "pending"
+    password = str(payload.get("password") or "").strip()
+    password_hash = hashlib.sha256(password.encode()).hexdigest() if password else ""
+    now = now_iso()
+    user_id = str(payload.get("id") or hashlib.sha1(username.encode()).hexdigest())
+    with connect() as conn:
+        existing = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        if existing:
+            user_id = existing["id"]
+            if not password_hash:
+                password_hash = existing["password_hash"] or ""
+            created_at = existing["created_at"]
+        else:
+            created_at = now
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO users
+            (id, username, password_hash, role, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, username, password_hash, role, status, created_at, now),
+        )
+    return {"success": True, "id": user_id, **list_users()}
+
+
+def save_account_binding(payload: dict[str, Any]) -> dict[str, Any]:
+    username = str(payload.get("username") or "").strip()
+    account_name = str(payload.get("accountName") or payload.get("account_name") or "").strip()
+    if not username or not account_name:
+        return {"success": False, "message": "用户名和账号不能为空"}
+    platform = str(payload.get("accountPlatform") or payload.get("account_platform") or "BOSS直聘").strip() or "BOSS直聘"
+    status = str(payload.get("status") or "pending").strip()
+    if status not in {"pending", "approved", "rejected", "disabled"}:
+        status = "pending"
+    reviewed_by = str(payload.get("reviewedBy") or payload.get("reviewed_by") or "").strip()
+    now = now_iso()
+    item_id = hashlib.sha1(f"{username}|{account_name}|{platform}".encode()).hexdigest()
+    with connect() as conn:
+        user = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        if not user:
+            save_user({"username": username, "role": "user", "status": "pending"})
+            user = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        existing = conn.execute("SELECT created_at FROM account_bindings WHERE id = ?", (item_id,)).fetchone()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO account_bindings
+            (id, user_id, username, account_name, account_platform, status, reviewed_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item_id,
+                user["id"] if user else "",
+                username,
+                account_name,
+                platform,
+                status,
+                reviewed_by,
+                existing["created_at"] if existing else now,
+                now,
+            ),
+        )
+    return {"success": True, "id": item_id, **list_users()}
+
+
+def delete_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
+    role = str(payload.get("role") or "").strip()
+    account = str(payload.get("accountName") or payload.get("account_name") or "").strip()
+    item_id = str(payload.get("id") or "").strip()
+    if not item_id and not role:
+        return {"success": False, "message": "岗位 ID 或岗位名称不能为空"}
+    with connect() as conn:
+        if payload.get("hardDelete"):
+            if item_id:
+                conn.execute("DELETE FROM job_requirements WHERE id = ?", (item_id,))
+            else:
+                conn.execute("DELETE FROM job_requirements WHERE normalized_role = ?", (scoped_role_key(role, account),))
+            return {"success": True, "deleted": True}
+        now = now_iso()
+        if item_id:
+            conn.execute("UPDATE job_requirements SET status = 'disabled', updated_at = ? WHERE id = ?", (now, item_id))
+        else:
+            conn.execute("UPDATE job_requirements SET status = 'disabled', updated_at = ? WHERE normalized_role = ?", (now, scoped_role_key(role, account)))
+    return {"success": True, "disabled": True}
+
+
+def cleanup_history(payload: dict[str, Any]) -> dict[str, Any]:
+    account = str(payload.get("account") or payload.get("accountName") or "").strip()
+    before = parse_datetime_value(payload.get("before") or payload.get("beforeDate"), end_of_day=True)
+    if not account and not before:
+        return {"success": False, "message": "请至少选择账号或截止日期，避免误删全部数据"}
+    tables = ["reports", "recommendations", "action_logs", "candidates"]
+    deleted: dict[str, int] = {}
+    with connect() as conn:
+        for table in tables:
+            where: list[str] = []
+            params: list[Any] = []
+            if account:
+                account_field = "account_name" if table != "reports" else "account_name"
+                if table == "reports":
+                    where.append("candidate_id IN (SELECT id FROM candidates WHERE account_name = ?)")
+                else:
+                    where.append(f"COALESCE(NULLIF({account_field}, ''), '未识别') = ?")
+                params.append(account)
+            if before:
+                date_field = "created_at"
+                where.append(f"{date_field} <= ?")
+                params.append(before.isoformat(timespec="seconds"))
+            sql = f"DELETE FROM {table}"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            cur = conn.execute(sql, params)
+            deleted[table] = cur.rowcount if cur.rowcount is not None else 0
+    return {"success": True, "deleted": deleted}
 
 
 def save_agent_conversation(
@@ -2730,6 +3203,8 @@ def get_behavior_policy(account: str = "") -> dict[str, Any]:
     policy["interactionModes"] = interaction_modes
     policy["pageIntelligenceEnabled"] = bool(settings.get("pageIntelligenceEnabled", True))
     policy["pageIntelligenceUseScreenshot"] = bool(settings.get("pageIntelligenceUseScreenshot", False))
+    policy["saveRawResumeText"] = bool(settings.get("saveRawResumeText", True))
+    policy["maskSensitiveDisplay"] = bool(settings.get("maskSensitiveDisplay", True))
     policy["accountName"] = account_name
     policy["scope"] = "account" if account_name else "global"
     return policy
@@ -2811,6 +3286,21 @@ def scheduled_push_loop() -> None:
                 markdown = build_push_markdown(scope, dataset, output_path)
                 result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
                 delivery_result = deliver_dingtalk_excel(output_path, dataset)
+                save_push_record({
+                    "scopeStart": dataset["start"].isoformat(timespec="seconds"),
+                    "scopeEnd": dataset["end"].isoformat(timespec="seconds"),
+                    "label": dataset["label"],
+                    "accountName": dataset.get("account") or "",
+                    "candidateCount": len(dataset.get("candidates") or []),
+                    "resumeCount": len(dataset.get("resumeCandidates") or []),
+                    "recommendationCount": len(dataset.get("recommendedCandidates") or []),
+                    "excelFile": output_path.name,
+                    "excelUrl": export_url(output_path),
+                    "deliveryStatus": delivery_result.get("excelDelivery") or "",
+                    "message": delivery_result.get("message") or result.get("message") or "",
+                    "summary": result,
+                    "delivery": delivery_result,
+                })
                 if result.get("success") and delivery_result.get("success"):
                     save_settings({"scheduledPushLastDate": today})
                 elif not delivery_result.get("success"):
@@ -3983,6 +4473,19 @@ class Handler(SimpleHTTPRequestHandler):
                 }))
             elif parsed.path == "/api/accounts":
                 json_response(self, {"items": get_accounts()})
+            elif parsed.path == "/api/users":
+                json_response(self, list_users())
+            elif parsed.path == "/api/action-logs":
+                json_response(self, list_action_logs(int(query.get("limit", ["200"])[0]), {
+                    "q": query.get("q", [""])[0],
+                    "account": query.get("account", [""])[0],
+                    "actionType": query.get("actionType", [""])[0],
+                }))
+            elif parsed.path == "/api/push-records":
+                json_response(self, list_push_records(
+                    int(query.get("limit", ["100"])[0]),
+                    query.get("account", [""])[0],
+                ))
             elif parsed.path == "/api/settings":
                 settings = get_settings()
                 if not usable_base_url(settings.get("publicBaseUrl")):
@@ -4014,6 +4517,9 @@ class Handler(SimpleHTTPRequestHandler):
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
                     "accountExact": query.get("accountExact", [""])[0],
+                    "role": query.get("role", [""])[0],
+                    "status": query.get("status", [""])[0],
+                    "scoreMin": query.get("scoreMin", [""])[0],
                 })})
             elif parsed.path == "/api/recommendations":
                 json_response(self, {"items": list_recommendation_details(int(query.get("limit", ["200"])[0]), filters={
@@ -4021,6 +4527,8 @@ class Handler(SimpleHTTPRequestHandler):
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
                     "accountExact": query.get("accountExact", [""])[0],
+                    "role": query.get("role", [""])[0],
+                    "scoreMin": query.get("scoreMin", [""])[0],
                 })})
             elif parsed.path == "/api/reports":
                 json_response(self, {"items": list_rows("reports", int(query.get("limit", ["100"])[0]), filters={
@@ -4040,6 +4548,8 @@ class Handler(SimpleHTTPRequestHandler):
                         "source": query.get("source", [""])[0],
                         "account": account,
                         "accountExact": query.get("accountExact", [""])[0],
+                        "role": query.get("role", [""])[0],
+                        "status": query.get("status", [""])[0],
                     })})
             elif parsed.path == "/api/agent/conversations":
                 json_response(self, {"items": list_agent_conversations(int(query.get("limit", ["100"])[0]))})
@@ -4073,6 +4583,9 @@ class Handler(SimpleHTTPRequestHandler):
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
                     "accountExact": query.get("accountExact", [""])[0],
+                    "role": query.get("role", [""])[0],
+                    "status": query.get("status", [""])[0],
+                    "scoreMin": query.get("scoreMin", [""])[0],
                 }))
                 text_response(self, rows_to_csv(rows, [
                     ("received_date", "日期"),
@@ -4080,14 +4593,17 @@ class Handler(SimpleHTTPRequestHandler):
                     ("role", "岗位"),
                     ("education", "学历"),
                     ("experience", "经验"),
+                    ("current_company", "当前公司"),
                     ("expected_salary", "薪资"),
                     ("score", "匹配度"),
                     ("recommendation", "推荐意见"),
+                    ("status", "候选人状态"),
                     ("resume_type", "简历类型"),
                     ("resume_request_status", "求简历状态"),
                     ("resume_request_method", "求简历方式"),
                     ("workflow_status", "处理状态"),
                     ("workflow_processed_at", "处理时间"),
+                    ("last_communication_at", "最后沟通时间"),
                     ("source", "数据来源"),
                     ("account_name", "账号信息"),
                     ("candidate_summary", "候选人详情摘要"),
@@ -4099,6 +4615,8 @@ class Handler(SimpleHTTPRequestHandler):
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
                     "accountExact": query.get("accountExact", [""])[0],
+                    "role": query.get("role", [""])[0],
+                    "scoreMin": query.get("scoreMin", [""])[0],
                 })
                 text_response(self, rows_to_csv(rows, [
                     ("created_at", "推荐时间"),
@@ -4131,6 +4649,10 @@ class Handler(SimpleHTTPRequestHandler):
                     json_response(self, delete_managed_account(payload))
                 else:
                     json_response(self, save_managed_account(payload))
+            elif parsed.path == "/api/users":
+                json_response(self, save_user(payload))
+            elif parsed.path == "/api/account-bindings":
+                json_response(self, save_account_binding(payload))
             elif parsed.path == "/api/security/allowlist":
                 json_response(self, save_security_allowlist_config(payload, self))
             elif parsed.path == "/api/llm/config":
@@ -4153,6 +4675,8 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, save_recommendation(payload.get("candidate", payload), payload.get("report", "")))
             elif parsed.path == "/api/job-requirements":
                 json_response(self, upsert_job_requirement(payload))
+            elif parsed.path == "/api/job-requirements/delete":
+                json_response(self, delete_job_requirement(payload))
             elif parsed.path == "/api/job-requirements/pending":
                 json_response(self, upsert_pending_job_requirement(payload))
             elif parsed.path == "/api/job-requirements/match-candidates":
@@ -4230,7 +4754,25 @@ class Handler(SimpleHTTPRequestHandler):
                         "end": dataset["end"].isoformat(timespec="seconds"),
                     },
                 })
+                save_push_record({
+                    "scopeStart": dataset["start"].isoformat(timespec="seconds"),
+                    "scopeEnd": dataset["end"].isoformat(timespec="seconds"),
+                    "label": dataset["label"],
+                    "accountName": dataset.get("account") or "",
+                    "candidateCount": len(dataset.get("candidates") or []),
+                    "resumeCount": len(dataset.get("resumeCandidates") or []),
+                    "recommendationCount": len(dataset.get("recommendedCandidates") or []),
+                    "excelFile": output_path.name,
+                    "excelUrl": excel_url,
+                    "deliveryStatus": result.get("excelDelivery") or "",
+                    "message": result.get("message") or "",
+                    "success": result.get("success"),
+                    "summary": summary_result,
+                    "delivery": delivery_result,
+                })
                 json_response(self, result)
+            elif parsed.path == "/api/data/cleanup":
+                json_response(self, cleanup_history(payload))
             elif parsed.path == "/api/dingtalk/callback":
                 result = handle_dingtalk_conversation(payload)
                 if payload.get("data") is not None:

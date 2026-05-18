@@ -438,6 +438,8 @@ async function syncBehaviorPolicyFromBackend() {
       searchKeywordPool: policy.searchKeywordPool || [],
       pageIntelligenceEnabled: policy.pageIntelligenceEnabled !== false,
       pageIntelligenceUseScreenshot: Boolean(policy.pageIntelligenceUseScreenshot),
+      saveRawResumeText: policy.saveRawResumeText !== false,
+      maskSensitiveDisplay: policy.maskSensitiveDisplay !== false,
     };
     await chrome.storage.local.set({ settings: mergedSettings, behaviorPolicy: policy });
     const tabs = await chrome.tabs.query({ url: ['https://www.zhipin.com/*', 'https://www.bosszhipin.com/*'] });

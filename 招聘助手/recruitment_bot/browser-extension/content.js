@@ -58,6 +58,8 @@ let settings = {
   searchKeywordPool: [],
   pageIntelligenceEnabled: true,
   pageIntelligenceUseScreenshot: false,
+  saveRawResumeText: true,
+  maskSensitiveDisplay: true,
   accountName: '',
   accountPlatform: 'BOSS直聘',
   accountNameManual: false,
@@ -3389,6 +3391,7 @@ async function saveResumeData(resumeInfo) {
   return new Promise((resolve) => {
     chrome.storage.local.get(['resumes'], (result) => {
       const resumes = result.resumes || [];
+      resumeInfo = prepareCandidateForStorage(resumeInfo);
 
       const existingIndex = resumes.findIndex(r => isSameResume(r, resumeInfo));
       if (existingIndex >= 0) {
@@ -3450,6 +3453,19 @@ async function saveResumeData(resumeInfo) {
       });
     });
   });
+}
+
+function prepareCandidateForStorage(info = {}) {
+  const next = { ...info };
+  if (settings.saveRawResumeText === false) {
+    delete next.resumeDetailText;
+    delete next.resumeText;
+    delete next.fullResumeText;
+    if (normalizeText(next.rawText || '').length > 1200) {
+      next.rawText = next.topLevelText || next.summary || '';
+    }
+  }
+  return next;
 }
 
 async function pushCandidateRecommendation(resumeInfo) {

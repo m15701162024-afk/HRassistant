@@ -11,12 +11,19 @@ const state = {
   accounts: [],
   behaviorPolicy: {},
   automationTasks: [],
+  actionLogs: [],
+  pushRecords: [],
+  users: [],
+  accountBindings: [],
   security: {},
   filters: {
     q: '',
     source: '',
     account: '',
     accountExact: '',
+    role: '',
+    status: '',
+    scoreMin: '',
   },
 };
 
@@ -173,6 +180,18 @@ function cleanCandidateSnapshot(value) {
   return text.slice(0, 900);
 }
 
+function maskSensitiveText(text) {
+  if (state.settings.maskSensitiveDisplay === false) return String(text || '');
+  return String(text || '')
+    .replace(/1[3-9]\d{9}/g, value => `${value.slice(0, 3)}****${value.slice(-4)}`)
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, value => {
+      const [name, domain] = value.split('@');
+      return `${name.slice(0, 2)}***@${domain}`;
+    })
+    .replace(/微信[:：\s]*[A-Za-z0-9_-]{5,}/gi, '微信：***')
+    .replace(/VX[:：\s]*[A-Za-z0-9_-]{5,}/gi, 'VX：***');
+}
+
 function toast(message, type = 'success') {
   const el = $('toast');
   el.textContent = message;
@@ -277,6 +296,8 @@ async function loadSettings() {
   $('scheduledPushStart').value = settings.scheduledPushStart || '';
   $('scheduledPushEnd').value = settings.scheduledPushEnd || '';
   $('publicBaseUrl').value = isPlaceholderUrl(settings.publicBaseUrl) ? '' : (settings.publicBaseUrl || '');
+  if ($('saveRawResumeText')) $('saveRawResumeText').value = settings.saveRawResumeText === false ? 'false' : 'true';
+  if ($('maskSensitiveDisplay')) $('maskSensitiveDisplay').value = settings.maskSensitiveDisplay === false ? 'false' : 'true';
   $('llmEnabled').value = settings.llmEnabled ? 'true' : 'false';
   $('llmProvider').value = settings.llmProvider || 'siliconflow';
   $('llmApiBase').value = settings.llmApiBase || '';
@@ -309,6 +330,32 @@ async function loadAccounts() {
   state.accounts = result.items || [];
   renderAccountScope();
   renderManagedAccountList();
+}
+
+async function loadUsers() {
+  const result = await api('/api/users');
+  state.users = result.users || [];
+  state.accountBindings = result.bindings || [];
+  renderUsers();
+}
+
+async function loadActionLogs() {
+  const params = new URLSearchParams();
+  params.set('limit', '80');
+  if (state.filters.q) params.set('q', state.filters.q);
+  if (state.filters.account) params.set('account', state.filters.account);
+  const result = await api(`/api/action-logs?${params.toString()}`);
+  state.actionLogs = result.items || [];
+  renderActionLogs();
+}
+
+async function loadPushRecords() {
+  const params = new URLSearchParams();
+  params.set('limit', '30');
+  if (state.filters.account) params.set('account', state.filters.account);
+  const result = await api(`/api/push-records?${params.toString()}`);
+  state.pushRecords = result.items || [];
+  renderPushRecords();
 }
 
 async function loadSecurityConfig() {
@@ -423,6 +470,49 @@ function renderManagedAccountList() {
       showModule('accounts');
     });
   });
+}
+
+function renderUsers() {
+  const userList = $('userList');
+  const bindingList = $('bindingList');
+  if (userList) {
+    userList.innerHTML = (state.users || []).map(item => `
+      <div class="account-list-item">
+        <strong>${escapeHtml(item.username || '')}</strong>
+        <span>${escapeHtml(item.role === 'admin' ? '管理员' : '普通用户')}</span>
+        <span>${escapeHtml(({ pending: '待审核', active: '已启用', disabled: '已停用', rejected: '已拒绝' })[item.status] || item.status || '')}</span>
+        <button class="secondary small" data-user-edit="${escapeHtml(item.username || '')}">编辑</button>
+      </div>
+    `).join('') || '<div class="empty-state">暂无用户。</div>';
+    userList.querySelectorAll('[data-user-edit]').forEach(button => {
+      button.addEventListener('click', () => {
+        const item = state.users.find(user => user.username === button.dataset.userEdit) || {};
+        $('userUsername').value = item.username || '';
+        $('userRole').value = item.role || 'user';
+        $('userStatus').value = item.status || 'pending';
+        $('userPassword').value = '';
+      });
+    });
+  }
+  if (bindingList) {
+    bindingList.innerHTML = (state.accountBindings || []).map(item => `
+      <div class="account-list-item">
+        <strong>${escapeHtml(item.username || '')}</strong>
+        <span>${escapeHtml(item.account_name || '')}</span>
+        <span>${escapeHtml(({ pending: '待审核', approved: '已通过', rejected: '已拒绝', disabled: '已停用' })[item.status] || item.status || '')}</span>
+        <button class="secondary small" data-binding-edit="${escapeHtml(item.id || '')}">编辑</button>
+      </div>
+    `).join('') || '<div class="empty-state">暂无账号绑定。</div>';
+    bindingList.querySelectorAll('[data-binding-edit]').forEach(button => {
+      button.addEventListener('click', () => {
+        const item = state.accountBindings.find(binding => binding.id === button.dataset.bindingEdit) || {};
+        $('bindingUsername').value = item.username || '';
+        $('bindingAccountName').value = item.account_name || '';
+        $('bindingAccountPlatform').value = item.account_platform || 'BOSS直聘';
+        $('bindingStatus').value = item.status || 'pending';
+      });
+    });
+  }
 }
 
 function setAccountScope(account, reload = true) {
@@ -634,6 +724,57 @@ function renderAutomationTasks() {
   }).join('');
 }
 
+function renderActionLogs() {
+  const container = $('actionLogList');
+  if (!container) return;
+  const items = state.actionLogs || [];
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state">暂无动作证据或异常日志。</div>';
+    return;
+  }
+  container.innerHTML = items.slice(0, 80).map(item => `
+    <article class="task-item">
+      <div>
+        <strong>${escapeHtml(item.candidate_name || '未关联候选人')}｜${escapeHtml(item.role || '待确认岗位')}</strong>
+        <div class="task-meta">
+          <span>${escapeHtml(item.created_at || '')}</span>
+          <span>动作：${escapeHtml(item.action_type || '')}</span>
+          <span>按钮：${escapeHtml(item.button_text || '-')}</span>
+          <span>账号：${escapeHtml(item.account_name || '未识别')}</span>
+          ${item.error_message ? `<span>错误：${escapeHtml(item.error_message)}</span>` : ''}
+        </div>
+      </div>
+      <span class="badge ${item.result === 'failed' ? 'danger' : 'ok'}">${escapeHtml(item.result || '记录')}</span>
+    </article>
+  `).join('');
+}
+
+function renderPushRecords() {
+  const container = $('pushRecordList');
+  if (!container) return;
+  const items = state.pushRecords || [];
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state">暂无推送记录。</div>';
+    return;
+  }
+  container.innerHTML = items.map(item => `
+    <article class="task-item">
+      <div>
+        <strong>${escapeHtml(item.label || '推送范围')}｜${escapeHtml(item.account_name || '全部账号')}</strong>
+        <div class="task-meta">
+          <span>${escapeHtml(item.created_at || '')}</span>
+          <span>候选人：${escapeHtml(item.candidate_count || 0)}</span>
+          <span>收到简历：${escapeHtml(item.resume_count || 0)}</span>
+          <span>推荐：${escapeHtml(item.recommendation_count || 0)}</span>
+          <span>Excel：${escapeHtml(item.excel_file || '-')}</span>
+          ${item.excel_url ? `<span><a href="${escapeHtml(item.excel_url)}" target="_blank" rel="noreferrer">下载入口</a></span>` : ''}
+        </div>
+      </div>
+      <span class="badge ${/failed|失败/i.test(item.delivery_status || item.message || '') ? 'danger' : 'ok'}">${escapeHtml(item.delivery_status || '已记录')}</span>
+    </article>
+  `).join('');
+}
+
 async function loadAutomationTasks() {
   const params = new URLSearchParams();
   params.set('limit', '30');
@@ -706,6 +847,77 @@ async function addManagedAccount() {
   toast('账号已新增/更新');
 }
 
+async function saveUser() {
+  const payload = {
+    username: $('userUsername').value.trim(),
+    role: $('userRole').value,
+    status: $('userStatus').value,
+    password: $('userPassword').value.trim(),
+  };
+  if (!payload.username) {
+    toast('请输入用户名', 'warning');
+    return;
+  }
+  const result = await api('/api/users', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  state.users = result.users || [];
+  state.accountBindings = result.bindings || [];
+  $('userPassword').value = '';
+  renderUsers();
+  toast('用户已保存');
+}
+
+async function saveBinding() {
+  const payload = {
+    username: $('bindingUsername').value.trim(),
+    accountName: $('bindingAccountName').value.trim(),
+    accountPlatform: $('bindingAccountPlatform').value.trim() || 'BOSS直聘',
+    status: $('bindingStatus').value,
+    reviewedBy: 'admin',
+  };
+  if (!payload.username || !payload.accountName) {
+    toast('请输入用户名和招聘账号', 'warning');
+    return;
+  }
+  const result = await api('/api/account-bindings', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  state.users = result.users || [];
+  state.accountBindings = result.bindings || [];
+  renderUsers();
+  toast('账号绑定已保存');
+}
+
+async function saveDataPolicy() {
+  await api('/api/settings', {
+    method: 'POST',
+    body: JSON.stringify({
+      saveRawResumeText: $('saveRawResumeText').value === 'true',
+      maskSensitiveDisplay: $('maskSensitiveDisplay').value === 'true',
+    }),
+  });
+  await loadSettings();
+  toast('数据策略已保存');
+}
+
+async function cleanupData() {
+  const account = $('cleanupAccount').value.trim();
+  const before = $('cleanupBefore').value;
+  if (!account && !before) {
+    toast('请至少填写清理账号或截止日期', 'warning');
+    return;
+  }
+  const result = await api('/api/data/cleanup', {
+    method: 'POST',
+    body: JSON.stringify({ account, before }),
+  });
+  await Promise.all([loadData(), loadActionLogs(), loadUsers()]);
+  toast(`清理完成：候选人 ${result.deleted?.candidates || 0} 条，推荐 ${result.deleted?.recommendations || 0} 条`);
+}
+
 async function toggleSchedule() {
   const settings = await api('/api/settings');
   await api('/api/settings', {
@@ -756,8 +968,7 @@ async function loadData() {
   renderStats();
   renderBreakdowns();
   renderTables();
-  await loadAutomationTasks();
-  await loadConversations();
+  await Promise.all([loadAutomationTasks(), loadActionLogs(), loadPushRecords(), loadConversations()]);
 }
 
 async function loadConversations() {
@@ -862,20 +1073,23 @@ function renderTables() {
       <td>${escapeHtml(item.role)}</td>
       <td>${escapeHtml(item.education)}</td>
       <td>${escapeHtml(item.experience)}</td>
+      <td>${escapeHtml(item.current_company || '')}</td>
       <td>${escapeHtml(item.expected_salary)}</td>
       <td>${escapeHtml(`${item.score || 0}%`)}</td>
       <td>${escapeHtml(item.recommendation)}</td>
+      <td>${escapeHtml(item.status || candidateWorkflowStatus(item))}</td>
       <td>${escapeHtml(item.source)}</td>
       <td>${escapeHtml(item.account_name)}</td>
       <td>${escapeHtml(candidateResumeType(item))}</td>
       <td>${escapeHtml(candidateRequestStatus(item))}</td>
       <td>${escapeHtml(candidateWorkflowStatus(item))}</td>
+      <td>${escapeHtml(item.last_communication_at || '')}</td>
       <td>
         <button class="secondary small" data-candidate-index="${index}">查看</button>
         <button class="secondary small" data-candidate-job-index="${index}">岗位库</button>
       </td>
     </tr>
-  `).join('') || row(['-', '暂无数据', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-']);
+  `).join('') || row(['-', '暂无数据', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-']);
 
   renderCandidateInsights();
 
@@ -926,7 +1140,7 @@ function renderTables() {
       <div>
         <h3>
           ${escapeHtml(item.role || '未识别岗位')}
-          <span class="badge ${item.status === 'pending' ? 'warning' : 'ok'}">${item.status === 'pending' ? '待补录' : '已入库'}</span>
+          <span class="badge ${item.status === 'pending' ? 'warning' : (item.status === 'disabled' ? 'danger' : 'ok')}">${item.status === 'pending' ? '待补录' : (item.status === 'disabled' ? '已停用' : '已入库')}</span>
         </h3>
         <p>${escapeHtml(item.source || '')}｜${escapeHtml(item.account_name || '')}｜${escapeHtml(item.updated_at || '')}</p>
         ${item.status === 'pending' ? `<p class="muted">原因：${escapeHtml(item.failure_reason || '插件未能识别工作内容/工作要求')}</p>` : ''}
@@ -935,6 +1149,7 @@ function renderTables() {
         <button class="secondary small" data-job-index="${index}">${item.status === 'pending' ? '查看原因' : '查看要求'}</button>
         <button class="secondary small" data-job-edit-index="${index}">编辑</button>
         <button class="secondary small" data-job-match-index="${index}" ${item.status === 'pending' ? 'disabled' : ''}>匹配候选人</button>
+        <button class="secondary small" data-job-disable-index="${index}">停用</button>
       </div>
     </article>
   `).join('') || '<p class="empty">暂无岗位要求。插件首次遇到新岗位时会尝试打开职位详情并保存。</p>';
@@ -957,6 +1172,13 @@ function renderTables() {
     button.addEventListener('click', async () => {
       const item = state.jobRequirements[Number(button.dataset.jobMatchIndex)];
       await matchJobRequirement(item);
+    });
+  });
+
+  document.querySelectorAll('[data-job-disable-index]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const item = state.jobRequirements[Number(button.dataset.jobDisableIndex)];
+      await disableJobRequirement(item);
     });
   });
 }
@@ -1053,7 +1275,7 @@ function buildCandidateDetail(item) {
   const dimensions = evaluation.dimensions || {};
   const rejectionReasons = evaluation.rejectionReasons || [];
   const workflowActions = Array.isArray(raw.workflowActions) ? raw.workflowActions : [];
-  const topLevelText = cleanCandidateSnapshot(raw.topLevelText || raw.rawText || raw.summary || '');
+  const topLevelText = maskSensitiveText(cleanCandidateSnapshot(raw.topLevelText || raw.rawText || raw.summary || ''));
   const resumeType = raw.hasAttachmentResume || raw.resumeAttachmentType === 'attachment' || raw.resumeEvidence === 'attachmentAccepted'
     ? '有附件简历'
     : (raw.hasResume ? '无附件简历' : '未获取简历');
@@ -1064,10 +1286,12 @@ function buildCandidateDetail(item) {
     `简历状态：${raw.resumeStatus || '未记录'}`,
     `求简历状态：${raw.resumeRequestStatus || '未记录'}${raw.resumeRequestError ? `｜${raw.resumeRequestError}` : ''}`,
     raw.resumeRequestMethod ? `求简历方式：${raw.resumeRequestMethod === 'message' ? '发送消息' : '点击按钮'}` : '',
-    raw.resumeRequestMessage ? `求简历话术：${raw.resumeRequestMessage}` : '',
+    raw.resumeRequestMessage ? `求简历话术：${maskSensitiveText(raw.resumeRequestMessage)}` : '',
     `插件处理：${raw.workflowStatus === 'processed' || raw.workflowProcessedAt ? '已处理' : '未记录'}${raw.workflowProcessedAt ? `｜${raw.workflowProcessedAt}` : ''}`,
+    `候选人状态：${item.status || '新增'}｜最后沟通：${item.last_communication_at || raw.lastCommunicationAt || '未记录'}`,
     `学历：${item.education || raw.education || '未识别'}`,
     `经验：${item.experience || raw.experience || '未识别'}`,
+    `当前公司：${item.current_company || raw.currentCompany || '未识别'}`,
     `薪资：${item.expected_salary || raw.expectedSalary || '未识别'}`,
     `匹配度：${item.score || 0}%`,
     `推荐意见：${item.recommendation || '待评估'}`,
@@ -1078,7 +1302,7 @@ function buildCandidateDetail(item) {
     '',
     '插件动作证据：',
     ...(workflowActions.length
-      ? workflowActions.map(action => `- ${action.at || ''}｜${action.type || 'action'}｜${action.status || ''}｜${action.text || ''}`)
+      ? workflowActions.map(action => `- ${action.at || ''}｜${action.type || 'action'}｜${action.status || ''}｜${maskSensitiveText(action.text || '')}`)
       : ['- 暂无动作证据']),
     '',
     '不推荐/风险依据：',
@@ -1100,6 +1324,9 @@ function applyFilters() {
     source: $('sourceFilter').value.trim(),
     account,
     accountExact: state.accounts.some(item => item.name === account) ? '1' : '',
+    role: $('roleFilter').value.trim(),
+    status: $('statusFilter').value,
+    scoreMin: $('scoreMinFilter').value,
   };
   renderAccountScope();
   loadData().catch(showError);
@@ -1109,6 +1336,9 @@ function clearFilters() {
   $('searchInput').value = '';
   $('sourceFilter').value = '';
   $('accountFilter').value = '';
+  $('roleFilter').value = '';
+  $('statusFilter').value = '';
+  $('scoreMinFilter').value = '';
   setAccountScope('', false);
   applyFilters();
 }
@@ -1151,6 +1381,7 @@ async function pushYesterday() {
     downloadLinkFallback: 'Excel 下载入口已补发',
     failed: result.excelFile?.message || result.excelFallback?.message || 'Excel 文件未发送',
   })[result.excelDelivery] || (result.excelFile?.success ? 'Excel 文件已发送' : 'Excel 文件未发送');
+  await loadPushRecords();
   toast(result.success ? `汇总已推送，${deliveryText}` : result.message, result.success ? 'success' : 'warning');
 }
 
@@ -1197,6 +1428,19 @@ async function saveJobRequirement() {
   $('jobRequirementInput').value = '';
   await loadData();
   toast(`岗位要求已保存，已匹配 ${result.matchedCandidates || 0} 位候选人`);
+}
+
+async function disableJobRequirement(item = {}) {
+  const result = await api('/api/job-requirements/delete', {
+    method: 'POST',
+    body: JSON.stringify({ id: item.id, role: item.role, accountName: item.account_name }),
+  });
+  if (!result.success) {
+    toast(result.message || '岗位停用失败', 'danger');
+    return;
+  }
+  await loadData();
+  toast('岗位要求已停用');
 }
 
 async function matchAllJobRequirements() {
@@ -1281,6 +1525,8 @@ function bindEvents() {
   $('saveSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
   $('saveAccountSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
   $('addAccountBtn').addEventListener('click', () => addManagedAccount().catch(showError));
+  $('saveUserBtn').addEventListener('click', () => saveUser().catch(showError));
+  $('saveBindingBtn').addEventListener('click', () => saveBinding().catch(showError));
   $('saveLlmBtn').addEventListener('click', () => saveLlmConfig().catch(showError));
   $('testLlmBtn').addEventListener('click', () => testLlm().catch(showError));
   $('resetLlmBtn').addEventListener('click', () => resetLlmConfig().catch(showError));
@@ -1333,10 +1579,19 @@ function bindEvents() {
   });
   $('downloadExtensionPackageBtn').addEventListener('click', downloadExtensionPackage);
   $('refreshExtensionPackageBtn').addEventListener('click', () => loadExtensionPackageInfo().catch(showError));
+  $('saveDataPolicyBtn').addEventListener('click', () => saveDataPolicy().catch(showError));
+  $('cleanupDataBtn').addEventListener('click', () => cleanupData().catch(showError));
   $('closeDialogBtn').addEventListener('click', () => $('detailDialog').close());
   $('searchInput').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') applyFilters();
   });
+  $('roleFilter').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') applyFilters();
+  });
+  $('scoreMinFilter').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') applyFilters();
+  });
+  $('statusFilter').addEventListener('change', applyFilters);
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => showTab(tab.dataset.tab));
   });
@@ -1347,7 +1602,7 @@ function bindEvents() {
 
 async function refreshAll() {
   renderApiBase();
-  await Promise.all([loadHealth(), loadSettings(), loadAccounts(), loadSecurityConfig(), loadExtensionPackageInfo()]);
+  await Promise.all([loadHealth(), loadSettings(), loadAccounts(), loadUsers(), loadSecurityConfig(), loadExtensionPackageInfo()]);
   await loadBehaviorPolicy();
   await loadData();
 }

@@ -61,6 +61,16 @@
         <input id="searchInput" type="search" placeholder="搜索姓名、岗位、技能、推荐意见" />
         <input id="sourceFilter" type="search" placeholder="数据来源" />
         <input id="accountFilter" type="search" placeholder="账号信息" />
+        <input id="roleFilter" type="search" placeholder="岗位筛选" />
+        <select id="statusFilter">
+          <option value="">全部状态</option>
+          <option value="新增">新增</option>
+          <option value="已查看">已查看</option>
+          <option value="已索要简历">已索要简历</option>
+          <option value="已收到简历">已收到简历</option>
+          <option value="推荐">推荐</option>
+        </select>
+        <input id="scoreMinFilter" type="number" min="0" max="100" placeholder="最低匹配度" />
       </div>
       <div class="toolbar-actions">
         <button id="applyFilterBtn">筛选</button>
@@ -110,6 +120,42 @@
       </div>
     </section>
 
+    <section class="panel module-section" data-module="settings">
+      <div class="panel-title">
+        <h2>数据治理</h2>
+        <span>历史永久保存，可按范围清理</span>
+      </div>
+      <div class="form-grid account-grid">
+        <label>
+          清理账号
+          <input id="cleanupAccount" list="accountOptions" type="text" placeholder="留空表示不限账号" />
+        </label>
+        <label>
+          清理截止日期
+          <input id="cleanupBefore" type="date" />
+        </label>
+        <label>
+          原始简历全文保存
+          <select id="saveRawResumeText">
+            <option value="true">保存</option>
+            <option value="false">不保存新原文</option>
+          </select>
+        </label>
+        <label>
+          展示脱敏
+          <select id="maskSensitiveDisplay">
+            <option value="true">开启</option>
+            <option value="false">关闭</option>
+          </select>
+        </label>
+      </div>
+      <div class="actions">
+        <button id="saveDataPolicyBtn">保存数据策略</button>
+        <button id="cleanupDataBtn" class="secondary">按条件清理历史数据</button>
+      </div>
+      <p class="hint">清理操作需要至少选择账号或截止日期；动作证据会同步按条件清理。</p>
+    </section>
+
     <section class="panel module-section" data-module="accounts">
       <div class="panel-title">
         <h2>账号权限</h2>
@@ -134,6 +180,71 @@
         <button id="addAccountBtn" class="secondary">新增/更新账号</button>
       </div>
       <div id="managedAccountList" class="account-list"></div>
+      <div class="config-stack account-admin-stack">
+        <div class="config-group">
+          <h3>后台用户</h3>
+          <div class="form-grid account-grid">
+            <label>
+              用户名
+              <input id="userUsername" type="text" placeholder="例如：hr01" />
+            </label>
+            <label>
+              角色
+              <select id="userRole">
+                <option value="user">普通用户</option>
+                <option value="admin">管理员</option>
+              </select>
+            </label>
+            <label>
+              状态
+              <select id="userStatus">
+                <option value="pending">待审核</option>
+                <option value="active">已启用</option>
+                <option value="disabled">已停用</option>
+                <option value="rejected">已拒绝</option>
+              </select>
+            </label>
+            <label>
+              初始密码（可空）
+              <input id="userPassword" type="password" placeholder="留空则不变" />
+            </label>
+          </div>
+          <div class="actions">
+            <button id="saveUserBtn">保存用户</button>
+          </div>
+          <div id="userList" class="account-list"></div>
+        </div>
+        <div class="config-group">
+          <h3>账号绑定审核</h3>
+          <div class="form-grid account-grid">
+            <label>
+              用户名
+              <input id="bindingUsername" type="text" placeholder="绑定用户" />
+            </label>
+            <label>
+              招聘账号
+              <input id="bindingAccountName" list="accountOptions" type="text" placeholder="BOSS账号姓名" />
+            </label>
+            <label>
+              账号平台
+              <input id="bindingAccountPlatform" type="text" value="BOSS直聘" />
+            </label>
+            <label>
+              审核状态
+              <select id="bindingStatus">
+                <option value="pending">待审核</option>
+                <option value="approved">已通过</option>
+                <option value="rejected">已拒绝</option>
+                <option value="disabled">已停用</option>
+              </select>
+            </label>
+          </div>
+          <div class="actions">
+            <button id="saveBindingBtn">保存绑定</button>
+          </div>
+          <div id="bindingList" class="account-list"></div>
+        </div>
+      </div>
     </section>
 
     <section class="panel module-section" data-module="security">
@@ -283,6 +394,10 @@
         <button id="previewSummaryBtn" class="secondary">预览汇总</button>
         <button id="pushYesterdayBtn" class="secondary">按范围推送汇总</button>
         <button id="exportSummaryExcelBtn" class="secondary">导出推荐 Excel</button>
+      </div>
+      <div class="config-group">
+        <h3>推送记录</h3>
+        <div id="pushRecordList" class="task-list"></div>
       </div>
       <p class="hint">钉钉机器人回调地址：<code id="callbackUrl"></code>。群里向机器人提问后，系统会自动捕获 OpenConversationId/ChatId；配置 AppKey、AppSecret 后即可直接发送 Excel 文件。</p>
     </section>
@@ -550,14 +665,17 @@
                 <th>岗位</th>
                 <th>学历</th>
                 <th>经验</th>
+                <th>当前公司</th>
                 <th>薪资</th>
                 <th>匹配度</th>
                 <th>推荐</th>
+                <th>状态</th>
                 <th>来源</th>
                 <th>账号</th>
                 <th>简历类型</th>
                 <th>求简历状态</th>
                 <th>处理状态</th>
+                <th>最后沟通</th>
                 <th>详情</th>
               </tr>
             </thead>
@@ -585,6 +703,13 @@
       <div id="reportsTab" class="tab-panel">
         <div id="reportList" class="reports"></div>
       </div>
+      <section class="subpanel action-log-panel">
+        <div class="section-title">
+          <h3>动作证据与异常日志</h3>
+          <span>自动点击、求简历、接收附件和采集异常</span>
+        </div>
+        <div id="actionLogList" class="task-list"></div>
+      </section>
     </section>
 
     <section class="panel module-section" data-module="jobs">
