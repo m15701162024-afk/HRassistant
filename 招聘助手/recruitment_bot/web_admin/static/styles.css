@@ -57,6 +57,51 @@ h3 { font-size: 14px; }
   word-break: break-word;
 }
 
+.auth-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(247, 248, 244, 0.92);
+  backdrop-filter: blur(4px);
+}
+
+.auth-card {
+  width: min(440px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 24px;
+  border: 2px solid #22220b;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 8px 8px 0 rgba(34, 34, 11, 0.16);
+}
+
+.auth-card h2 {
+  font-size: 22px;
+}
+
+.auth-card p {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.auth-error {
+  min-height: 18px;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+body.auth-locked main,
+body.auth-locked .module-nav,
+body.auth-locked .account-scope {
+  pointer-events: none;
+  user-select: none;
+  filter: blur(2px);
+}
+
 main {
   width: auto;
   max-width: none;

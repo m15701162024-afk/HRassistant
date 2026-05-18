@@ -13,10 +13,29 @@
       <p>候选人、岗位库、自动化任务、推送和系统治理分区管理</p>
     </div>
     <div class="header-actions">
+      <span id="authUserBadge" class="badge">未登录</span>
+      <button id="logoutBtn" class="secondary" hidden>退出</button>
       <span id="healthBadge" class="badge">检查中</span>
       <button id="refreshBtn">刷新</button>
     </div>
   </header>
+
+  <section id="authGate" class="auth-gate" hidden>
+    <form id="loginForm" class="auth-card">
+      <h2>登录招聘助手</h2>
+      <p>管理员可查看全部数据，普通用户只可查看已审核绑定的招聘账号。</p>
+      <label>
+        用户名
+        <input id="loginUsername" type="text" autocomplete="username" value="admin" />
+      </label>
+      <label>
+        密码
+        <input id="loginPassword" type="password" autocomplete="current-password" placeholder="默认管理员初始为空，建议登录后立即设置" />
+      </label>
+      <button id="loginBtn" type="submit">登录</button>
+      <span id="loginError" class="auth-error"></span>
+    </form>
+  </section>
 
   <nav class="module-nav" aria-label="后台模块">
     <div class="nav-group">
@@ -33,9 +52,9 @@
     </div>
     <div class="nav-group">
       <span>管理</span>
-      <button class="module-tab" data-module="accounts">账号权限</button>
-      <button class="module-tab" data-module="security">安全白名单</button>
-      <button class="module-tab" data-module="settings">系统配置</button>
+      <button class="module-tab" data-module="accounts" data-admin-only="true">账号权限</button>
+      <button class="module-tab" data-module="security" data-admin-only="true">安全白名单</button>
+      <button class="module-tab" data-module="settings" data-admin-only="true">系统配置</button>
     </div>
   </nav>
 
@@ -144,6 +163,13 @@
         <label>
           展示脱敏
           <select id="maskSensitiveDisplay">
+            <option value="true">开启</option>
+            <option value="false">关闭</option>
+          </select>
+        </label>
+        <label>
+          后台登录鉴权
+          <select id="authEnabled">
             <option value="true">开启</option>
             <option value="false">关闭</option>
           </select>
@@ -427,6 +453,27 @@
           <button id="createRemoteTaskBtn">下发一键执行任务</button>
           <button id="refreshRemoteTasksBtn" class="secondary">刷新任务状态</button>
         </div>
+        <div class="form-grid remote-task-grid">
+          <label>
+            后台自动生成任务
+            <select id="autoTaskEnabled">
+              <option value="false">关闭</option>
+              <option value="true">开启</option>
+            </select>
+          </label>
+          <label>
+            生成间隔(分钟)
+            <input id="autoTaskIntervalMinutes" type="number" min="5" max="1440" step="5" value="60" />
+          </label>
+          <label class="textarea-field">
+            自动任务账号范围
+            <textarea id="autoTaskAccounts" rows="3" placeholder="每行一个招聘账号；留空表示全部已识别/已维护账号"></textarea>
+          </label>
+        </div>
+        <div class="actions">
+          <button id="saveAutoTaskScheduleBtn" class="secondary">保存自动任务计划</button>
+          <span id="autoTaskScheduleStatus" class="badge">未开启</span>
+        </div>
         <div id="automationTaskList" class="task-list"></div>
         <p class="hint">适合内网部署后由管理后台统一调度。插件会按账号领取待处理任务，并在 BOSS 沟通页执行“岗位入库、在线简历识别、匹配、求简历/接收简历”等流程。</p>
       </div>
@@ -598,6 +645,17 @@
                 <option value="false">仅文本解析</option>
                 <option value="true">文本 + 截图</option>
               </select>
+            </label>
+            <label>
+              候选人大模型主评分
+              <select id="llmScoringEnabled">
+                <option value="true">开启</option>
+                <option value="false">关闭，仅本地规则</option>
+              </select>
+            </label>
+            <label>
+              评分超时秒数
+              <input id="llmScoringTimeoutSeconds" type="number" min="5" max="60" step="1" />
             </label>
           </div>
         </div>

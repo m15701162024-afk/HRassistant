@@ -62,6 +62,8 @@ DEFAULT_PUBLIC_BASE_URL = os.environ.get(
 EXPORT_FILENAME_PATTERN = re.compile(r"^候选人推荐表_\d{8}_\d{6}\.xlsx$")
 SECURITY_ALLOWLIST_PATH = Path(os.environ.get("RECRUITMENT_SECURITY_ALLOWLIST", ROOT / "security_allowlist.json"))
 ADMIN_TOKEN = os.environ.get("RECRUITMENT_ADMIN_TOKEN", "").strip()
+AUTH_COOKIE_NAME = "hr_auth"
+SESSION_TTL_SECONDS = int(os.environ.get("RECRUITMENT_SESSION_TTL_SECONDS", str(7 * 24 * 3600)))
 RATE_BUCKETS: dict[tuple[str, str], list[float]] = {}
 RATE_LOCK = threading.Lock()
 
@@ -425,6 +427,7 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 channel TEXT NOT NULL,
                 sender TEXT,
+                account_name TEXT DEFAULT '',
                 question TEXT NOT NULL,
                 answer TEXT NOT NULL,
                 raw_json TEXT,
@@ -516,6 +519,15 @@ def init_db() -> None:
                 raw_json TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS web_sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
             """
         )
         ensure_columns(conn, "candidates", {
@@ -531,6 +543,9 @@ def init_db() -> None:
         ensure_columns(conn, "job_requirements", {
             "status": "TEXT DEFAULT 'active'",
             "failure_reason": "TEXT DEFAULT ''",
+        })
+        ensure_columns(conn, "agent_conversations", {
+            "account_name": "TEXT DEFAULT ''",
         })
         ensure_default_admin_user(conn)
         cleanup_job_requirements(conn)
@@ -615,7 +630,7 @@ def is_rate_limited(handler: SimpleHTTPRequestHandler) -> bool:
 def write_common_headers(handler: SimpleHTTPRequestHandler) -> None:
     setattr(handler, "_common_headers_written", True)
     handler.send_header("Access-Control-Allow-Origin", cors_origin(handler))
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token, X-Auth-Token")
     handler.send_header("Access-Control-Allow-Methods", "GET,HEAD,POST,OPTIONS")
     handler.send_header("X-Content-Type-Options", "nosniff")
     handler.send_header("X-Frame-Options", "DENY")
@@ -640,7 +655,7 @@ def guard_request(handler: SimpleHTTPRequestHandler) -> bool:
         return False
     if ADMIN_TOKEN and handler.command in {"POST", "PUT", "PATCH", "DELETE"}:
         parsed = urllib.parse.urlparse(handler.path)
-        public_paths = {"/api/dingtalk/callback", "/api/dingtalk/callback-test"}
+        public_paths = {"/api/dingtalk/callback", "/api/dingtalk/callback-test", "/api/auth/login", "/api/auth/logout"}
         if parsed.path not in public_paths and handler.headers.get("X-Admin-Token", "") != ADMIN_TOKEN:
             json_response(handler, {"success": False, "message": "缺少管理令牌"}, 401)
             return False
@@ -726,11 +741,18 @@ def save_security_allowlist_config(payload: dict[str, Any], handler: SimpleHTTPR
     return get_security_allowlist_config(handler)
 
 
-def json_response(handler: SimpleHTTPRequestHandler, payload: Any, status: int = 200) -> None:
+def json_response(
+    handler: SimpleHTTPRequestHandler,
+    payload: Any,
+    status: int = 200,
+    extra_headers: dict[str, str] | None = None,
+) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     write_common_headers(handler)
+    for key, value in (extra_headers or {}).items():
+        handler.send_header(key, value)
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -1572,7 +1594,7 @@ def recommendation_label_by_score(score: int) -> str:
     return "不推荐"
 
 
-def match_candidate_with_requirement(candidate: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+def match_candidate_with_requirement_rules(candidate: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     raw: dict[str, Any]
     try:
         raw = json.loads(candidate.get("raw_json") or "{}")
@@ -1621,6 +1643,11 @@ def match_candidate_with_requirement(candidate: dict[str, Any], job: dict[str, A
     raw["jobRequirementRole"] = job.get("role") or candidate.get("role")
 
     base_score = int(candidate.get("score") or evaluation.get("score") or 0)
+    if keywords:
+        jd_score = int(round(28 + ratio * 62))
+        base_score = max(base_score, jd_score)
+    elif base_score <= 0 and requirement:
+        base_score = 45
     next_score = max(0, min(100, base_score + adjustment))
     recommendation = recommendation_label_by_score(next_score)
     evaluation["score"] = next_score
@@ -1630,6 +1657,174 @@ def match_candidate_with_requirement(candidate: dict[str, Any], job: dict[str, A
         "raw_json": json.dumps(raw, ensure_ascii=False),
         "score": next_score,
         "recommendation": recommendation,
+    }
+
+
+def score_candidate_with_llm(
+    candidate: dict[str, Any],
+    job: dict[str, Any],
+    rule_result: dict[str, Any],
+) -> dict[str, Any]:
+    settings = get_settings()
+    if settings.get("llmScoringEnabled") is False:
+        raise RuntimeError("大模型评分未开启")
+    config = get_llm_config(mask_key=False)
+    if not config.get("llmEnabled"):
+        raise RuntimeError("大模型未启用")
+    if not config.get("llmApiKey") or not config.get("llmApiBase") or not config.get("llmModel"):
+        raise RuntimeError("大模型 API Base、模型名或 API Key 未配置完整")
+
+    try:
+        raw = json.loads(candidate.get("raw_json") or "{}")
+    except Exception:
+        raw = {}
+    try:
+        rule_raw = json.loads(rule_result.get("raw_json") or "{}")
+    except Exception:
+        rule_raw = {}
+    context = {
+        "candidate": {
+            "name": candidate.get("name") or raw.get("name"),
+            "role": candidate.get("role") or raw.get("role"),
+            "education": candidate.get("education") or raw.get("education"),
+            "experience": candidate.get("experience") or raw.get("experience"),
+            "currentCompany": candidate.get("current_company") or raw.get("currentCompany"),
+            "expectedSalary": candidate.get("expected_salary") or raw.get("expectedSalary"),
+            "summary": raw.get("summary") or raw.get("candidateSummary") or raw.get("candidate_summary"),
+            "skills": raw.get("skills"),
+            "workExperience": raw.get("workExperience"),
+            "projects": raw.get("projects"),
+            "rawText": str(raw.get("rawText") or raw.get("description") or "")[:8000],
+        },
+        "jobRequirement": {
+            "role": job.get("role") or candidate.get("role"),
+            "requirement": str(job.get("requirement") or "")[:8000],
+            "source": job.get("source") or "",
+        },
+        "localRuleResult": {
+            "score": rule_result.get("score"),
+            "recommendation": rule_result.get("recommendation"),
+            "evaluation": (rule_raw.get("evaluation") or {}),
+        },
+        "scoringRule": {
+            "threshold": "匹配度 >= 40% 必须索要简历；40-59 推荐，60-79 非常推荐，80+ 强烈推荐",
+            "dimensions": "硬性条件20%，技能匹配30%，项目经验30%，薪资匹配20%",
+        },
+    }
+    prompt = (
+        "请作为招聘匹配评估 Agent，只输出 JSON，不要输出 Markdown。"
+        "请基于候选人简历和岗位 JD 计算 0-100 的匹配度，说明推荐/不推荐依据，"
+        "并返回字段：score(number), recommendation(string), nextStep(string), "
+        "summary(string), strengths(array), risks(array), rejectionReasons(array), "
+        "dimensions(object，包含 hard/skills/projects/salary/jd，每项含 score,max,reason)。"
+        "推荐等级必须按 score 映射：>=80 强烈推荐，>=60 非常推荐，>=40 推荐，<40 不推荐。"
+    )
+    scoring_config = {
+        **config,
+        "llmTimeoutSeconds": max(5, min(int(settings.get("llmScoringTimeoutSeconds") or 12), 60)),
+        "llmMaxTokens": min(int(config.get("llmMaxTokens") or 1000), 900),
+        "llmRetries": 0,
+    }
+    answer = call_llm_chat(prompt, json.dumps(context, ensure_ascii=False), scoring_config)
+    parsed = extract_json_object(answer)
+    score = max(0, min(100, int(round(float(parsed.get("score", rule_result.get("score") or 0))))))
+    recommendation = str(parsed.get("recommendation") or recommendation_label_by_score(score))
+    if recommendation not in {"强烈推荐", "非常推荐", "推荐", "不推荐"}:
+        recommendation = recommendation_label_by_score(score)
+
+    raw = {**raw, **{key: value for key, value in parsed.items() if key not in {"score", "recommendation"}}}
+    evaluation = raw.get("evaluation") if isinstance(raw.get("evaluation"), dict) else {}
+    dimensions = parsed.get("dimensions") if isinstance(parsed.get("dimensions"), dict) else {}
+    if dimensions:
+        evaluation["dimensions"] = dimensions
+    evaluation.update({
+        "score": score,
+        "recommendation": recommendation,
+        "summary": parsed.get("summary") or evaluation.get("summary") or "",
+        "strengths": parsed.get("strengths") if isinstance(parsed.get("strengths"), list) else evaluation.get("strengths", []),
+        "risks": parsed.get("risks") if isinstance(parsed.get("risks"), list) else evaluation.get("risks", []),
+        "rejectionReasons": parsed.get("rejectionReasons") if isinstance(parsed.get("rejectionReasons"), list) else evaluation.get("rejectionReasons", []),
+        "nextStep": parsed.get("nextStep") or ("索要简历" if score >= 40 else "跳过"),
+        "scoringMode": "llm",
+        "scoringProvider": config.get("llmProvider"),
+        "scoringModel": config.get("llmModel"),
+        "scoredAt": now_iso(),
+    })
+    raw["evaluation"] = evaluation
+    raw["jobRequirement"] = str(job.get("requirement") or "")
+    raw["jobRequirementRole"] = job.get("role") or candidate.get("role")
+    raw["llmScoring"] = {
+        "mode": "llm",
+        "provider": config.get("llmProvider"),
+        "model": config.get("llmModel"),
+        "rawAnswer": answer[:4000],
+    }
+    return {
+        "raw_json": json.dumps(raw, ensure_ascii=False),
+        "score": score,
+        "recommendation": recommendation,
+    }
+
+
+def match_candidate_with_requirement(candidate: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    rule_result = match_candidate_with_requirement_rules(candidate, job)
+    try:
+        return score_candidate_with_llm(candidate, job, rule_result)
+    except Exception as exc:
+        try:
+            raw = json.loads(rule_result.get("raw_json") or "{}")
+        except Exception:
+            raw = {}
+        evaluation = raw.get("evaluation") if isinstance(raw.get("evaluation"), dict) else {}
+        evaluation["scoringMode"] = "rules-fallback"
+        evaluation["scoringError"] = str(exc)
+        evaluation["scoredAt"] = now_iso()
+        raw["evaluation"] = evaluation
+        raw["llmScoring"] = {"mode": "rules-fallback", "error": str(exc)}
+        return {
+            **rule_result,
+            "raw_json": json.dumps(raw, ensure_ascii=False),
+        }
+
+
+def score_candidate_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    source = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else payload
+    candidate_payload = normalize_candidate_payload(dict(source or {}))
+    if not candidate_payload.get("role"):
+        return {"success": False, "message": "缺少候选人沟通岗位，无法匹配岗位要求"}
+    job = payload.get("jobRequirement") if isinstance(payload.get("jobRequirement"), dict) else None
+    if not job:
+        job = get_job_requirement(candidate_payload.get("role", ""), candidate_payload.get("accountName", ""))
+    if not job:
+        return {"success": False, "message": "岗位要求库中暂无该岗位 JD"}
+    raw = candidate_payload
+    row = {
+        "name": candidate_payload.get("name"),
+        "role": candidate_payload.get("role"),
+        "education": candidate_payload.get("education"),
+        "experience": candidate_payload.get("experience"),
+        "expected_salary": candidate_payload.get("expectedSalary"),
+        "current_company": candidate_payload.get("currentCompany"),
+        "score": ((candidate_payload.get("evaluation") or {}).get("score") if isinstance(candidate_payload.get("evaluation"), dict) else 0) or candidate_payload.get("score") or 0,
+        "raw_json": json.dumps(raw, ensure_ascii=False),
+    }
+    result = match_candidate_with_requirement(row, job)
+    try:
+        next_raw = json.loads(result.get("raw_json") or "{}")
+    except Exception:
+        next_raw = {}
+    return {
+        "success": True,
+        "score": result.get("score"),
+        "recommendation": result.get("recommendation"),
+        "evaluation": next_raw.get("evaluation") or {},
+        "candidate": next_raw,
+        "jobRequirement": {
+            "id": job.get("id"),
+            "role": job.get("role"),
+            "requirement": job.get("requirement"),
+            "source": job.get("source"),
+        },
     }
 
 
@@ -1769,6 +1964,7 @@ def list_rows(
     q = (filters.get("q") or "").strip()
     source = (filters.get("source") or "").strip()
     account = (filters.get("account") or "").strip()
+    account_whitelist = filters.get("accountWhitelist") if isinstance(filters.get("accountWhitelist"), list) else []
     role_filter = (filters.get("role") or "").strip()
     status_filter = (filters.get("status") or "").strip()
     score_min = (filters.get("scoreMin") or filters.get("score_min") or "").strip()
@@ -1811,6 +2007,13 @@ def list_rows(
         elif table in {"candidates", "recommendations", "job_requirements"}:
             where.append(f"COALESCE(NULLIF(account_name, ''), '未识别') {operator} ?")
         params.append(account if account_exact else f"%{account}%")
+    elif account_whitelist:
+        placeholders = ",".join("?" for _ in account_whitelist)
+        if table == "reports":
+            where.append(f"COALESCE(NULLIF(c.account_name, ''), '未识别') IN ({placeholders})")
+        elif table in {"candidates", "recommendations", "job_requirements"}:
+            where.append(f"COALESCE(NULLIF(account_name, ''), '未识别') IN ({placeholders})")
+        params.extend(account_whitelist)
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += f" ORDER BY {order_field} DESC LIMIT ?"
@@ -1833,6 +2036,7 @@ def list_recommendation_details(
     q = str(filters.get("q") or "").strip()
     source = str(filters.get("source") or "").strip()
     account = str(filters.get("account") or "").strip()
+    account_whitelist = filters.get("accountWhitelist") if isinstance(filters.get("accountWhitelist"), list) else []
     role_filter = str(filters.get("role") or "").strip()
     score_min = str(filters.get("scoreMin") or filters.get("score_min") or "").strip()
     account_exact = str(filters.get("accountExact") or filters.get("account_exact") or "").strip().lower() in {"1", "true", "yes"}
@@ -1856,6 +2060,10 @@ def list_recommendation_details(
         operator = "=" if account_exact else "LIKE"
         where.append(f"COALESCE(NULLIF(c.account_name, ''), NULLIF(r.account_name, ''), '未识别') {operator} ?")
         params.append(account if account_exact else f"%{account}%")
+    elif account_whitelist:
+        placeholders = ",".join("?" for _ in account_whitelist)
+        where.append(f"COALESCE(NULLIF(c.account_name, ''), NULLIF(r.account_name, ''), '未识别') IN ({placeholders})")
+        params.extend(account_whitelist)
     sql = """
         SELECT
             r.*,
@@ -2221,7 +2429,12 @@ def create_automation_task(payload: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "task": automation_task_row(row)}
 
 
-def list_automation_tasks(limit: int = 50, account: str = "", status: str = "") -> dict[str, Any]:
+def list_automation_tasks(
+    limit: int = 50,
+    account: str = "",
+    status: str = "",
+    account_whitelist: list[str] | None = None,
+) -> dict[str, Any]:
     limit = clamp_int(limit, 50, 1, 200)
     where: list[str] = []
     params: list[Any] = []
@@ -2230,6 +2443,13 @@ def list_automation_tasks(limit: int = 50, account: str = "", status: str = "") 
     if account:
         where.append("COALESCE(NULLIF(account_name, ''), '未指定') = ?")
         params.append(account)
+    elif account_whitelist is not None:
+        if not account_whitelist:
+            where.append("1 = 0")
+        else:
+            placeholders = ",".join("?" for _ in account_whitelist)
+            where.append(f"COALESCE(NULLIF(account_name, ''), '未识别') IN ({placeholders})")
+            params.extend(account_whitelist)
     if status:
         where.append("status = ?")
         params.append(status)
@@ -2318,11 +2538,34 @@ def update_automation_task(payload: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "task": automation_task_row(row)}
 
 
+def hash_password(password: str) -> str:
+    return hashlib.sha256(str(password or "").encode("utf-8")).hexdigest()
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
+def auth_enabled() -> bool:
+    return get_settings().get("authEnabled") is not False
+
+
 def ensure_default_admin_user(conn: sqlite3.Connection) -> None:
     count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
     if count:
+        password = os.environ.get("RECRUITMENT_DEFAULT_ADMIN_PASSWORD", "")
+        if password:
+            conn.execute(
+                """
+                UPDATE users
+                SET password_hash = ?, updated_at = ?
+                WHERE username = 'admin' AND COALESCE(password_hash, '') = ''
+                """,
+                (hash_password(password), now_iso()),
+            )
         return
     now = now_iso()
+    password = os.environ.get("RECRUITMENT_DEFAULT_ADMIN_PASSWORD", "")
     conn.execute(
         """
         INSERT INTO users (id, username, password_hash, role, status, created_at, updated_at)
@@ -2331,13 +2574,285 @@ def ensure_default_admin_user(conn: sqlite3.Connection) -> None:
         (
             hashlib.sha1(b"default-admin").hexdigest(),
             "admin",
-            "",
+            hash_password(password) if password else "",
             "admin",
             "active",
             now,
             now,
         ),
     )
+
+
+def safe_user(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    item = dict(row)
+    item.pop("password_hash", None)
+    return item
+
+
+def get_user_by_username(username: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_id(user_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def verify_user_password(user: dict[str, Any], password: str) -> bool:
+    stored = str(user.get("password_hash") or "")
+    if not stored:
+        return str(password or "") == ""
+    return hmac.compare_digest(stored, hash_password(password))
+
+
+def create_web_session(user_id: str) -> str:
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    now = datetime.now()
+    expires_at = now + timedelta(seconds=SESSION_TTL_SECONDS)
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO web_sessions (id, user_id, token_hash, created_at, expires_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                user_id,
+                hash_token(token),
+                now.isoformat(timespec="seconds"),
+                expires_at.isoformat(timespec="seconds"),
+                now.isoformat(timespec="seconds"),
+            ),
+        )
+    return token
+
+
+def parse_cookie_header(value: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for part in str(value or "").split(";"):
+        if "=" not in part:
+            continue
+        key, val = part.split("=", 1)
+        result[key.strip()] = urllib.parse.unquote(val.strip())
+    return result
+
+
+def session_token_from_handler(handler: SimpleHTTPRequestHandler) -> str:
+    token = str(handler.headers.get("X-Auth-Token") or "").strip()
+    if token:
+        return token
+    cookies = parse_cookie_header(handler.headers.get("Cookie", ""))
+    return cookies.get(AUTH_COOKIE_NAME, "")
+
+
+def get_session_user(token: str) -> dict[str, Any] | None:
+    if not token:
+        return None
+    now = datetime.now()
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT s.*, u.username, u.role, u.status
+            FROM web_sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.token_hash = ?
+            """,
+            (hash_token(token),),
+        ).fetchone()
+        if not row:
+            return None
+        expires_at = parse_datetime_value(row["expires_at"])
+        if not expires_at or expires_at < now or row["status"] != "active":
+            conn.execute("DELETE FROM web_sessions WHERE id = ?", (row["id"],))
+            return None
+        conn.execute(
+            "UPDATE web_sessions SET last_seen_at = ? WHERE id = ?",
+            (now.isoformat(timespec="seconds"), row["id"]),
+        )
+    return {
+        "id": row["user_id"],
+        "username": row["username"],
+        "role": row["role"],
+        "status": row["status"],
+    }
+
+
+def destroy_web_session(token: str) -> None:
+    if not token:
+        return
+    with connect() as conn:
+        conn.execute("DELETE FROM web_sessions WHERE token_hash = ?", (hash_token(token),))
+
+
+def approved_accounts_for_user(username: str) -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT account_name
+            FROM account_bindings
+            WHERE username = ? AND status = 'approved'
+            ORDER BY account_name
+            """,
+            (username,),
+        ).fetchall()
+    return [str(row["account_name"] or "").strip() for row in rows if str(row["account_name"] or "").strip()]
+
+
+def is_chrome_extension_request(handler: SimpleHTTPRequestHandler) -> bool:
+    return str(handler.headers.get("Origin") or "").startswith("chrome-extension://")
+
+
+PUBLIC_API_PATHS = {
+    "/api/health",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/me",
+    "/api/dingtalk/callback",
+    "/api/dingtalk/callback-test",
+}
+
+PLUGIN_PUBLIC_PREFIXES = (
+    "/api/candidates",
+    "/api/recommendations",
+    "/api/job-requirements",
+    "/api/page-intelligence/extract",
+    "/api/behavior-policy",
+    "/api/automation/tasks/claim",
+    "/api/automation/tasks/update",
+    "/api/settings",
+)
+
+ADMIN_GET_PATHS = {
+    "/api/users",
+    "/api/security/allowlist",
+    "/api/llm/config",
+}
+
+ADMIN_POST_PATHS = {
+    "/api/settings",
+    "/api/accounts",
+    "/api/users",
+    "/api/account-bindings",
+    "/api/security/allowlist",
+    "/api/llm/config",
+    "/api/llm/config/reset",
+    "/api/behavior-policy",
+    "/api/data/cleanup",
+}
+
+
+def path_is_plugin_public(path: str) -> bool:
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in PLUGIN_PUBLIC_PREFIXES)
+
+
+def require_auth_for_request(handler: SimpleHTTPRequestHandler, path: str) -> bool:
+    setattr(handler, "current_user", None)
+    if not path.startswith("/api/") or not auth_enabled():
+        return True
+    if path in PUBLIC_API_PATHS:
+        return True
+    if is_chrome_extension_request(handler) and path_is_plugin_public(path):
+        return True
+    token = session_token_from_handler(handler)
+    user = get_session_user(token)
+    if not user:
+        json_response(handler, {"success": False, "message": "请先登录", "authRequired": True}, 401)
+        return False
+    setattr(handler, "current_user", user)
+    if handler.command == "GET" and path in ADMIN_GET_PATHS and user.get("role") != "admin":
+        json_response(handler, {"success": False, "message": "当前用户无管理员权限"}, 403)
+        return False
+    if handler.command == "POST" and path in ADMIN_POST_PATHS and user.get("role") != "admin":
+        json_response(handler, {"success": False, "message": "当前用户无管理员权限"}, 403)
+        return False
+    return True
+
+
+def current_request_user(handler: SimpleHTTPRequestHandler) -> dict[str, Any] | None:
+    user = getattr(handler, "current_user", None)
+    return user if isinstance(user, dict) else None
+
+
+def scoped_account_filters(handler: SimpleHTTPRequestHandler, filters: dict[str, Any] | None = None) -> dict[str, Any]:
+    filters = dict(filters or {})
+    user = current_request_user(handler)
+    if not user or user.get("role") == "admin":
+        return filters
+    allowed = approved_accounts_for_user(str(user.get("username") or ""))
+    if not allowed:
+        filters["accountWhitelist"] = ["__NO_ACCESS__"]
+        return filters
+    requested = str(filters.get("account") or "").strip()
+    if requested:
+        allowed_keys = {normalize_account_name(item) for item in allowed}
+        if normalize_account_name(requested) not in allowed_keys:
+            filters["accountWhitelist"] = ["__NO_ACCESS__"]
+        else:
+            filters["account"] = requested
+            filters["accountExact"] = "1"
+        return filters
+    filters["accountWhitelist"] = allowed
+    return filters
+
+
+def scoped_accounts_for_response(handler: SimpleHTTPRequestHandler, accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    user = current_request_user(handler)
+    if not user or user.get("role") == "admin":
+        return accounts
+    allowed = {normalize_account_name(item) for item in approved_accounts_for_user(str(user.get("username") or ""))}
+    return [item for item in accounts if normalize_account_name(item.get("name")) in allowed]
+
+
+def auth_login(payload: dict[str, Any]) -> dict[str, Any]:
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "")
+    user = get_user_by_username(username)
+    if not user or user.get("status") != "active" or not verify_user_password(user, password):
+        return {"success": False, "message": "用户名或密码错误，或用户未启用"}
+    token = create_web_session(str(user["id"]))
+    return {
+        "success": True,
+        "token": token,
+        "user": safe_user(user),
+        "accounts": approved_accounts_for_user(username),
+    }
+
+
+def auth_cookie_header(token: str) -> str:
+    return (
+        f"{AUTH_COOKIE_NAME}={urllib.parse.quote(token)}; "
+        f"Path=/; Max-Age={SESSION_TTL_SECONDS}; SameSite=Lax; HttpOnly"
+    )
+
+
+def clear_auth_cookie_header() -> str:
+    return f"{AUTH_COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly"
+
+
+def auth_me(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
+    if not auth_enabled():
+        return {"success": True, "authenticated": True, "authEnabled": False, "user": {"username": "anonymous", "role": "admin"}}
+    user = get_session_user(session_token_from_handler(handler))
+    if not user:
+        return {"success": True, "authenticated": False, "authEnabled": True}
+    return {
+        "success": True,
+        "authenticated": True,
+        "authEnabled": True,
+        "user": user,
+        "accounts": approved_accounts_for_user(str(user.get("username") or "")),
+    }
+
+
+def auth_logout(handler: SimpleHTTPRequestHandler) -> dict[str, Any]:
+    destroy_web_session(session_token_from_handler(handler))
+    return {"success": True}
+
 
 
 def list_action_logs(limit: int = 200, filters: dict[str, str] | None = None) -> dict[str, Any]:
@@ -2347,6 +2862,7 @@ def list_action_logs(limit: int = 200, filters: dict[str, str] | None = None) ->
     params: list[Any] = []
     q = str(filters.get("q") or "").strip()
     account = str(filters.get("account") or "").strip()
+    account_whitelist = filters.get("accountWhitelist") if isinstance(filters.get("accountWhitelist"), list) else []
     action_type = str(filters.get("actionType") or filters.get("action_type") or "").strip()
     if q:
         fields = ["candidate_name", "role", "action_type", "button_text", "result", "error_message", "raw_json"]
@@ -2355,6 +2871,10 @@ def list_action_logs(limit: int = 200, filters: dict[str, str] | None = None) ->
     if account:
         where.append("COALESCE(NULLIF(account_name, ''), '未识别') LIKE ?")
         params.append(f"%{account}%")
+    elif account_whitelist:
+        placeholders = ",".join("?" for _ in account_whitelist)
+        where.append(f"COALESCE(NULLIF(account_name, ''), '未识别') IN ({placeholders})")
+        params.extend(account_whitelist)
     if action_type:
         where.append("action_type = ?")
         params.append(action_type)
@@ -2368,13 +2888,17 @@ def list_action_logs(limit: int = 200, filters: dict[str, str] | None = None) ->
     return {"success": True, "items": rows}
 
 
-def list_push_records(limit: int = 100, account: str = "") -> dict[str, Any]:
+def list_push_records(limit: int = 100, account: str = "", account_whitelist: list[str] | None = None) -> dict[str, Any]:
     limit = clamp_int(limit, 100, 1, 500)
     where: list[str] = []
     params: list[Any] = []
     if account:
         where.append("COALESCE(NULLIF(account_name, ''), '全部账号') LIKE ?")
         params.append(f"%{account}%")
+    elif account_whitelist:
+        placeholders = ",".join("?" for _ in account_whitelist)
+        where.append(f"(COALESCE(NULLIF(account_name, ''), '全部账号') IN ({placeholders}) OR COALESCE(account_name, '') = '')")
+        params.extend(account_whitelist)
     sql = "SELECT * FROM push_records"
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -2552,6 +3076,7 @@ def save_agent_conversation(
     answer: str,
     channel: str = "web",
     sender: str = "",
+    account_name: str = "",
     raw: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     item_id = uuid.uuid4().hex
@@ -2559,13 +3084,14 @@ def save_agent_conversation(
         conn.execute(
             """
             INSERT INTO agent_conversations
-            (id, channel, sender, question, answer, raw_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (id, channel, sender, account_name, question, answer, raw_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item_id,
                 channel,
                 sender,
+                account_name,
                 question,
                 answer,
                 json.dumps(raw or {}, ensure_ascii=False),
@@ -2575,13 +3101,27 @@ def save_agent_conversation(
     return {"success": True, "id": item_id}
 
 
-def list_agent_conversations(limit: int = 100) -> list[dict[str, Any]]:
+def list_agent_conversations(limit: int = 100, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    filters = filters or {}
+    account = str(filters.get("account") or "").strip()
+    account_whitelist = filters.get("accountWhitelist") if isinstance(filters.get("accountWhitelist"), list) else []
+    where: list[str] = []
+    params: list[Any] = []
+    if account:
+        where.append("COALESCE(NULLIF(account_name, ''), '未识别') = ?")
+        params.append(account)
+    elif account_whitelist:
+        placeholders = ",".join("?" for _ in account_whitelist)
+        where.append(f"COALESCE(NULLIF(account_name, ''), '未识别') IN ({placeholders})")
+        params.extend(account_whitelist)
+    sql = "SELECT * FROM agent_conversations"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
     with connect() as conn:
         return [
-            dict(row) for row in conn.execute(
-                "SELECT * FROM agent_conversations ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            dict(row) for row in conn.execute(sql, params).fetchall()
         ]
 
 
@@ -2670,13 +3210,14 @@ def request_json(
 
 
 def request_llm_json(url: str, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-    timeout = max(30, min(int(config.get("llmTimeoutSeconds") or 90), 180))
+    timeout = max(5, min(int(config.get("llmTimeoutSeconds") or 90), 180))
+    retries = max(0, min(int(config.get("llmRetries") or 0), 2))
     return request_json(
         url,
         payload,
         {"Authorization": f"Bearer {config['llmApiKey']}"},
         timeout=timeout,
-        retries=1,
+        retries=retries,
     )
 
 
@@ -2766,8 +3307,8 @@ def call_llm_anthropic_messages(question: str, context: str, config: dict[str, A
             "x-api-key": str(config["llmApiKey"]),
             "anthropic-version": "2023-06-01",
         },
-        timeout=max(30, min(int(config.get("llmTimeoutSeconds") or 90), 180)),
-        retries=1,
+        timeout=max(5, min(int(config.get("llmTimeoutSeconds") or 90), 180)),
+        retries=max(0, min(int(config.get("llmRetries") or 0), 2)),
     )
     answer = extract_anthropic_answer(body)
     if not answer:
@@ -2775,8 +3316,8 @@ def call_llm_anthropic_messages(question: str, context: str, config: dict[str, A
     return answer[:18000]
 
 
-def call_llm_chat(question: str, context: str) -> str:
-    config = get_llm_config(mask_key=False)
+def call_llm_chat(question: str, context: str, config_override: dict[str, Any] | None = None) -> str:
+    config = config_override or get_llm_config(mask_key=False)
     if not config.get("llmEnabled"):
         raise RuntimeError("大模型问答未启用")
     if not config.get("llmApiKey"):
@@ -3136,8 +3677,11 @@ def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
     current = get_llm_config(mask_key=False)
     provider = str(payload.get("llmProvider") or current["llmProvider"] or DEFAULT_LLM_CONFIG["llmProvider"])
     preset = LLM_PROVIDER_PRESETS.get(provider, LLM_PROVIDER_PRESETS["custom"])
-    api_base = str(payload.get("llmApiBase") or preset.get("apiBase") or "").rstrip("/")
-    model = str(payload.get("llmModel") or preset.get("model") or "")
+    provider_changed = provider != current.get("llmProvider")
+    api_base_source = payload["llmApiBase"] if "llmApiBase" in payload else (preset.get("apiBase") if provider_changed else current.get("llmApiBase"))
+    model_source = payload["llmModel"] if "llmModel" in payload else (preset.get("model") if provider_changed else current.get("llmModel"))
+    api_base = str(api_base_source or "").rstrip("/")
+    model = str(model_source or "")
     config: dict[str, Any] = {
         "llmEnabled": bool(payload.get("llmEnabled", current["llmEnabled"])),
         "llmProvider": provider,
@@ -3153,6 +3697,10 @@ def save_llm_config(payload: dict[str, Any]) -> dict[str, Any]:
         config["pageIntelligenceEnabled"] = bool(payload.get("pageIntelligenceEnabled"))
     if "pageIntelligenceUseScreenshot" in payload:
         config["pageIntelligenceUseScreenshot"] = bool(payload.get("pageIntelligenceUseScreenshot"))
+    if "llmScoringEnabled" in payload:
+        config["llmScoringEnabled"] = bool(payload.get("llmScoringEnabled"))
+    if "llmScoringTimeoutSeconds" in payload:
+        config["llmScoringTimeoutSeconds"] = max(5, min(int(payload.get("llmScoringTimeoutSeconds") or 12), 60))
     api_key = str(payload.get("llmApiKey") or "").strip()
     if api_key and api_key != "********":
         config["llmApiKey"] = api_key
@@ -3178,6 +3726,8 @@ def reset_llm_config() -> dict[str, Any]:
         "llmTimeoutSeconds": DEFAULT_LLM_CONFIG["llmTimeoutSeconds"],
         "pageIntelligenceEnabled": True,
         "pageIntelligenceUseScreenshot": False,
+        "llmScoringEnabled": True,
+        "llmScoringTimeoutSeconds": 12,
     })
     return {"success": True, "llm": get_llm_config(mask_key=True)}
 
@@ -3307,6 +3857,112 @@ def scheduled_push_loop() -> None:
                     print(f"[scheduled_push] Excel 推送失败：{delivery_result.get('message') or delivery_result}")
         except Exception as exc:
             print(f"[scheduled_push] {exc}")
+        time.sleep(60)
+
+
+def parse_time_minutes(value: Any, fallback: str) -> int:
+    text = str(value or fallback).strip()
+    try:
+        hour, minute = text.split(":", 1)
+        return max(0, min(23, int(hour))) * 60 + max(0, min(59, int(minute[:2])))
+    except Exception:
+        hour, minute = fallback.split(":", 1)
+        return int(hour) * 60 + int(minute)
+
+
+def policy_allows_current_time(policy: dict[str, Any], current: datetime | None = None) -> bool:
+    if not bool(policy.get("workTimeEnabled")):
+        return True
+    current = current or datetime.now()
+    work_days = policy.get("workDays") if isinstance(policy.get("workDays"), list) else [1, 2, 3, 4, 5]
+    if current.isoweekday() not in {int(item) for item in work_days if str(item).isdigit()}:
+        return False
+    now_minutes = current.hour * 60 + current.minute
+    start = parse_time_minutes(policy.get("workStartTime"), "09:00")
+    end = parse_time_minutes(policy.get("workEndTime"), "18:00")
+    if start <= end:
+        return start <= now_minutes <= end
+    return now_minutes >= start or now_minutes <= end
+
+
+def scheduler_accounts(settings: dict[str, Any]) -> list[str]:
+    raw = settings.get("autoTaskAccounts")
+    if isinstance(raw, list):
+        accounts = [account_label(item) for item in raw if str(item or "").strip()]
+    else:
+        accounts = [account_label(item) for item in re.split(r"[\n,，]+", str(raw or "")) if item.strip()]
+    if not accounts:
+        accounts = [item["name"] for item in get_accounts() if str(item.get("name") or "").strip()]
+    seen: set[str] = set()
+    result: list[str] = []
+    for account in accounts:
+        key = normalize_account_name(account)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(account)
+    return result or [""]
+
+
+def recent_automation_task_exists(account: str, minutes: int) -> bool:
+    cutoff = (datetime.now() - timedelta(minutes=max(1, minutes))).isoformat(timespec="seconds")
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id FROM automation_tasks
+            WHERE COALESCE(account_name, '') = ?
+              AND (
+                status IN ('pending', 'claimed', 'running')
+                OR created_at >= ?
+              )
+            LIMIT 1
+            """,
+            (str(account or ""), cutoff),
+        ).fetchone()
+    return bool(row)
+
+
+def scheduled_automation_loop() -> None:
+    while True:
+        try:
+            settings = get_settings()
+            if not bool(settings.get("autoTaskEnabled")):
+                time.sleep(60)
+                continue
+            interval = max(5, min(int(settings.get("autoTaskIntervalMinutes") or 60), 24 * 60))
+            last_run = parse_datetime_value(settings.get("autoTaskLastRunAt"))
+            if last_run and datetime.now() - last_run < timedelta(minutes=interval):
+                time.sleep(60)
+                continue
+            created: list[str] = []
+            skipped: list[str] = []
+            for account in scheduler_accounts(settings):
+                policy = get_behavior_policy(account)
+                if not policy_allows_current_time(policy):
+                    skipped.append(f"{account or '任意账号'}:非工作时间")
+                    continue
+                if recent_automation_task_exists(account, interval):
+                    skipped.append(f"{account or '任意账号'}:已有待处理任务")
+                    continue
+                result = create_automation_task({
+                    "taskType": "recruitmentWorkflow",
+                    "accountName": account,
+                    "maxCandidates": policy.get("maxCandidatesPerRun") or 20,
+                    "createdBy": "scheduler",
+                })
+                if result.get("success"):
+                    created.append(account or "任意账号")
+                else:
+                    skipped.append(f"{account or '任意账号'}:{result.get('message') or '创建失败'}")
+            save_settings({
+                "autoTaskLastRunAt": now_iso(),
+                "autoTaskLastResult": {
+                    "created": created,
+                    "skipped": skipped,
+                    "at": now_iso(),
+                },
+            })
+        except Exception as exc:
+            print(f"[scheduled_automation] {exc}")
         time.sleep(60)
 
 
@@ -4440,6 +5096,8 @@ class Handler(SimpleHTTPRequestHandler):
         if not guard_request(self):
             return
         parsed = urllib.parse.urlparse(self.path)
+        if not require_auth_for_request(self, parsed.path):
+            return
         query = urllib.parse.parse_qs(parsed.query)
         try:
             if parsed.path == "/api/health":
@@ -4456,6 +5114,8 @@ class Handler(SimpleHTTPRequestHandler):
                         "rateLimitPerMinute": RATE_LIMIT_PER_MINUTE,
                     },
                 })
+            elif parsed.path == "/api/auth/me":
+                json_response(self, auth_me(self))
             elif parsed.path == "/api/security/allowlist":
                 json_response(self, get_security_allowlist_config(self))
             elif parsed.path == "/api/extension/config":
@@ -4465,26 +5125,28 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/extension/package":
                 self.serve_extension_package(query)
             elif parsed.path == "/api/stats":
-                json_response(self, get_stats({
+                json_response(self, get_stats(scoped_account_filters(self, {
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
                     "accountExact": query.get("accountExact", [""])[0],
-                }))
+                })))
             elif parsed.path == "/api/accounts":
-                json_response(self, {"items": get_accounts()})
+                json_response(self, {"items": scoped_accounts_for_response(self, get_accounts())})
             elif parsed.path == "/api/users":
                 json_response(self, list_users())
             elif parsed.path == "/api/action-logs":
-                json_response(self, list_action_logs(int(query.get("limit", ["200"])[0]), {
+                json_response(self, list_action_logs(int(query.get("limit", ["200"])[0]), scoped_account_filters(self, {
                     "q": query.get("q", [""])[0],
                     "account": query.get("account", [""])[0],
                     "actionType": query.get("actionType", [""])[0],
-                }))
+                })))
             elif parsed.path == "/api/push-records":
+                push_filters = scoped_account_filters(self, {"account": query.get("account", [""])[0]})
                 json_response(self, list_push_records(
                     int(query.get("limit", ["100"])[0]),
-                    query.get("account", [""])[0],
+                    str(push_filters.get("account") or ""),
+                    push_filters.get("accountWhitelist") if isinstance(push_filters.get("accountWhitelist"), list) else None,
                 ))
             elif parsed.path == "/api/settings":
                 settings = get_settings()
@@ -4504,15 +5166,22 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/llm/config":
                 json_response(self, get_llm_config(mask_key=True))
             elif parsed.path == "/api/behavior-policy":
-                json_response(self, get_behavior_policy(query.get("account", [""])[0]))
+                scoped = scoped_account_filters(self, {"account": query.get("account", [""])[0]})
+                account_value = str(scoped.get("account") or "")
+                if not account_value and isinstance(scoped.get("accountWhitelist"), list):
+                    whitelist = scoped.get("accountWhitelist") or []
+                    account_value = str(whitelist[0] if whitelist else "__NO_ACCESS__")
+                json_response(self, get_behavior_policy(account_value))
             elif parsed.path == "/api/automation/tasks":
+                task_filters = scoped_account_filters(self, {"account": query.get("account", [""])[0]})
                 json_response(self, list_automation_tasks(
                     int(query.get("limit", ["50"])[0]),
-                    query.get("account", [""])[0],
+                    str(task_filters.get("account") or ""),
                     query.get("status", [""])[0],
+                    task_filters.get("accountWhitelist") if isinstance(task_filters.get("accountWhitelist"), list) else None,
                 ))
             elif parsed.path == "/api/candidates":
-                json_response(self, {"items": list_rows("candidates", int(query.get("limit", ["200"])[0]), filters={
+                json_response(self, {"items": list_rows("candidates", int(query.get("limit", ["200"])[0]), filters=scoped_account_filters(self, {
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
@@ -4520,54 +5189,70 @@ class Handler(SimpleHTTPRequestHandler):
                     "role": query.get("role", [""])[0],
                     "status": query.get("status", [""])[0],
                     "scoreMin": query.get("scoreMin", [""])[0],
-                })})
+                }))})
             elif parsed.path == "/api/recommendations":
-                json_response(self, {"items": list_recommendation_details(int(query.get("limit", ["200"])[0]), filters={
+                json_response(self, {"items": list_recommendation_details(int(query.get("limit", ["200"])[0]), filters=scoped_account_filters(self, {
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
                     "accountExact": query.get("accountExact", [""])[0],
                     "role": query.get("role", [""])[0],
                     "scoreMin": query.get("scoreMin", [""])[0],
-                })})
+                }))})
             elif parsed.path == "/api/reports":
-                json_response(self, {"items": list_rows("reports", int(query.get("limit", ["100"])[0]), filters={
+                json_response(self, {"items": list_rows("reports", int(query.get("limit", ["100"])[0]), filters=scoped_account_filters(self, {
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
                     "accountExact": query.get("accountExact", [""])[0],
-                })})
+                }))})
             elif parsed.path == "/api/job-requirements":
                 role = query.get("role", [""])[0]
                 account = query.get("account", [""])[0]
                 if role:
-                    json_response(self, {"item": get_job_requirement(role, account)})
+                    scoped = scoped_account_filters(self, {"account": account})
+                    scoped_account = str(scoped.get("account") or "")
+                    if not scoped_account and isinstance(scoped.get("accountWhitelist"), list):
+                        whitelist = scoped.get("accountWhitelist") or []
+                        scoped_account = str(whitelist[0] if whitelist else "__NO_ACCESS__")
+                    json_response(self, {"item": get_job_requirement(role, scoped_account)})
                 else:
-                    json_response(self, {"items": list_rows("job_requirements", int(query.get("limit", ["200"])[0]), filters={
+                    json_response(self, {"items": list_rows("job_requirements", int(query.get("limit", ["200"])[0]), filters=scoped_account_filters(self, {
                         "q": query.get("q", [""])[0],
                         "source": query.get("source", [""])[0],
                         "account": account,
                         "accountExact": query.get("accountExact", [""])[0],
                         "role": query.get("role", [""])[0],
                         "status": query.get("status", [""])[0],
-                    })})
+                    }))})
             elif parsed.path == "/api/agent/conversations":
-                json_response(self, {"items": list_agent_conversations(int(query.get("limit", ["100"])[0]))})
+                json_response(self, {"items": list_agent_conversations(
+                    int(query.get("limit", ["100"])[0]),
+                    scoped_account_filters(self, {"account": query.get("account", [""])[0]}),
+                )})
             elif parsed.path == "/api/summary":
                 scope = query.get("scope", ["all"])[0]
+                account_filters = scoped_account_filters(self, {"account": query.get("account", [""])[0]})
+                account_value = str(account_filters.get("account") or "")
+                if not account_value and isinstance(account_filters.get("accountWhitelist"), list):
+                    account_value = str(account_filters["accountWhitelist"][0] if account_filters["accountWhitelist"] else "__NO_ACCESS__")
                 json_response(self, {"markdown": build_summary(
                     scope,
                     query.get("start", [""])[0] or None,
                     query.get("end", [""])[0] or None,
-                    query.get("account", [""])[0] or None,
+                    account_value or None,
                 )})
             elif parsed.path == "/api/summary/excel":
                 scope = query.get("scope", ["configured"])[0]
+                account_filters = scoped_account_filters(self, {"account": query.get("account", [""])[0]})
+                account_value = str(account_filters.get("account") or "")
+                if not account_value and isinstance(account_filters.get("accountWhitelist"), list):
+                    account_value = str(account_filters["accountWhitelist"][0] if account_filters["accountWhitelist"] else "__NO_ACCESS__")
                 output_path, dataset = create_recommendation_excel(
                     scope,
                     query.get("start", [""])[0] or None,
                     query.get("end", [""])[0] or None,
-                    query.get("account", [""])[0] or None,
+                    account_value or None,
                 )
                 binary_response(
                     self,
@@ -4578,7 +5263,7 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path.startswith("/exports/"):
                 self.serve_export(parsed.path)
             elif parsed.path == "/api/export/candidates.csv":
-                rows = enrich_candidate_export_rows(list_rows("candidates", 10000, filters={
+                rows = enrich_candidate_export_rows(list_rows("candidates", 10000, filters=scoped_account_filters(self, {
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
@@ -4586,7 +5271,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "role": query.get("role", [""])[0],
                     "status": query.get("status", [""])[0],
                     "scoreMin": query.get("scoreMin", [""])[0],
-                }))
+                })))
                 text_response(self, rows_to_csv(rows, [
                     ("received_date", "日期"),
                     ("name", "姓名"),
@@ -4610,14 +5295,14 @@ class Handler(SimpleHTTPRequestHandler):
                     ("created_at", "创建时间"),
                 ]), content_type="text/csv; charset=utf-8", filename="candidates.csv")
             elif parsed.path == "/api/export/recommendations.csv":
-                rows = list_recommendation_details(10000, filters={
+                rows = list_recommendation_details(10000, filters=scoped_account_filters(self, {
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
                     "accountExact": query.get("accountExact", [""])[0],
                     "role": query.get("role", [""])[0],
                     "scoreMin": query.get("scoreMin", [""])[0],
-                })
+                }))
                 text_response(self, rows_to_csv(rows, [
                     ("created_at", "推荐时间"),
                     ("name", "姓名"),
@@ -4639,9 +5324,17 @@ class Handler(SimpleHTTPRequestHandler):
         if not guard_request(self):
             return
         parsed = urllib.parse.urlparse(self.path)
+        if not require_auth_for_request(self, parsed.path):
+            return
         try:
             payload = read_json(self)
-            if parsed.path == "/api/settings":
+            if parsed.path == "/api/auth/login":
+                result = auth_login(payload)
+                headers = {"Set-Cookie": auth_cookie_header(result["token"])} if result.get("success") and result.get("token") else None
+                json_response(self, result, extra_headers=headers)
+            elif parsed.path == "/api/auth/logout":
+                json_response(self, auth_logout(self), extra_headers={"Set-Cookie": clear_auth_cookie_header()})
+            elif parsed.path == "/api/settings":
                 json_response(self, save_settings(payload))
             elif parsed.path == "/api/accounts":
                 action = str(payload.get("action") or "save").strip().lower()
@@ -4660,15 +5353,39 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/llm/config/reset":
                 json_response(self, reset_llm_config())
             elif parsed.path == "/api/behavior-policy":
-                json_response(self, save_behavior_policy(payload))
+                policy_payload = dict(payload)
+                user = current_request_user(self)
+                if user and user.get("role") != "admin":
+                    allowed = approved_accounts_for_user(str(user.get("username") or ""))
+                    requested = account_label(policy_payload.get("accountName") or policy_payload.get("account") or "")
+                    if not requested and allowed:
+                        requested = allowed[0]
+                    if not requested or normalize_account_name(requested) not in {normalize_account_name(item) for item in allowed}:
+                        json_response(self, {"success": False, "message": "当前用户无权编辑该招聘账号策略"}, 403)
+                        return
+                    policy_payload["accountName"] = requested
+                json_response(self, save_behavior_policy(policy_payload))
             elif parsed.path == "/api/automation/tasks":
-                json_response(self, create_automation_task(payload))
+                task_payload = dict(payload)
+                user = current_request_user(self)
+                if user and user.get("role") != "admin":
+                    allowed = approved_accounts_for_user(str(user.get("username") or ""))
+                    requested = account_label(task_payload.get("accountName") or task_payload.get("account_name") or "")
+                    if not requested and allowed:
+                        requested = allowed[0]
+                    if not requested or normalize_account_name(requested) not in {normalize_account_name(item) for item in allowed}:
+                        json_response(self, {"success": False, "message": "当前用户无权给该招聘账号下发任务"}, 403)
+                        return
+                    task_payload["accountName"] = requested
+                json_response(self, create_automation_task(task_payload))
             elif parsed.path == "/api/automation/tasks/claim":
                 json_response(self, claim_automation_task(payload))
             elif parsed.path == "/api/automation/tasks/update":
                 json_response(self, update_automation_task(payload))
             elif parsed.path == "/api/page-intelligence/extract":
                 json_response(self, extract_page_intelligence(payload))
+            elif parsed.path == "/api/candidates/score":
+                json_response(self, score_candidate_payload(payload))
             elif parsed.path == "/api/candidates":
                 json_response(self, upsert_candidate(payload))
             elif parsed.path == "/api/recommendations":
@@ -4687,9 +5404,14 @@ class Handler(SimpleHTTPRequestHandler):
                     str(account_exact_value).strip().lower() in {"1", "true", "yes", "on"},
                 ))
             elif parsed.path == "/api/agent/ask":
+                scoped = scoped_account_filters(self, {"account": str(payload.get("account", "") or "").strip()})
+                account_for_agent = str(scoped.get("account") or "").strip()
+                if not account_for_agent and isinstance(scoped.get("accountWhitelist"), list):
+                    whitelist = scoped.get("accountWhitelist") or []
+                    account_for_agent = str(whitelist[0] if whitelist else "__NO_ACCESS__")
                 answer, agent_meta = answer_question_with_agent(
                     str(payload.get("question", "")),
-                    str(payload.get("account", "") or "").strip() or None,
+                    account_for_agent or None,
                     bool(payload.get("forceLlm")),
                 )
                 save_agent_conversation(
@@ -4697,6 +5419,7 @@ class Handler(SimpleHTTPRequestHandler):
                     answer=answer,
                     channel="web",
                     sender=str(payload.get("sender", "Web 管理后台")),
+                    account_name=account_for_agent or "",
                     raw=payload,
                 )
                 if payload.get("replyToDingTalk"):
@@ -4715,11 +5438,16 @@ class Handler(SimpleHTTPRequestHandler):
                     save_settings({"publicBaseUrl": DEFAULT_PUBLIC_BASE_URL})
                 if not usable_base_url(settings.get("adminBaseUrl")):
                     save_settings({"adminBaseUrl": DEFAULT_PUBLIC_BASE_URL})
+                scoped = scoped_account_filters(self, {"account": query.get("account", [""])[0] or ""})
+                account_value = str(scoped.get("account") or "")
+                if not account_value and isinstance(scoped.get("accountWhitelist"), list):
+                    whitelist = scoped.get("accountWhitelist") or []
+                    account_value = str(whitelist[0] if whitelist else "__NO_ACCESS__")
                 output_path, dataset = create_recommendation_excel(
                     scope,
                     query.get("start", [""])[0] or None,
                     query.get("end", [""])[0] or None,
-                    query.get("account", [""])[0] or None,
+                    account_value or None,
                 )
                 markdown = build_push_markdown(scope, dataset, output_path, base_url)
                 summary_result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
@@ -4795,6 +5523,7 @@ class Handler(SimpleHTTPRequestHandler):
 def main() -> None:
     init_db()
     threading.Thread(target=scheduled_push_loop, daemon=True).start()
+    threading.Thread(target=scheduled_automation_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"招聘助手 Web 管理后台已启动: http://127.0.0.1:{PORT}")
     print(f"数据文件: {DB_PATH}")

@@ -2724,6 +2724,20 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
         finalCandidate.resumeEvidence = 'onlineResumeOpened';
         finalCandidate.id = `resume_${hashString(`${finalCandidate.name || ''}|${finalCandidate.role || ''}|online|${finalCandidate.receivedDate || ''}`)}`;
       }
+      const backendScore = finalCandidate.jobRequirement
+        ? await scoreCandidateWithBackend(finalCandidate)
+        : null;
+      if (backendScore?.evaluation) {
+        finalCandidate.evaluation = backendScore.evaluation;
+        finalCandidate.score = backendScore.score;
+        finalCandidate.recommendation = backendScore.recommendation;
+        workflowActions.push({
+          type: 'backendScore',
+          status: 'success',
+          at: new Date().toISOString(),
+          text: `后端评分 ${backendScore.score || 0}%`,
+        });
+      }
       if (!finalCandidate.evaluation) finalCandidate.evaluation = evaluateCandidate(finalCandidate);
 
       const score = Number(finalCandidate.evaluation?.score || 0);
@@ -3386,6 +3400,19 @@ function validateCandidateMinimumInfo(info = {}) {
 // ============================================================
 // 数据存储
 // ============================================================
+
+async function scoreCandidateWithBackend(candidate) {
+  try {
+    const result = await chrome.runtime.sendMessage({
+      action: 'scoreCandidateWithBackend',
+      candidate,
+    });
+    if (!result?.success || !result.evaluation) return null;
+    return result;
+  } catch (error) {
+    return null;
+  }
+}
 
 async function saveResumeData(resumeInfo) {
   return new Promise((resolve) => {

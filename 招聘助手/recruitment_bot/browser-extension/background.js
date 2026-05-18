@@ -732,6 +732,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'scoreCandidateWithBackend') {
+    syncToBackend('/api/candidates/score', { candidate: message.candidate || {} })
+      .then(sendResponse)
+      .catch(err => sendResponse({ success: false, message: err.message }));
+    return true;
+  }
+
   if (message.action === 'detectedAccountUpdated') {
     const accountInfo = {
       ...(message.accountInfo || {}),

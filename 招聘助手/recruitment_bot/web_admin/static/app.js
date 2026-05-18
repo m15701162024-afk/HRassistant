@@ -16,6 +16,14 @@ const state = {
   users: [],
   accountBindings: [],
   security: {},
+  auth: {
+    loaded: false,
+    authenticated: false,
+    authEnabled: true,
+    user: null,
+    accounts: [],
+    token: '',
+  },
   filters: {
     q: '',
     source: '',
@@ -28,6 +36,7 @@ const state = {
 };
 
 const API_BASE_STORAGE_KEY = 'recruitmentAdminApiBase';
+const AUTH_TOKEN_STORAGE_KEY = 'recruitmentAdminAuthToken';
 const DEFAULT_PUBLIC_BASE_URL = 'https://unconfuted-superbusily-ryan.ngrok-free.dev';
 const LLM_PROVIDER_DEFAULTS = {
   siliconflow: {
@@ -124,11 +133,17 @@ function apiUrl(path) {
 
 async function api(path, options = {}) {
   const requestUrl = apiUrl(path);
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(options.headers || {}),
+  };
+  const token = state.auth.token || localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || '';
+  if (token) headers['X-Auth-Token'] = token;
   let response;
   try {
     response = await fetch(requestUrl, {
-      headers: { 'Content-Type': 'application/json' },
       ...options,
+      headers,
     });
   } catch (err) {
     throw new Error(`无法连接后端：${requestUrl}。请刷新页面后重试；如果通过内网地址访问，应使用当前地址 ${location.origin}。`);
@@ -143,9 +158,44 @@ async function api(path, options = {}) {
     throw new Error(`接口返回的不是 JSON。请确认后端服务已启动且后端地址正确。当前请求：${requestUrl}；返回：${preview}`);
   }
   if (!response.ok || data.success === false) {
+    if (response.status === 401) {
+      localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      state.auth.token = '';
+      state.auth.authenticated = false;
+      renderAuthState();
+    }
     throw new Error(data.message || '请求失败');
   }
   return data;
+}
+
+async function downloadWithAuth(path, filename = '') {
+  const requestUrl = apiUrl(path);
+  const headers = {};
+  const token = state.auth.token || localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || '';
+  if (token) headers['X-Auth-Token'] = token;
+  const response = await fetch(requestUrl, { headers });
+  if (!response.ok) {
+    let message = '下载失败';
+    try {
+      const data = await response.json();
+      message = data.message || message;
+    } catch (error) {
+      message = `${message}：HTTP ${response.status}`;
+    }
+    throw new Error(message);
+  }
+  const blob = await response.blob();
+  const link = document.createElement('a');
+  const disposition = response.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i);
+  const inferredName = match ? decodeURIComponent(match[1] || match[2] || '') : '';
+  link.href = URL.createObjectURL(blob);
+  link.download = filename || inferredName || 'download';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1500);
 }
 
 function escapeHtml(value) {
@@ -201,6 +251,90 @@ function toast(message, type = 'success') {
   toast.timer = setTimeout(() => {
     el.hidden = true;
   }, 2600);
+}
+
+function isAdminUser() {
+  return !state.auth.authEnabled || state.auth.user?.role === 'admin';
+}
+
+function renderAuthState() {
+  const enabled = state.auth.authEnabled !== false;
+  const authenticated = !enabled || state.auth.authenticated;
+  const user = state.auth.user || {};
+  document.body.classList.toggle('auth-locked', !authenticated);
+  document.body.classList.toggle('role-admin', isAdminUser());
+  document.body.classList.toggle('role-user', authenticated && !isAdminUser());
+  if ($('authGate')) $('authGate').hidden = authenticated;
+  if ($('logoutBtn')) $('logoutBtn').hidden = !authenticated || !enabled;
+  if ($('authUserBadge')) {
+    $('authUserBadge').textContent = authenticated
+      ? `${enabled ? user.username || '已登录' : '免登录'}｜${isAdminUser() ? '管理员' : '普通用户'}`
+      : '未登录';
+    $('authUserBadge').className = `badge ${authenticated ? 'ok' : 'warning'}`;
+  }
+  document.querySelectorAll('[data-admin-only="true"]').forEach(el => {
+    el.hidden = authenticated && !isAdminUser();
+  });
+}
+
+async function loadAuth() {
+  state.auth.token = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || '';
+  const result = await api('/api/auth/me');
+  state.auth = {
+    ...state.auth,
+    loaded: true,
+    authenticated: Boolean(result.authenticated),
+    authEnabled: result.authEnabled !== false,
+    user: result.user || null,
+    accounts: result.accounts || [],
+  };
+  if (!state.auth.authenticated) {
+    localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    state.auth.token = '';
+  }
+  renderAuthState();
+  return state.auth.authenticated || state.auth.authEnabled === false;
+}
+
+async function login(event) {
+  event?.preventDefault();
+  if ($('loginError')) $('loginError').textContent = '';
+  const username = $('loginUsername').value.trim();
+  const password = $('loginPassword').value;
+  const result = await api('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  });
+  state.auth = {
+    ...state.auth,
+    loaded: true,
+    authenticated: true,
+    authEnabled: true,
+    user: result.user || { username },
+    accounts: result.accounts || [],
+    token: result.token || '',
+  };
+  if (result.token) localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, result.token);
+  renderAuthState();
+  toast('登录成功');
+  await refreshAll();
+}
+
+async function logout() {
+  try {
+    await api('/api/auth/logout', { method: 'POST', body: '{}' });
+  } catch (error) {
+    // 本地令牌清理优先，服务端会在会话过期时自动回收。
+  }
+  localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  state.auth = {
+    ...state.auth,
+    authenticated: false,
+    user: null,
+    accounts: [],
+    token: '',
+  };
+  renderAuthState();
 }
 
 function queryString() {
@@ -269,10 +403,10 @@ async function loadExtensionPackageInfo() {
   }
 }
 
-function downloadExtensionPackage() {
+async function downloadExtensionPackage() {
   const backendUrl = currentBackendUrl();
   const path = `/api/extension/package?backendUrl=${encodeURIComponent(backendUrl)}`;
-  window.location.href = apiUrl(path);
+  await downloadWithAuth(path, '招聘助手浏览器插件.zip');
 }
 
 async function loadSettings() {
@@ -298,6 +432,7 @@ async function loadSettings() {
   $('publicBaseUrl').value = isPlaceholderUrl(settings.publicBaseUrl) ? '' : (settings.publicBaseUrl || '');
   if ($('saveRawResumeText')) $('saveRawResumeText').value = settings.saveRawResumeText === false ? 'false' : 'true';
   if ($('maskSensitiveDisplay')) $('maskSensitiveDisplay').value = settings.maskSensitiveDisplay === false ? 'false' : 'true';
+  if ($('authEnabled')) $('authEnabled').value = settings.authEnabled === false ? 'false' : 'true';
   $('llmEnabled').value = settings.llmEnabled ? 'true' : 'false';
   $('llmProvider').value = settings.llmProvider || 'siliconflow';
   $('llmApiBase').value = settings.llmApiBase || '';
@@ -310,6 +445,8 @@ async function loadSettings() {
   if ($('llmTimeoutSeconds')) $('llmTimeoutSeconds').value = settings.llmTimeoutSeconds ?? 90;
   if ($('pageIntelligenceEnabled')) $('pageIntelligenceEnabled').value = settings.pageIntelligenceEnabled === false ? 'false' : 'true';
   if ($('pageIntelligenceUseScreenshot')) $('pageIntelligenceUseScreenshot').value = settings.pageIntelligenceUseScreenshot ? 'true' : 'false';
+  if ($('llmScoringEnabled')) $('llmScoringEnabled').value = settings.llmScoringEnabled === false ? 'false' : 'true';
+  if ($('llmScoringTimeoutSeconds')) $('llmScoringTimeoutSeconds').value = settings.llmScoringTimeoutSeconds || 12;
   renderLlmProviderHint();
   const providerName = $('llmProvider').selectedOptions?.[0]?.textContent || settings.llmProvider || '硅基流动';
   $('llmStatus').textContent = settings.llmEnabled
@@ -321,6 +458,17 @@ async function loadSettings() {
     ? `已开启 ${settings.scheduledPushTime || '10:00'}｜${pushRangeLabel(settings.scheduledPushRangeMode)}`
     : '未开启';
   $('scheduleStatus').className = settings.scheduledPushEnabled ? 'badge ok' : 'badge';
+  if ($('autoTaskEnabled')) $('autoTaskEnabled').value = settings.autoTaskEnabled ? 'true' : 'false';
+  if ($('autoTaskIntervalMinutes')) $('autoTaskIntervalMinutes').value = settings.autoTaskIntervalMinutes || 60;
+  if ($('autoTaskAccounts')) setTextareaLines('autoTaskAccounts', Array.isArray(settings.autoTaskAccounts) ? settings.autoTaskAccounts : linesFromText(settings.autoTaskAccounts || ''));
+  if ($('autoTaskScheduleStatus')) {
+    const result = settings.autoTaskLastResult || {};
+    const created = Array.isArray(result.created) ? result.created.length : 0;
+    $('autoTaskScheduleStatus').textContent = settings.autoTaskEnabled
+      ? `已开启｜间隔 ${settings.autoTaskIntervalMinutes || 60} 分钟｜上次创建 ${created} 个`
+      : '未开启';
+    $('autoTaskScheduleStatus').className = settings.autoTaskEnabled ? 'badge ok' : 'badge';
+  }
   const callbackOrigin = normalizeApiBase(getApiBase()) || location.origin;
   $('callbackUrl').textContent = `${callbackOrigin}/api/dingtalk/callback`;
 }
@@ -546,6 +694,8 @@ async function saveLlmConfig(showToast = true) {
     llmTimeoutSeconds: Number(($('llmTimeoutSeconds')?.value || 90)),
     pageIntelligenceEnabled: $('pageIntelligenceEnabled')?.value !== 'false',
     pageIntelligenceUseScreenshot: $('pageIntelligenceUseScreenshot')?.value === 'true',
+    llmScoringEnabled: $('llmScoringEnabled')?.value !== 'false',
+    llmScoringTimeoutSeconds: Number($('llmScoringTimeoutSeconds')?.value || 12),
   };
   const apiKey = $('llmApiKey').value.trim();
   if (apiKey) payload.llmApiKey = apiKey;
@@ -803,6 +953,19 @@ async function createRemoteTask() {
   toast('任务已下发，插件将在下一轮轮询时自动领取执行');
 }
 
+async function saveAutoTaskSchedule() {
+  await api('/api/settings', {
+    method: 'POST',
+    body: JSON.stringify({
+      autoTaskEnabled: $('autoTaskEnabled').value === 'true',
+      autoTaskIntervalMinutes: Number($('autoTaskIntervalMinutes').value || 60),
+      autoTaskAccounts: linesFromText($('autoTaskAccounts').value),
+    }),
+  });
+  await loadSettings();
+  toast('自动任务计划已保存');
+}
+
 async function saveSettings(showToast = true) {
   await api('/api/settings', {
     method: 'POST',
@@ -897,6 +1060,7 @@ async function saveDataPolicy() {
     body: JSON.stringify({
       saveRawResumeText: $('saveRawResumeText').value === 'true',
       maskSensitiveDisplay: $('maskSensitiveDisplay').value === 'true',
+      authEnabled: $('authEnabled') ? $('authEnabled').value === 'true' : true,
     }),
   });
   await loadSettings();
@@ -972,7 +1136,10 @@ async function loadData() {
 }
 
 async function loadConversations() {
-  const result = await api('/api/agent/conversations?limit=50');
+  const params = new URLSearchParams();
+  params.set('limit', '50');
+  if (state.filters.account) params.set('account', state.filters.account);
+  const result = await api(`/api/agent/conversations?${params.toString()}`);
   state.conversations = result.items || [];
   $('conversationCount').textContent = `${state.conversations.length} 条`;
   $('conversationList').innerHTML = state.conversations.slice(0, 20).map(item => `
@@ -1348,7 +1515,7 @@ function exportCsv(type) {
   const path = type === 'recommendations'
     ? '/api/export/recommendations.csv'
     : '/api/export/candidates.csv';
-  location.href = apiUrl(qs ? `${path}?${qs}` : path);
+  downloadWithAuth(qs ? `${path}?${qs}` : path, type === 'recommendations' ? 'recommendations.csv' : 'candidates.csv').catch(showError);
 }
 
 async function ask(replyToDingTalk = false) {
@@ -1406,7 +1573,7 @@ function buildSummaryQuery() {
 }
 
 function exportSummaryExcel() {
-  window.open(apiUrl(`/api/summary/excel${buildSummaryQuery()}`), '_blank');
+  downloadWithAuth(`/api/summary/excel${buildSummaryQuery()}`, '候选人推荐表.xlsx').catch(showError);
 }
 
 async function saveJobRequirement() {
@@ -1517,10 +1684,13 @@ function showModule(name) {
 
 function showError(err) {
   toast(err.message || '操作失败', 'danger');
-  $('answerBox').textContent = `操作失败：${err.message}`;
+  if ($('answerBox')) $('answerBox').textContent = `操作失败：${err.message}`;
+  if ($('loginError') && !state.auth.authenticated) $('loginError').textContent = err.message || '登录失败';
 }
 
 function bindEvents() {
+  $('loginForm').addEventListener('submit', (event) => login(event).catch(showError));
+  $('logoutBtn').addEventListener('click', () => logout().catch(showError));
   $('refreshBtn').addEventListener('click', () => refreshAll().catch(showError));
   $('saveSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
   $('saveAccountSettingsBtn').addEventListener('click', () => saveSettings().catch(showError));
@@ -1539,6 +1709,7 @@ function bindEvents() {
   $('loadBehaviorBtn').addEventListener('click', () => loadBehaviorPolicy().catch(showError));
   $('createRemoteTaskBtn').addEventListener('click', () => createRemoteTask().catch(showError));
   $('refreshRemoteTasksBtn').addEventListener('click', () => loadAutomationTasks().catch(showError));
+  $('saveAutoTaskScheduleBtn').addEventListener('click', () => saveAutoTaskSchedule().catch(showError));
   $('saveSecurityBtn').addEventListener('click', () => saveSecurityConfig().catch(showError));
   $('loadSecurityBtn').addEventListener('click', () => loadSecurityConfig().catch(showError));
   $('addCurrentSecurityBtn').addEventListener('click', addCurrentSecurityAccess);
@@ -1577,7 +1748,7 @@ function bindEvents() {
     renderApiBase();
     refreshAll().catch(showError);
   });
-  $('downloadExtensionPackageBtn').addEventListener('click', downloadExtensionPackage);
+  $('downloadExtensionPackageBtn').addEventListener('click', () => downloadExtensionPackage().catch(showError));
   $('refreshExtensionPackageBtn').addEventListener('click', () => loadExtensionPackageInfo().catch(showError));
   $('saveDataPolicyBtn').addEventListener('click', () => saveDataPolicy().catch(showError));
   $('cleanupDataBtn').addEventListener('click', () => cleanupData().catch(showError));
@@ -1602,11 +1773,25 @@ function bindEvents() {
 
 async function refreshAll() {
   renderApiBase();
-  await Promise.all([loadHealth(), loadSettings(), loadAccounts(), loadUsers(), loadSecurityConfig(), loadExtensionPackageInfo()]);
+  if (state.auth.authEnabled !== false && !state.auth.authenticated) {
+    await loadHealth();
+    return;
+  }
+  const baseLoads = [loadHealth(), loadSettings(), loadAccounts(), loadExtensionPackageInfo()];
+  if (isAdminUser()) {
+    baseLoads.push(loadUsers(), loadSecurityConfig());
+  }
+  await Promise.all(baseLoads);
   await loadBehaviorPolicy();
   await loadData();
 }
 
 bindEvents();
 showModule('overview');
-refreshAll().catch(showError);
+renderAuthState();
+loadAuth()
+  .then((ok) => {
+    if (ok) return refreshAll();
+    return loadHealth();
+  })
+  .catch(showError);
