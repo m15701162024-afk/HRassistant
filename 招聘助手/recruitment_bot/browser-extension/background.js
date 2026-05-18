@@ -637,6 +637,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'syncPendingJobRequirementToBackend') {
+    syncToBackend('/api/job-requirements/pending', message.jobRequirement || {})
+      .then(sendResponse)
+      .catch(err => sendResponse({ success: false, message: err.message }));
+    return true;
+  }
+
   if (message.action === 'extractPageIntelligence') {
     extractPageIntelligence(message.payload || {}, sender)
       .then(sendResponse)

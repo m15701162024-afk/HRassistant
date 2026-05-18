@@ -359,6 +359,16 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    for name, definition in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
@@ -428,6 +438,8 @@ def init_db() -> None:
                 source TEXT,
                 account_name TEXT,
                 requirement TEXT NOT NULL,
+                status TEXT DEFAULT 'active',
+                failure_reason TEXT DEFAULT '',
                 source_url TEXT,
                 raw_json TEXT,
                 created_at TEXT NOT NULL,
@@ -435,6 +447,10 @@ def init_db() -> None:
             );
             """
         )
+        ensure_columns(conn, "job_requirements", {
+            "status": "TEXT DEFAULT 'active'",
+            "failure_reason": "TEXT DEFAULT ''",
+        })
         cleanup_job_requirements(conn)
         cleanup_candidate_names(conn)
 
@@ -723,6 +739,22 @@ def normalize_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+def validate_candidate_minimum(candidate: dict[str, Any]) -> tuple[bool, str]:
+    name = str(candidate.get("name") or "").strip()
+    role = str(candidate.get("role") or candidate.get("jobRole") or "").strip()
+    education = str(candidate.get("education") or "").strip()
+    experience = str(candidate.get("experience") or "").strip()
+    if candidate.get("_nameUnresolved") or is_generic_candidate_name(name):
+        return False, "候选人姓名未准确识别"
+    if not name:
+        return False, "缺少候选人姓名"
+    if not role:
+        return False, "缺少沟通职位"
+    if not (education or experience):
+        return False, "缺少学历或经验信息"
+    return True, ""
+
+
 def sanitize_candidate_snapshot(text: Any) -> str:
     normalized = " ".join(str(text or "").split()).strip()
     if not normalized:
@@ -825,6 +857,13 @@ def looks_like_polluted_candidate(candidate: dict[str, Any], raw_text: str) -> b
 
 def upsert_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     candidate = normalize_candidate_payload(candidate)
+    ok, reason = validate_candidate_minimum(candidate)
+    if not ok:
+        return {
+            "success": False,
+            "message": f"候选人未入库：{reason}",
+            "quality": {"ok": False, "reason": reason},
+        }
     candidate_id = str(candidate.get("id") or hashlib.sha1(json.dumps(candidate, ensure_ascii=False).encode()).hexdigest())
     evaluation = candidate.get("evaluation") or {}
     with connect() as conn:
@@ -1041,6 +1080,13 @@ def is_valid_job_requirement_text(requirement: str) -> bool:
     return has_job_section and (has_content or has_requirement)
 
 
+def job_requirement_is_active(row: dict[str, Any] | sqlite3.Row | None) -> bool:
+    if not row:
+        return False
+    item = dict(row)
+    return str(item.get("status") or "active") == "active" and is_valid_job_requirement_text(str(item.get("requirement") or ""))
+
+
 def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     role = str(payload.get("role") or "").strip()
     requirement = sanitize_job_requirement_text(payload.get("requirement") or payload.get("jobRequirement") or "")
@@ -1060,8 +1106,8 @@ def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
         conn.execute(
             """
             INSERT OR REPLACE INTO job_requirements
-            (id, role, normalized_role, source, account_name, requirement, source_url, raw_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, role, normalized_role, source, account_name, requirement, status, failure_reason, source_url, raw_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item_id,
@@ -1070,6 +1116,8 @@ def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
                 payload.get("source", ""),
                 account_name,
                 requirement[:12000],
+                "active",
+                "",
                 payload.get("sourceUrl", ""),
                 json.dumps(payload, ensure_ascii=False),
                 existing["created_at"] if existing else now,
@@ -1080,6 +1128,46 @@ def upsert_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "id": item_id, "matchedCandidates": matched["updated"]}
 
 
+def upsert_pending_job_requirement(payload: dict[str, Any]) -> dict[str, Any]:
+    role = str(payload.get("role") or "").strip()
+    account_name = str(payload.get("accountName") or payload.get("account_name") or "").strip()
+    if not role:
+        return {"success": False, "message": "岗位名称不能为空"}
+    normalized = scoped_role_key(role, account_name)
+    item_id = hashlib.sha1(normalized.encode()).hexdigest()
+    now = now_iso()
+    reason = str(payload.get("reason") or payload.get("failureReason") or "插件未能识别工作内容/工作要求，请手动补录").strip()
+    with connect() as conn:
+        existing = conn.execute(
+            "SELECT * FROM job_requirements WHERE normalized_role = ?",
+            (normalized,),
+        ).fetchone()
+        if job_requirement_is_active(existing):
+            return {"success": True, "id": dict(existing)["id"], "status": "active", "message": "岗位要求已存在"}
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO job_requirements
+            (id, role, normalized_role, source, account_name, requirement, status, failure_reason, source_url, raw_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item_id,
+                role,
+                normalized,
+                payload.get("source", ""),
+                account_name,
+                "",
+                "pending",
+                reason[:500],
+                payload.get("sourceUrl", ""),
+                json.dumps(payload, ensure_ascii=False),
+                (dict(existing).get("created_at") if existing else None) or now,
+                now,
+            ),
+        )
+    return {"success": True, "id": item_id, "status": "pending", "message": "岗位已标记为待补录"}
+
+
 def cleanup_job_requirements(conn: sqlite3.Connection) -> None:
     rows = [dict(row) for row in conn.execute("SELECT * FROM job_requirements").fetchall()]
     if not rows:
@@ -1088,12 +1176,28 @@ def cleanup_job_requirements(conn: sqlite3.Connection) -> None:
     for row in rows:
         role = str(row.get("role") or "").strip()
         requirement = sanitize_job_requirement_text(row.get("requirement") or "")
-        if not role or not is_valid_job_requirement_text(requirement):
+        status = str(row.get("status") or "active")
+        if not role:
             continue
         key = job_requirement_role_key(role)
+        if status == "pending" and not is_valid_job_requirement_text(requirement):
+            existing = by_role.get(key)
+            if not existing:
+                by_role[key] = {
+                    **row,
+                    "id": hashlib.sha1(key.encode()).hexdigest(),
+                    "normalized_role": key,
+                    "requirement": "",
+                    "status": "pending",
+                    "failure_reason": row.get("failure_reason") or "待手动补录",
+                }
+            continue
+        if not is_valid_job_requirement_text(requirement):
+            continue
         existing = by_role.get(key)
         if (
             not existing
+            or str(existing.get("status") or "active") == "pending"
             or len(requirement) > len(str(existing.get("requirement") or ""))
             or str(row.get("updated_at") or "") > str(existing.get("updated_at") or "")
         ):
@@ -1102,6 +1206,8 @@ def cleanup_job_requirements(conn: sqlite3.Connection) -> None:
                 "id": hashlib.sha1(key.encode()).hexdigest(),
                 "normalized_role": key,
                 "requirement": requirement[:12000],
+                "status": "active",
+                "failure_reason": "",
             }
 
     conn.execute("DELETE FROM job_requirements")
@@ -1109,8 +1215,8 @@ def cleanup_job_requirements(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT OR REPLACE INTO job_requirements
-            (id, role, normalized_role, source, account_name, requirement, source_url, raw_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, role, normalized_role, source, account_name, requirement, status, failure_reason, source_url, raw_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item.get("id"),
@@ -1119,6 +1225,8 @@ def cleanup_job_requirements(conn: sqlite3.Connection) -> None:
                 item.get("source", ""),
                 item.get("account_name", ""),
                 item.get("requirement", ""),
+                item.get("status", "active"),
+                item.get("failure_reason", ""),
                 item.get("source_url", ""),
                 item.get("raw_json", ""),
                 item.get("created_at") or now_iso(),
@@ -1169,7 +1277,7 @@ def get_job_requirement(role: str, account_name: str = "") -> dict[str, Any] | N
                 "SELECT * FROM job_requirements WHERE normalized_role = ?",
                 (scoped_normalized,),
             ).fetchone()
-            if row:
+            if job_requirement_is_active(row):
                 return dict(row)
             loose_account = conn.execute(
                 """
@@ -1180,19 +1288,19 @@ def get_job_requirement(role: str, account_name: str = "") -> dict[str, Any] | N
                 """,
                 (account_label(account_name), f"%{normalized}%", normalized, f"%::{normalized}"),
             ).fetchone()
-            if loose_account:
+            if job_requirement_is_active(loose_account):
                 return dict(loose_account)
         row = conn.execute(
             "SELECT * FROM job_requirements WHERE normalized_role = ?",
             (normalized,),
         ).fetchone()
-        if row:
+        if job_requirement_is_active(row):
             return dict(row)
         loose = conn.execute(
             "SELECT * FROM job_requirements WHERE normalized_role LIKE ? OR ? LIKE '%' || normalized_role || '%' ORDER BY updated_at DESC LIMIT 1",
             (f"%{normalized}%", normalized),
         ).fetchone()
-        return dict(loose) if loose else None
+        return dict(loose) if job_requirement_is_active(loose) else None
 
 
 def list_job_requirements(limit: int = 200, filters: dict[str, str] | None = None) -> list[dict[str, Any]]:
@@ -1342,6 +1450,9 @@ def match_candidates_with_job_requirements(role: str = "", account: str = "", ac
 
 def save_recommendation(candidate: dict[str, Any], report: str = "") -> dict[str, Any]:
     candidate = normalize_candidate_payload(candidate)
+    ok, reason = validate_candidate_minimum(candidate)
+    if not ok:
+        return {"success": False, "message": f"候选人推荐已阻止：{reason}"}
     if candidate.get("_invalidRecommendation"):
         return {"success": False, "message": candidate.get("_invalidReason", "候选人数据异常，已跳过推荐")}
     candidate_id = str(candidate.get("id") or candidate.get("candidate_id") or hashlib.sha1(json.dumps(candidate, ensure_ascii=False).encode()).hexdigest())
@@ -3780,6 +3891,8 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, save_recommendation(payload.get("candidate", payload), payload.get("report", "")))
             elif parsed.path == "/api/job-requirements":
                 json_response(self, upsert_job_requirement(payload))
+            elif parsed.path == "/api/job-requirements/pending":
+                json_response(self, upsert_pending_job_requirement(payload))
             elif parsed.path == "/api/job-requirements/match-candidates":
                 account_exact_value = payload.get("accountExact", payload.get("account_exact", "true"))
                 json_response(self, match_candidates_with_job_requirements(

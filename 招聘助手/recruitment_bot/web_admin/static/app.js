@@ -797,13 +797,17 @@ function renderTables() {
   $('jobRequirementList').innerHTML = state.jobRequirements.slice(0, 100).map((item, index) => `
     <article class="report">
       <div>
-        <h3>${escapeHtml(item.role || '未识别岗位')}</h3>
+        <h3>
+          ${escapeHtml(item.role || '未识别岗位')}
+          <span class="badge ${item.status === 'pending' ? 'warning' : 'ok'}">${item.status === 'pending' ? '待补录' : '已入库'}</span>
+        </h3>
         <p>${escapeHtml(item.source || '')}｜${escapeHtml(item.account_name || '')}｜${escapeHtml(item.updated_at || '')}</p>
+        ${item.status === 'pending' ? `<p class="muted">原因：${escapeHtml(item.failure_reason || '插件未能识别工作内容/工作要求')}</p>` : ''}
       </div>
       <div class="report-actions">
-        <button class="secondary small" data-job-index="${index}">查看要求</button>
+        <button class="secondary small" data-job-index="${index}">${item.status === 'pending' ? '查看原因' : '查看要求'}</button>
         <button class="secondary small" data-job-edit-index="${index}">编辑</button>
-        <button class="secondary small" data-job-match-index="${index}">匹配候选人</button>
+        <button class="secondary small" data-job-match-index="${index}" ${item.status === 'pending' ? 'disabled' : ''}>匹配候选人</button>
       </div>
     </article>
   `).join('') || '<p class="empty">暂无岗位要求。插件首次遇到新岗位时会尝试打开职位详情并保存。</p>';
@@ -811,7 +815,7 @@ function renderTables() {
   document.querySelectorAll('[data-job-index]').forEach(button => {
     button.addEventListener('click', () => {
       const item = state.jobRequirements[Number(button.dataset.jobIndex)];
-      openDialog(`${item.role || '岗位要求'}`, item.requirement || '');
+      openDialog(`${item.role || '岗位要求'}`, item.requirement || item.failure_reason || '该岗位等待手动补录工作内容和工作要求。');
     });
   });
 

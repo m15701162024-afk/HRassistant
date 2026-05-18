@@ -159,6 +159,14 @@ button.secondary {
 }
 button.secondary:hover { background: #fffbe0; border-color: #b9ad00; }
 button.small { min-height: 30px; padding: 5px 10px; font-size: 12px; }
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+button:disabled:hover {
+  background: #fff;
+  border-color: var(--line);
+}
 
 input {
   width: 100%;
@@ -617,6 +625,12 @@ th {
   border: 1px solid #e4e8dd;
   border-radius: 6px;
   padding: 12px;
+}
+.report h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .report p { margin-top: 5px; color: var(--muted); font-size: 12px; }
 .report-actions {

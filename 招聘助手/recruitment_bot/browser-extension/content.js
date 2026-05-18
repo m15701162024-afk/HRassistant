@@ -730,6 +730,12 @@ async function ensureJobRequirementForResume(card, resumeInfo) {
       message: `已保存岗位要求：${resumeInfo.role}`,
       type: 'success',
     });
+  } else {
+    markJobRequirementPending(resumeInfo.role, '未能从职位详情中识别工作内容/工作要求', {
+      source: resumeInfo.source,
+      accountName: resumeInfo.accountName,
+      sourceUrl: resumeInfo.sourceUrl,
+    });
   }
 }
 
@@ -786,6 +792,12 @@ async function ensureChatJobRequirement(resumeInfo) {
       sourceUrl: resumeInfo.sourceUrl,
     });
     resumeInfo.evaluation = evaluateCandidate(resumeInfo);
+  } else {
+    markJobRequirementPending(resumeInfo.role, '未能从沟通职位弹窗中识别工作内容/工作要求', {
+      source: resumeInfo.source,
+      accountName: resumeInfo.accountName,
+      sourceUrl: resumeInfo.sourceUrl,
+    });
   }
 }
 
@@ -1582,6 +1594,28 @@ function cacheJobRequirement(role, requirement, meta = {}) {
     action: 'syncJobRequirementToBackend',
     jobRequirement: item,
   }).catch(() => {});
+}
+
+function markJobRequirementPending(role, reason = '', meta = {}) {
+  if (!role) return;
+  const item = {
+    role,
+    requirement: '',
+    source: meta.source || 'BOSS直聘',
+    accountName: meta.accountName || '',
+    sourceUrl: meta.sourceUrl || window.location.href,
+    status: 'pending',
+    failureReason: reason || '插件未能识别工作内容/工作要求，请手动补录',
+    updatedAt: new Date().toISOString(),
+  };
+  chrome.runtime.sendMessage({
+    action: 'syncPendingJobRequirementToBackend',
+    jobRequirement: item,
+  }).catch(() => {});
+  notifyPopup('log', {
+    message: `岗位要求待补录：${role}`,
+    type: 'warning',
+  });
 }
 
 function extractJobRequirementFromPage(card, role) {
@@ -3264,6 +3298,16 @@ function extractLatestCandidateMessage(text, name = '') {
   return match ? match[0].slice(0, 260) : '';
 }
 
+function validateCandidateMinimumInfo(info = {}) {
+  const name = cleanCandidateName(info.name || '');
+  if (!name) return { ok: false, reason: '候选人姓名未准确识别' };
+  if (!normalizeText(info.role || '')) return { ok: false, reason: '缺少沟通职位' };
+  if (!normalizeText(info.education || '') && !normalizeText(info.experience || '')) {
+    return { ok: false, reason: '缺少学历或经验信息' };
+  }
+  return { ok: true, name };
+}
+
 // ============================================================
 // 数据存储
 // ============================================================
@@ -3280,6 +3324,16 @@ async function saveResumeData(resumeInfo) {
           ...resumeInfo,
           updatedAt: new Date().toISOString(),
         };
+        const quality = validateCandidateMinimumInfo(merged);
+        if (!quality.ok) {
+          notifyPopup('log', {
+            message: `候选人未入库：${quality.reason}`,
+            type: 'warning',
+          });
+          resolve({ saved: false, duplicate: true, invalid: true, reason: quality.reason });
+          return;
+        }
+        merged.name = quality.name;
         resumes[existingIndex] = merged;
         chrome.storage.local.set({ resumes }, () => {
           chrome.runtime.sendMessage({
@@ -3294,6 +3348,16 @@ async function saveResumeData(resumeInfo) {
         return;
       }
 
+      const quality = validateCandidateMinimumInfo(resumeInfo);
+      if (!quality.ok) {
+        notifyPopup('log', {
+          message: `候选人未入库：${quality.reason}`,
+          type: 'warning',
+        });
+        resolve({ saved: false, duplicate: false, invalid: true, reason: quality.reason });
+        return;
+      }
+      resumeInfo.name = quality.name;
       resumes.unshift(resumeInfo);
       chrome.storage.local.set({ resumes }, () => {
         notifyPopup('resumeReceived', resumeInfo);
@@ -3316,6 +3380,15 @@ async function saveResumeData(resumeInfo) {
 }
 
 async function pushCandidateRecommendation(resumeInfo) {
+  const quality = validateCandidateMinimumInfo(resumeInfo);
+  if (!quality.ok) {
+    notifyPopup('log', {
+      message: `已跳过推荐：${quality.reason}`,
+      type: 'warning',
+    });
+    return;
+  }
+  resumeInfo.name = quality.name;
   if (!hasCandidateResumeEvidence(resumeInfo)) {
     notifyPopup('log', {
       message: `已跳过推荐：${resumeInfo.name || '候选人'} 尚未获取简历`,
