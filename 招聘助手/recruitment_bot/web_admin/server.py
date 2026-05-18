@@ -445,6 +445,23 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS automation_tasks (
+                id TEXT PRIMARY KEY,
+                task_type TEXT NOT NULL,
+                account_name TEXT,
+                status TEXT NOT NULL,
+                max_candidates INTEGER DEFAULT 20,
+                payload_json TEXT,
+                result_json TEXT,
+                error_message TEXT,
+                claimed_by TEXT,
+                created_at TEXT NOT NULL,
+                claimed_at TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         ensure_columns(conn, "job_requirements", {
@@ -1890,6 +1907,171 @@ def rows_to_csv(rows: list[dict[str, Any]], columns: list[tuple[str, str]]) -> s
     for row in rows:
         writer.writerow([row.get(key, "") for key, _ in columns])
     return output.getvalue()
+
+
+def parse_json_value(value: Any, fallback: Any = None) -> Any:
+    if value in (None, ""):
+        return fallback
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(str(value))
+    except Exception:
+        return fallback
+
+
+def automation_task_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["payload"] = parse_json_value(item.get("payload_json"), {})
+    item["result"] = parse_json_value(item.get("result_json"), {})
+    return item
+
+
+def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
+
+
+def create_automation_task(payload: dict[str, Any]) -> dict[str, Any]:
+    task_type = str(payload.get("taskType") or payload.get("task_type") or "recruitmentWorkflow").strip()
+    if task_type not in {"recruitmentWorkflow"}:
+        return {"success": False, "message": "不支持的任务类型"}
+    account_name = str(payload.get("accountName") or payload.get("account_name") or "").strip()
+    max_candidates = clamp_int(payload.get("maxCandidates") or payload.get("max_candidates"), 20, 1, 50)
+    task_payload = {
+        "accountName": account_name,
+        "maxCandidates": max_candidates,
+        "createdBy": str(payload.get("createdBy") or "web-admin").strip() or "web-admin",
+    }
+    task_id = uuid.uuid4().hex
+    created_at = now_iso()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO automation_tasks
+            (id, task_type, account_name, status, max_candidates, payload_json, result_json, error_message,
+             claimed_by, created_at, claimed_at, started_at, finished_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                task_type,
+                account_name,
+                "pending",
+                max_candidates,
+                json.dumps(task_payload, ensure_ascii=False),
+                "",
+                "",
+                "",
+                created_at,
+                "",
+                "",
+                "",
+                created_at,
+            ),
+        )
+        row = conn.execute("SELECT * FROM automation_tasks WHERE id = ?", (task_id,)).fetchone()
+    return {"success": True, "task": automation_task_row(row)}
+
+
+def list_automation_tasks(limit: int = 50, account: str = "", status: str = "") -> dict[str, Any]:
+    limit = clamp_int(limit, 50, 1, 200)
+    where: list[str] = []
+    params: list[Any] = []
+    account = str(account or "").strip()
+    status = str(status or "").strip().lower()
+    if account:
+        where.append("COALESCE(NULLIF(account_name, ''), '未指定') = ?")
+        params.append(account)
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    sql = "SELECT * FROM automation_tasks"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    with connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return {"success": True, "items": [automation_task_row(row) for row in rows]}
+
+
+def claim_automation_task(payload: dict[str, Any]) -> dict[str, Any]:
+    account_name = str(payload.get("accountName") or payload.get("account_name") or "").strip()
+    worker_id = str(payload.get("workerId") or payload.get("worker_id") or "browser-extension").strip()
+    params: list[Any] = []
+    where = ["status = 'pending'"]
+    if account_name:
+        where.append("(account_name = '' OR account_name = ?)")
+        params.append(account_name)
+    else:
+        where.append("account_name = ''")
+    now = now_iso()
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            f"""
+            SELECT * FROM automation_tasks
+            WHERE {" AND ".join(where)}
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+        if not row:
+            conn.commit()
+            return {"success": True, "task": None}
+        conn.execute(
+            """
+            UPDATE automation_tasks
+            SET status = 'claimed', claimed_by = ?, claimed_at = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (worker_id, now, now, row["id"]),
+        )
+        claimed = conn.execute("SELECT * FROM automation_tasks WHERE id = ?", (row["id"],)).fetchone()
+        conn.commit()
+    return {"success": True, "task": automation_task_row(claimed)}
+
+
+def update_automation_task(payload: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(payload.get("id") or payload.get("taskId") or payload.get("task_id") or "").strip()
+    if not task_id:
+        return {"success": False, "message": "任务 ID 不能为空"}
+    status = str(payload.get("status") or "").strip().lower()
+    if status not in {"claimed", "running", "completed", "failed", "cancelled"}:
+        return {"success": False, "message": "任务状态无效"}
+    now = now_iso()
+    result = payload.get("result") if "result" in payload else payload.get("resultJson")
+    error_message = str(payload.get("errorMessage") or payload.get("error_message") or "").strip()
+    worker_id = str(payload.get("workerId") or payload.get("worker_id") or "").strip()
+    sets = ["status = ?", "updated_at = ?"]
+    params: list[Any] = [status, now]
+    if result is not None:
+        sets.append("result_json = ?")
+        params.append(json.dumps(result, ensure_ascii=False))
+    if error_message or status in {"completed", "failed", "cancelled"}:
+        sets.append("error_message = ?")
+        params.append(error_message)
+    if worker_id:
+        sets.append("claimed_by = ?")
+        params.append(worker_id)
+    if status == "running":
+        sets.append("started_at = COALESCE(NULLIF(started_at, ''), ?)")
+        params.append(now)
+    if status in {"completed", "failed", "cancelled"}:
+        sets.append("finished_at = ?")
+        params.append(now)
+    params.append(task_id)
+    with connect() as conn:
+        conn.execute(f"UPDATE automation_tasks SET {', '.join(sets)} WHERE id = ?", params)
+        row = conn.execute("SELECT * FROM automation_tasks WHERE id = ?", (task_id,)).fetchone()
+    if not row:
+        return {"success": False, "message": "任务不存在"}
+    return {"success": True, "task": automation_task_row(row)}
 
 
 def save_agent_conversation(
@@ -3820,6 +4002,12 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, get_llm_config(mask_key=True))
             elif parsed.path == "/api/behavior-policy":
                 json_response(self, get_behavior_policy(query.get("account", [""])[0]))
+            elif parsed.path == "/api/automation/tasks":
+                json_response(self, list_automation_tasks(
+                    int(query.get("limit", ["50"])[0]),
+                    query.get("account", [""])[0],
+                    query.get("status", [""])[0],
+                ))
             elif parsed.path == "/api/candidates":
                 json_response(self, {"items": list_rows("candidates", int(query.get("limit", ["200"])[0]), filters={
                     "q": query.get("q", [""])[0],
@@ -3951,6 +4139,12 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, reset_llm_config())
             elif parsed.path == "/api/behavior-policy":
                 json_response(self, save_behavior_policy(payload))
+            elif parsed.path == "/api/automation/tasks":
+                json_response(self, create_automation_task(payload))
+            elif parsed.path == "/api/automation/tasks/claim":
+                json_response(self, claim_automation_task(payload))
+            elif parsed.path == "/api/automation/tasks/update":
+                json_response(self, update_automation_task(payload))
             elif parsed.path == "/api/page-intelligence/extract":
                 json_response(self, extract_page_intelligence(payload))
             elif parsed.path == "/api/candidates":

@@ -104,6 +104,9 @@ chrome.alarms.create('scheduledSummaryPush', {
 chrome.alarms.create('syncBehaviorPolicy', {
   periodInMinutes: 10,
 });
+chrome.alarms.create('pollAutomationTasks', {
+  periodInMinutes: 1,
+});
 
 async function configureAlarm(intervalMinutes = DEFAULT_SETTINGS.syncInterval) {
   const minutes = Math.max(1, Number(intervalMinutes) || DEFAULT_SETTINGS.syncInterval);
@@ -120,6 +123,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     checkScheduledSummaryPush();
   } else if (alarm.name === 'syncBehaviorPolicy') {
     syncBehaviorPolicyFromBackend();
+  } else if (alarm.name === 'pollAutomationTasks') {
+    pollAutomationTasksFromBackend();
   }
 });
 
@@ -304,6 +309,71 @@ async function fetchFromBackend(path) {
     throw new Error(body.message || `后端读取失败: HTTP ${response.status}`);
   }
   return body;
+}
+
+async function getWorkerId() {
+  const current = await chrome.storage.local.get(['automationWorkerId']);
+  if (current.automationWorkerId) return current.automationWorkerId;
+  const workerId = `plugin-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+  await chrome.storage.local.set({ automationWorkerId: workerId });
+  return workerId;
+}
+
+async function reportAutomationTask(taskId, payload = {}) {
+  if (!taskId) return { success: false, message: '缺少任务 ID' };
+  return syncToBackend('/api/automation/tasks/update', {
+    id: taskId,
+    ...payload,
+  });
+}
+
+async function pollAutomationTasksFromBackend() {
+  try {
+    const { settings = DEFAULT_SETTINGS } = await chrome.storage.local.get(['settings']);
+    const mergedSettings = { ...DEFAULT_SETTINGS, ...settings };
+    if (!mergedSettings.autoSync || !mergedSettings.backendUrl) return;
+    const workerId = await getWorkerId();
+    const claim = await syncToBackend('/api/automation/tasks/claim', {
+      accountName: mergedSettings.accountName || '',
+      workerId,
+    });
+    const task = claim.task;
+    if (!task) return;
+    const payload = task.payload || {};
+    await reportAutomationTask(task.id, {
+      status: 'running',
+      workerId,
+      result: { message: '插件已领取任务，正在打开 BOSS 沟通页执行' },
+    });
+    let result;
+    try {
+      if (task.task_type !== 'recruitmentWorkflow') {
+        throw new Error(`不支持的任务类型：${task.task_type || '未知'}`);
+      }
+      const maxCandidates = Number(task.max_candidates || payload.maxCandidates || mergedSettings.maxCandidatesPerRun || 20);
+      result = await startRecruitmentWorkflowInBossTab(maxCandidates);
+      const success = result?.success !== false;
+      await reportAutomationTask(task.id, {
+        status: success ? 'completed' : 'failed',
+        workerId,
+        result,
+        errorMessage: success ? '' : (result?.message || '插件执行失败'),
+      });
+      showNotification(success
+        ? `远程任务已完成，处理 ${result?.processed ?? result?.savedCount ?? '-'} 位候选人`
+        : `远程任务失败：${result?.message || '未知错误'}`);
+    } catch (error) {
+      await reportAutomationTask(task.id, {
+        status: 'failed',
+        workerId,
+        result: result || {},
+        errorMessage: error.message,
+      });
+      showNotification(`远程任务失败：${error.message}`);
+    }
+  } catch (err) {
+    console.warn('[招聘助手] 远程任务轮询失败:', err);
+  }
 }
 
 async function captureVisibleTabDataUrl(senderTab, enabled = false) {
@@ -776,6 +846,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'syncBehaviorPolicy') {
     syncBehaviorPolicyFromBackend().then(sendResponse);
+    return true;
+  }
+
+  if (message.action === 'pollAutomationTasks') {
+    pollAutomationTasksFromBackend().then(() => sendResponse({ success: true })).catch(err => {
+      sendResponse({ success: false, message: err.message });
+    });
     return true;
   }
 

@@ -293,6 +293,28 @@
         <span id="behaviorStatus" class="badge">未加载</span>
       </div>
       <p id="behaviorAccountHint" class="hint">当前编辑全部账号的默认策略。</p>
+      <div class="config-group remote-task-panel">
+        <div class="panel-title compact-title">
+          <h3>远程任务下发</h3>
+          <span class="badge">插件自动领取</span>
+        </div>
+        <div class="form-grid remote-task-grid">
+          <label>
+            执行账号
+            <input id="remoteTaskAccount" list="accountOptions" placeholder="留空表示任意在线插件可领取" />
+          </label>
+          <label>
+            本轮处理候选人数
+            <input id="remoteTaskMaxCandidates" type="number" min="1" max="50" value="20" />
+          </label>
+        </div>
+        <div class="actions">
+          <button id="createRemoteTaskBtn">下发一键执行任务</button>
+          <button id="refreshRemoteTasksBtn" class="secondary">刷新任务状态</button>
+        </div>
+        <div id="automationTaskList" class="task-list"></div>
+        <p class="hint">适合内网部署后由管理后台统一调度。插件会按账号领取待处理任务，并在 BOSS 沟通页执行“岗位入库、在线简历识别、匹配、求简历/接收简历”等流程。</p>
+      </div>
       <div class="form-grid behavior-grid">
         <label>
           工作时间限制

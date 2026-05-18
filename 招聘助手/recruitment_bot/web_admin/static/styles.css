@@ -455,6 +455,48 @@ button:focus-visible {
   color: var(--text);
 }
 
+.compact-title {
+  margin-bottom: 0;
+}
+
+.remote-task-panel {
+  margin-bottom: 14px;
+}
+
+.remote-task-grid {
+  grid-template-columns: minmax(220px, 1.4fr) minmax(160px, 0.6fr);
+}
+
+.task-list {
+  display: grid;
+  gap: 8px;
+}
+
+.task-item {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #e4e8dd;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.task-item strong,
+.task-item span {
+  overflow-wrap: anywhere;
+}
+
+.task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .llm-connection-grid {
   grid-template-columns: minmax(140px, 0.5fr) minmax(180px, 0.7fr) minmax(260px, 1.3fr) minmax(220px, 1fr);
 }

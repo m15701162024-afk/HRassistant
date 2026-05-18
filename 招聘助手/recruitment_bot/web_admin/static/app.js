@@ -10,6 +10,7 @@ const state = {
   conversations: [],
   accounts: [],
   behaviorPolicy: {},
+  automationTasks: [],
   security: {},
   filters: {
     q: '',
@@ -382,6 +383,9 @@ function renderAccountScope() {
   select.value = selected;
   if ($('accountFilter')) $('accountFilter').value = selected;
   if ($('accountScopeSearch')) $('accountScopeSearch').value = selected;
+  if ($('remoteTaskAccount') && !$('remoteTaskAccount').value) {
+    $('remoteTaskAccount').value = state.accounts.some(item => item.name === selected) ? selected : '';
+  }
   if ($('accountOptions')) {
     $('accountOptions').innerHTML = accounts.map(item => (
       `<option value="${escapeHtml(item.name || '未识别')}">${escapeHtml(item.platform || 'BOSS直聘')}</option>`
@@ -426,6 +430,9 @@ function setAccountScope(account, reload = true) {
   state.filters.accountExact = state.accounts.some(item => item.name === state.filters.account) ? '1' : '';
   if ($('accountFilter')) $('accountFilter').value = state.filters.account;
   if ($('accountScopeSearch')) $('accountScopeSearch').value = state.filters.account;
+  if ($('remoteTaskAccount')) {
+    $('remoteTaskAccount').value = state.accounts.some(item => item.name === state.filters.account) ? state.filters.account : '';
+  }
   renderAccountScope();
   if (reload) {
     Promise.all([loadData(), loadBehaviorPolicy()]).catch(showError);
@@ -579,6 +586,82 @@ async function saveBehaviorPolicy() {
   toast('操作节奏策略已保存');
 }
 
+function taskStatusLabel(status) {
+  return ({
+    pending: '待领取',
+    claimed: '已领取',
+    running: '执行中',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+  })[status] || status || '未知';
+}
+
+function taskStatusClass(status) {
+  if (status === 'completed') return 'ok';
+  if (status === 'failed' || status === 'cancelled') return 'danger';
+  if (status === 'pending' || status === 'claimed' || status === 'running') return 'warning';
+  return '';
+}
+
+function renderAutomationTasks() {
+  const container = $('automationTaskList');
+  if (!container) return;
+  const items = state.automationTasks || [];
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state">暂无远程任务。下发后，在线插件会按账号领取并执行。</div>';
+    return;
+  }
+  container.innerHTML = items.slice(0, 20).map(item => {
+    const result = item.result || {};
+    const processed = result.processed ?? result.processedCount ?? result.savedCount ?? '-';
+    const message = item.error_message || result.message || result.summary || '';
+    return `
+      <article class="task-item">
+        <div>
+          <strong>${escapeHtml(item.account_name || '任意账号')}｜候选人 ${escapeHtml(item.max_candidates || 0)} 人</strong>
+          <div class="task-meta">
+            <span>创建：${escapeHtml(item.created_at || '')}</span>
+            <span>更新：${escapeHtml(item.updated_at || '')}</span>
+            <span>执行插件：${escapeHtml(item.claimed_by || '未领取')}</span>
+            <span>已处理：${escapeHtml(processed)}</span>
+            ${message ? `<span>结果：${escapeHtml(message)}</span>` : ''}
+          </div>
+        </div>
+        <span class="badge ${taskStatusClass(item.status)}">${escapeHtml(taskStatusLabel(item.status))}</span>
+      </article>
+    `;
+  }).join('');
+}
+
+async function loadAutomationTasks() {
+  const params = new URLSearchParams();
+  params.set('limit', '30');
+  if (state.filters.account) params.set('account', state.filters.account);
+  const result = await api(`/api/automation/tasks?${params.toString()}`);
+  state.automationTasks = result.items || [];
+  renderAutomationTasks();
+}
+
+async function createRemoteTask() {
+  const account = $('remoteTaskAccount').value.trim() || exactAccountScope();
+  const maxCandidates = Number($('remoteTaskMaxCandidates').value || $('maxCandidatesPerRun').value || 20);
+  const result = await api('/api/automation/tasks', {
+    method: 'POST',
+    body: JSON.stringify({
+      taskType: 'recruitmentWorkflow',
+      accountName: account,
+      maxCandidates,
+    }),
+  });
+  if (!result.success) {
+    toast(result.message || '远程任务下发失败', 'danger');
+    return;
+  }
+  await loadAutomationTasks();
+  toast('任务已下发，插件将在下一轮轮询时自动领取执行');
+}
+
 async function saveSettings(showToast = true) {
   await api('/api/settings', {
     method: 'POST',
@@ -673,6 +756,7 @@ async function loadData() {
   renderStats();
   renderBreakdowns();
   renderTables();
+  await loadAutomationTasks();
   await loadConversations();
 }
 
@@ -1207,6 +1291,8 @@ function bindEvents() {
   $('exportSummaryExcelBtn').addEventListener('click', exportSummaryExcel);
   $('saveBehaviorBtn').addEventListener('click', () => saveBehaviorPolicy().catch(showError));
   $('loadBehaviorBtn').addEventListener('click', () => loadBehaviorPolicy().catch(showError));
+  $('createRemoteTaskBtn').addEventListener('click', () => createRemoteTask().catch(showError));
+  $('refreshRemoteTasksBtn').addEventListener('click', () => loadAutomationTasks().catch(showError));
   $('saveSecurityBtn').addEventListener('click', () => saveSecurityConfig().catch(showError));
   $('loadSecurityBtn').addEventListener('click', () => loadSecurityConfig().catch(showError));
   $('addCurrentSecurityBtn').addEventListener('click', addCurrentSecurityAccess);
