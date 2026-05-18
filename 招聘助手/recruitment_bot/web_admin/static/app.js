@@ -388,7 +388,9 @@ function renderAccountScope() {
     )).join('');
   }
   $('accountScopeHint').textContent = selected
-    ? `当前只显示账号「${selected}」的数据`
+    ? (state.filters.accountExact
+      ? `当前只显示账号「${selected}」的数据`
+      : `当前按账号关键词「${selected}」筛选数据`)
     : '当前显示全部账号数据';
 }
 
@@ -840,7 +842,11 @@ function fillJobEditor(item = {}) {
 
 function openJobEditorForRole(role = '', account = '') {
   showModule('jobs');
-  const existing = state.jobRequirements.find(item => normalizeText(item.role) === normalizeText(role));
+  const accountKey = normalizeText(account || state.filters.account || '');
+  const existing = state.jobRequirements.find(item => {
+    if (normalizeText(item.role) !== normalizeText(role)) return false;
+    return !accountKey || !item.account_name || normalizeText(item.account_name) === accountKey;
+  });
   if (existing) {
     fillJobEditor(existing);
   } else {
@@ -1006,19 +1012,41 @@ async function saveJobRequirement() {
 async function matchAllJobRequirements() {
   const result = await api('/api/job-requirements/match-candidates', {
     method: 'POST',
-    body: JSON.stringify({ account: state.filters.account }),
+    body: JSON.stringify({ account: state.filters.account, accountExact: state.filters.accountExact }),
   });
   await loadData();
+  openMatchedCandidatesDialog('全部岗位匹配结果', result);
   toast(`已重新匹配 ${result.updated || 0} 位候选人，跳过 ${result.skipped || 0} 位`);
 }
 
 async function matchJobRequirement(item = {}) {
   const result = await api('/api/job-requirements/match-candidates', {
     method: 'POST',
-    body: JSON.stringify({ role: item.role || '', account: state.filters.account }),
+    body: JSON.stringify({
+      role: item.role || '',
+      account: item.account_name || state.filters.account,
+      accountExact: item.account_name ? '1' : state.filters.accountExact,
+    }),
   });
   await loadData();
+  openMatchedCandidatesDialog(`${item.role || '该岗位'}匹配候选人`, result);
   toast(`${item.role || '该岗位'} 已匹配 ${result.updated || 0} 位候选人`);
+}
+
+function openMatchedCandidatesDialog(title, result = {}) {
+  const items = result.items || [];
+  const lines = [
+    `已匹配：${result.updated || 0} 位`,
+    `跳过：${result.skipped || 0} 位`,
+    '',
+    ...(items.length ? items.map((item, index) => [
+      `${index + 1}. ${item.name || '未识别'}｜${item.role || '待确认'}｜${item.score || 0}%｜${item.recommendation || '待评估'}`,
+      `   学历：${item.education || '未识别'}｜经验：${item.experience || '未识别'}｜薪资：${item.expected_salary || '未识别'}`,
+      `   来源：${item.source || '未知'}｜账号：${item.account_name || '未识别'}｜JD：${item.jdMatch || '未评估'}`,
+      `   匹配：${(item.matched || []).join('、') || '暂无'}；缺失：${(item.missing || []).join('、') || '暂无'}`,
+    ].join('\n')) : ['暂无可展示的匹配候选人。']),
+  ];
+  openDialog(title, lines.join('\n'));
 }
 
 async function previewSummary() {

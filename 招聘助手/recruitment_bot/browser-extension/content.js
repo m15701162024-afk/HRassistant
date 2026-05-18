@@ -75,6 +75,7 @@ const processedBrowseKeys = new Set();
 const workflowProcessedKeys = new Set();
 let isBrowsingCandidates = false;
 let cachedJobRequirements = {};
+let activeWorkflowCandidateHint = null;
 
 const RESUME_ACTIONS = {
   accept: {
@@ -757,7 +758,10 @@ async function ensureChatJobRequirement(resumeInfo) {
     return;
   }
 
-  let requirement = extractJobRequirementFromPage(document.body, resumeInfo.role);
+  let requirement = extractJobRequirementFromPage(
+    findLikelyJobDetailContainer(resumeInfo.role, document.body),
+    resumeInfo.role
+  );
   if (!requirement) {
     const trigger = findCommunicationJobTrigger(resumeInfo.role);
     if (trigger && canPerformOperation()) {
@@ -1625,15 +1629,15 @@ function extractStructuredJobRequirementText(source, role = '') {
   let text = normalizeText(rawText);
   if (!text || text.length < 40) return '';
   const hasResumeMarkers = /(工作经历|项目经验|项目经历|教育经历|期望职位|求职期望)/.test(text);
-  const hasJobDetailMarkers = /(职位详情|职位描述|职位职责|任职要求|岗位要求|职位要求|薪资详情|工作地址|职位发布)/.test(text);
+  const hasJobDetailMarkers = /(职位详情|职位描述|职位职责|任职要求|任职资格|岗位要求|职位要求|薪资详情|工作地址|职位发布)/.test(text);
   if (hasResumeMarkers && !hasJobDetailMarkers) return '';
-  text = text.replace(/(工作内容|工作职责|岗位职责|职位职责|职位描述|工作要求|任职要求|岗位要求|职位要求)/g, ' $1 ');
+  text = text.replace(/(工作内容|工作职责|岗位职责|职位职责|职位描述|职位介绍|工作要求|任职要求|任职资格|岗位要求|职位要求)/g, ' $1 ');
 
-  const content = extractJobTextSection(text, ['工作内容', '工作职责', '岗位职责', '职位职责', '职位描述'], [
-    '工作要求', '任职要求', '岗位要求', '职位要求',
+  const content = extractJobTextSection(text, ['工作内容', '工作职责', '岗位职责', '职位职责', '职位描述', '职位介绍'], [
+    '工作要求', '任职要求', '任职资格', '岗位要求', '职位要求',
     ...JOB_REQUIREMENT_STOP_MARKERS,
   ]);
-  const requirement = extractJobTextSection(text, ['工作要求', '任职要求', '岗位要求', '职位要求'], JOB_REQUIREMENT_STOP_MARKERS);
+  const requirement = extractJobTextSection(text, ['工作要求', '任职要求', '任职资格', '岗位要求', '职位要求'], JOB_REQUIREMENT_STOP_MARKERS);
   const sections = [content, requirement].filter(Boolean);
   if (!sections.length) return '';
 
@@ -1711,11 +1715,11 @@ function findLikelyJobDetailContainer(role = '', scope = document) {
     .filter(isActionableElement)
     .map(element => {
       const text = normalizeText(element.innerText || element.textContent || '');
-      const hasContent = /(工作内容|工作职责|岗位职责|职位职责|职位描述)/.test(text);
-      const hasRequirement = /(工作要求|任职要求|职位要求)/.test(text);
+      const hasContent = /(工作内容|工作职责|岗位职责|职位职责|职位描述|职位介绍)/.test(text);
+      const hasRequirement = /(工作要求|任职要求|任职资格|职位要求|岗位要求)/.test(text);
       const hasGenericRequirement = /岗位要求/.test(text) && (hasContent || hasRequirement);
       const hasResumeMarkers = /(工作经历|项目经验|项目经历|教育经历|期望职位|求职期望)/.test(text);
-      const hasJobDetailMarkers = /(职位详情|职位描述|职位职责|任职要求|岗位要求|职位要求|薪资详情|工作地址|职位发布)/.test(text);
+      const hasJobDetailMarkers = /(职位详情|职位描述|职位职责|任职要求|任职资格|岗位要求|职位要求|薪资详情|工作地址|职位发布)/.test(text);
       const roleScore = roleText && text.includes(roleText) ? 3 : 0;
       const sectionScore = (hasContent ? 4 : 0) + (hasRequirement ? 4 : 0) + (hasGenericRequirement ? 1 : 0);
       const resumePenalty = hasResumeMarkers && !hasJobDetailMarkers ? 8 : 0;
@@ -1746,8 +1750,8 @@ function looksLikeJobRequirement(text, role = '') {
   if (isPollutedJobRequirementText(text, role)) {
     return false;
   }
-  const hasContent = /(工作内容|工作职责|岗位职责|职位职责|职位描述)/.test(text);
-  const hasRequirement = /(工作要求|任职要求|职位要求)/.test(text);
+  const hasContent = /(工作内容|工作职责|岗位职责|职位职责|职位描述|职位介绍)/.test(text);
+  const hasRequirement = /(工作要求|任职要求|任职资格|岗位要求|职位要求)/.test(text);
   return hasContent || hasRequirement;
 }
 
@@ -2709,6 +2713,11 @@ function findNextWorkflowCandidateTarget() {
 }
 
 async function openWorkflowCandidate(target, index = 0) {
+  activeWorkflowCandidateHint = {
+    name: cleanCandidateName(target?.name || ''),
+    key: target?.key || '',
+    openedAt: Date.now(),
+  };
   const previousUrl = window.location.href;
   const previousText = normalizeText(document.body.textContent || '').slice(0, 500);
   const delay = humanDelay() + (index * (2500 + Math.random() * 4000));
@@ -3076,7 +3085,10 @@ async function scrapeChatCandidateInfo() {
   const text = extractCandidateTopLevelText(panel) || cleanCandidateTopLevelText(panel.textContent || '');
   const bodyText = normalizeText(document.body.textContent || '');
   const role = extractCommunicationRole(bodyText);
-  const name = extractChatCandidateName(text, bodyText);
+  const hintedName = Date.now() - Number(activeWorkflowCandidateHint?.openedAt || 0) < 120000
+    ? cleanCandidateName(activeWorkflowCandidateHint?.name || '')
+    : '';
+  const name = extractChatCandidateName(text, bodyText) || hintedName;
   if (!name && !role && !text) return null;
 
   let resumeInfo = {

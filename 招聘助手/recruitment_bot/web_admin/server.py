@@ -698,7 +698,6 @@ def normalize_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
         str(cleaned.get(key) or "")
         for key in ("rawText", "summary", "jobRequirement")
     )
-    polluted = looks_like_polluted_candidate(cleaned, raw_text)
     if is_generic_candidate_name(name):
         name = ""
     if not name:
@@ -706,7 +705,11 @@ def normalize_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
             str(cleaned.get(key) or "")
             for key in ("topLevelText", "rawText", "summary")
         ))
+    if not name:
+        name = unresolved_candidate_display_name(cleaned)
+        cleaned["_nameUnresolved"] = True
     cleaned["name"] = name
+    polluted = looks_like_polluted_candidate(cleaned, raw_text)
     if polluted:
         evaluation = dict(cleaned.get("evaluation") or {})
         evaluation["score"] = 0
@@ -737,7 +740,16 @@ def sanitize_candidate_snapshot(text: Any) -> str:
 
 
 def is_generic_candidate_name(name: str) -> bool:
-    return str(name or "").strip() in {"候选人", "牛人", "求职者", "用户", "先生", "女士", "姓名", "未识别", "未识别姓名"}
+    text = str(name or "").strip()
+    return text in {"候选人", "牛人", "求职者", "用户", "先生", "女士", "姓名", "未识别", "未识别姓名", "未识别候选人"} or text.startswith("未识别候选人-")
+
+
+def unresolved_candidate_display_name(candidate: dict[str, Any]) -> str:
+    role = str(candidate.get("role") or candidate.get("jobRole") or "候选人").strip()
+    role = re.sub(r"\s+", "", role)[:18] or "候选人"
+    raw_id = str(candidate.get("id") or candidate.get("candidate_id") or candidate.get("receivedTime") or now_iso())
+    suffix = hashlib.sha1(raw_id.encode()).hexdigest()[:6]
+    return f"未识别候选人-{role}-{suffix}"
 
 
 def is_likely_candidate_name(name: str) -> bool:
@@ -797,13 +809,14 @@ def looks_like_polluted_candidate(candidate: dict[str, Any], raw_text: str) -> b
     role = str(candidate.get("role") or "")
     candidate_id = str(candidate.get("id") or candidate.get("candidate_id") or "")
     text = raw_text or ""
+    unresolved_name = bool(candidate.get("_nameUnresolved")) or is_generic_candidate_name(name)
     if not text:
         return is_generic_candidate_name(name) and candidate_id.startswith("chat_")
     page_markers = sum(1 for marker in ["全部职位", "新招呼", "沟通中", "账号权益", "招聘规范", "职位管理"] if marker in text)
     repeated_roles = len(set(re.findall(r"[\u4e00-\u9fa5A-Za-z/+-]+(?:工程师|分析|开发|产品|运营)[^\s，。|]{0,18}\(J\d+\)", text)))
-    if is_generic_candidate_name(name) and (page_markers >= 2 or repeated_roles >= 3):
+    if unresolved_name and (page_markers >= 2 or repeated_roles >= 3):
         return True
-    if is_generic_candidate_name(name) and candidate_id.startswith("chat_"):
+    if unresolved_name and candidate_id.startswith("chat_"):
         return True
     if role and repeated_roles >= 6 and page_markers >= 2:
         return True
@@ -963,12 +976,12 @@ def sanitize_job_requirement_text(requirement: str) -> str:
     if not text:
         return ""
     text = re.sub(
-        r"(工作内容|工作职责|岗位职责|职位职责|职位描述|工作要求|任职要求|岗位要求|职位要求)",
+        r"(工作内容|工作职责|岗位职责|职位职责|职位描述|职位介绍|工作要求|任职要求|任职资格|岗位要求|职位要求)",
         r" \1 ",
         text,
     )
     has_resume_markers = bool(re.search(r"工作经历|项目经验|项目经历|教育经历|期望职位|求职期望", text))
-    has_job_detail_markers = bool(re.search(r"职位详情|职位描述|职位职责|任职要求|岗位要求|职位要求|薪资详情|工作地址|职位发布", text))
+    has_job_detail_markers = bool(re.search(r"职位详情|职位描述|职位职责|任职要求|任职资格|岗位要求|职位要求|薪资详情|工作地址|职位发布", text))
     if has_resume_markers and not has_job_detail_markers:
         return ""
     stop_markers = [
@@ -997,11 +1010,11 @@ def sanitize_job_requirement_text(requirement: str) -> str:
         return f"{title}：{body[:3000]}"
 
     content = section(
-        ["工作内容", "工作职责", "岗位职责", "职位职责", "职位描述"],
-        ["工作要求", "任职要求", "岗位要求", "职位要求", *stop_markers],
+        ["工作内容", "工作职责", "岗位职责", "职位职责", "职位描述", "职位介绍"],
+        ["工作要求", "任职要求", "任职资格", "岗位要求", "职位要求", *stop_markers],
     )
     requirement_text = section(
-        ["工作要求", "任职要求", "职位要求", "岗位要求"],
+        ["工作要求", "任职要求", "任职资格", "职位要求", "岗位要求"],
         stop_markers,
     )
     return "\n".join(part for part in (content, requirement_text) if part).strip()[:12000]
@@ -1011,7 +1024,7 @@ def is_valid_job_requirement_text(requirement: str) -> bool:
     text = re.sub(r"\s+", " ", str(requirement or "")).strip()
     if len(text) < 20:
         return False
-    has_job_section = bool(re.search(r"工作内容|工作职责|岗位职责|职位职责|职位描述|工作要求|任职要求|岗位要求|职位要求", text))
+    has_job_section = bool(re.search(r"工作内容|工作职责|岗位职责|职位职责|职位描述|职位介绍|工作要求|任职要求|任职资格|岗位要求|职位要求", text))
     polluted_markers = [
         "新招呼", "沟通中", "全部职位", "账号权益", "招聘规范", "BOSS您好", "Boss，您好",
         "您好，我叫", "您好，我是", "您好！我是", "你好，我是", "进一步沟通",
@@ -1023,8 +1036,8 @@ def is_valid_job_requirement_text(requirement: str) -> bool:
     repeated_roles = set(re.findall(r"[\u4e00-\u9fa5A-Za-z/+-]+(?:工程师|分析|开发|产品|运营)[^\s，。|]{0,18}\(J\d+\)", text))
     if len(repeated_roles) >= 2:
         return False
-    has_content = bool(re.search(r"工作内容|工作职责|岗位职责|职位职责|职位描述", text))
-    has_requirement = bool(re.search(r"工作要求|任职要求|职位要求", text))
+    has_content = bool(re.search(r"工作内容|工作职责|岗位职责|职位职责|职位描述|职位介绍", text))
+    has_requirement = bool(re.search(r"工作要求|任职要求|任职资格|岗位要求|职位要求", text))
     return has_job_section and (has_content or has_requirement)
 
 
@@ -1129,6 +1142,13 @@ def cleanup_candidate_names(conn: sqlite3.Connection) -> None:
         ))
         if not name and is_generic_candidate_name(row.get("name", "")):
             name = ""
+        if not name:
+            name = unresolved_candidate_display_name({
+                **raw,
+                "id": row.get("id"),
+                "role": raw.get("role") or "",
+            })
+            raw["_nameUnresolved"] = True
         if name == (row.get("name") or ""):
             continue
         raw["name"] = name
@@ -1261,9 +1281,10 @@ def match_candidate_with_requirement(candidate: dict[str, Any], job: dict[str, A
     }
 
 
-def match_candidates_with_job_requirements(role: str = "", account: str = "") -> dict[str, Any]:
+def match_candidates_with_job_requirements(role: str = "", account: str = "", account_exact: bool = True) -> dict[str, Any]:
     updated = 0
     skipped = 0
+    matched_items: list[dict[str, Any]] = []
     with connect() as conn:
         where: list[str] = []
         params: list[Any] = []
@@ -1271,8 +1292,9 @@ def match_candidates_with_job_requirements(role: str = "", account: str = "") ->
             where.append("role = ?")
             params.append(role)
         if account:
-            where.append("COALESCE(NULLIF(account_name, ''), '未识别') = ?")
-            params.append(account)
+            operator = "=" if account_exact else "LIKE"
+            where.append(f"COALESCE(NULLIF(account_name, ''), '未识别') {operator} ?")
+            params.append(account if account_exact else f"%{account}%")
         sql = "SELECT * FROM candidates"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -1285,6 +1307,11 @@ def match_candidates_with_job_requirements(role: str = "", account: str = "") ->
                 skipped += 1
                 continue
             result = match_candidate_with_requirement(candidate, job)
+            try:
+                next_raw = json.loads(result["raw_json"] or "{}")
+            except Exception:
+                next_raw = {}
+            jd_dimension = ((next_raw.get("evaluation") or {}).get("dimensions") or {}).get("jd") or {}
             conn.execute(
                 """
                 UPDATE candidates
@@ -1294,7 +1321,23 @@ def match_candidates_with_job_requirements(role: str = "", account: str = "") ->
                 (result["raw_json"], result["score"], result["recommendation"], now_iso(), candidate["id"]),
             )
             updated += 1
-    return {"success": True, "updated": updated, "skipped": skipped}
+            if len(matched_items) < 100:
+                matched_items.append({
+                    "id": candidate.get("id"),
+                    "name": candidate.get("name") or next_raw.get("name") or unresolved_candidate_display_name(candidate),
+                    "role": candidate.get("role") or "",
+                    "education": candidate.get("education") or next_raw.get("education") or "",
+                    "experience": candidate.get("experience") or next_raw.get("experience") or "",
+                    "expected_salary": candidate.get("expected_salary") or next_raw.get("expectedSalary") or "",
+                    "account_name": candidate.get("account_name") or "",
+                    "source": candidate.get("source") or "",
+                    "score": result["score"],
+                    "recommendation": result["recommendation"],
+                    "jdMatch": jd_dimension.get("match") or "",
+                    "matched": jd_dimension.get("matched") or [],
+                    "missing": jd_dimension.get("missing") or [],
+                })
+    return {"success": True, "updated": updated, "skipped": skipped, "items": matched_items}
 
 
 def save_recommendation(candidate: dict[str, Any], report: str = "") -> dict[str, Any]:
@@ -3738,9 +3781,11 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/job-requirements":
                 json_response(self, upsert_job_requirement(payload))
             elif parsed.path == "/api/job-requirements/match-candidates":
+                account_exact_value = payload.get("accountExact", payload.get("account_exact", "true"))
                 json_response(self, match_candidates_with_job_requirements(
                     str(payload.get("role", "")),
                     str(payload.get("account", "")),
+                    str(account_exact_value).strip().lower() in {"1", "true", "yes", "on"},
                 ))
             elif parsed.path == "/api/agent/ask":
                 answer, agent_meta = answer_question_with_agent(
