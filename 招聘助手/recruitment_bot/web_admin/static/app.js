@@ -416,7 +416,7 @@ function renderManagedAccountList() {
       $('accountName').value = name;
       $('accountPlatform').value = account.platform || 'BOSS直聘';
       setAccountScope(name);
-      showModule('settings');
+      showModule('accounts');
     });
   });
 }

@@ -10,7 +10,7 @@
   <header class="app-header">
     <div>
       <h1>招聘助手 Web 管理后台</h1>
-      <p>按招聘数据、岗位要求、钉钉推送、问答和系统配置分模块管理</p>
+      <p>候选人、岗位库、自动化任务、推送和系统治理分区管理</p>
     </div>
     <div class="header-actions">
       <span id="healthBadge" class="badge">检查中</span>
@@ -19,14 +19,24 @@
   </header>
 
   <nav class="module-nav" aria-label="后台模块">
-    <button class="module-tab active" data-module="overview">总览</button>
-    <button class="module-tab" data-module="candidates">候选人数据</button>
-    <button class="module-tab" data-module="jobs">岗位要求</button>
-    <button class="module-tab" data-module="delivery">钉钉推送</button>
-    <button class="module-tab" data-module="automation">自动化策略</button>
-    <button class="module-tab" data-module="qa">问答 Agent</button>
-    <button class="module-tab" data-module="security">安全白名单</button>
-    <button class="module-tab" data-module="settings">系统配置</button>
+    <div class="nav-group">
+      <span>工作台</span>
+      <button class="module-tab active" data-module="overview">总览</button>
+      <button class="module-tab" data-module="candidates">候选人</button>
+      <button class="module-tab" data-module="jobs">岗位库</button>
+    </div>
+    <div class="nav-group">
+      <span>自动化</span>
+      <button class="module-tab" data-module="automation">任务策略</button>
+      <button class="module-tab" data-module="delivery">钉钉推送</button>
+      <button class="module-tab" data-module="qa">问答 Agent</button>
+    </div>
+    <div class="nav-group">
+      <span>管理</span>
+      <button class="module-tab" data-module="accounts">账号权限</button>
+      <button class="module-tab" data-module="security">安全白名单</button>
+      <button class="module-tab" data-module="settings">系统配置</button>
+    </div>
   </nav>
 
   <section class="account-scope" aria-label="账号数据范围">
@@ -100,9 +110,9 @@
       </div>
     </section>
 
-    <section class="panel module-section" data-module="settings">
+    <section class="panel module-section" data-module="accounts">
       <div class="panel-title">
-        <h2>招聘账号</h2>
+        <h2>账号权限</h2>
         <span>插件识别失败时可手动修正</span>
       </div>
       <div class="form-grid account-grid">
