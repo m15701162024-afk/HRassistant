@@ -2461,9 +2461,11 @@ def scheduled_push_loop() -> None:
                 output_path, dataset = create_recommendation_excel(scope)
                 markdown = build_push_markdown(scope, dataset, output_path)
                 result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
-                file_result = send_dingtalk_file(output_path)
-                if result.get("success"):
+                delivery_result = deliver_dingtalk_excel(output_path, dataset)
+                if result.get("success") and delivery_result.get("success"):
                     save_settings({"scheduledPushLastDate": today})
+                elif not delivery_result.get("success"):
+                    print(f"[scheduled_push] Excel 推送失败：{delivery_result.get('message') or delivery_result}")
         except Exception as exc:
             print(f"[scheduled_push] {exc}")
         time.sleep(60)
@@ -2754,6 +2756,37 @@ def dingtalk_request_bytes(
     )
 
 
+def dingtalk_code_ok(value: Any) -> bool:
+    return value in (None, "", 0, "0")
+
+
+def dingtalk_error_message(body: Any, default: str = "钉钉接口调用失败") -> str:
+    if not isinstance(body, dict):
+        return default
+    for key in ("errmsg", "message", "msg", "errorMessage", "error"):
+        value = body.get(key)
+        if value and str(value).lower() not in {"ok", "success"}:
+            return str(value)
+    return default
+
+
+def dingtalk_response_success(body: Any) -> bool:
+    if not isinstance(body, dict):
+        return False
+    try:
+        if int(body.get("httpStatus") or 0) >= 400:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if not dingtalk_code_ok(body.get("errcode")) or not dingtalk_code_ok(body.get("code")):
+        return False
+    for key in ("errmsg", "message"):
+        value = body.get(key)
+        if value and str(value).lower() not in {"ok", "success"}:
+            return False
+    return True
+
+
 def send_dingtalk_markdown(title: str, text: str) -> dict[str, Any]:
     settings = get_settings()
     webhook = str(settings.get("dingtalkWebhook") or "")
@@ -2769,8 +2802,8 @@ def send_dingtalk_markdown_to_webhook(webhook: str, title: str, text: str, secre
         body = dingtalk_request_json(url, {"msgtype": "markdown", "markdown": {"title": title, "text": text}}, timeout=15, retries=2)
     except RuntimeError as exc:
         return {"success": False, "message": str(exc)}
-    if body.get("errcode") not in (None, 0):
-        return {"success": False, "message": body.get("errmsg", "钉钉推送失败"), "body": body}
+    if not dingtalk_response_success(body):
+        return {"success": False, "message": dingtalk_error_message(body, "钉钉推送失败"), "body": body}
     return {"success": True, "body": body}
 
 
@@ -2784,9 +2817,12 @@ def get_dingtalk_access_token(settings: dict[str, Any]) -> str:
         "appsecret": app_secret,
     })
     body = dingtalk_request_json(url, timeout=20, retries=2, method="GET")
-    if body.get("errcode") != 0:
-        raise RuntimeError(f"获取钉钉 access_token 失败：{body.get('errmsg') or body}")
-    return str(body.get("access_token") or "")
+    if not dingtalk_response_success(body):
+        raise RuntimeError(f"获取钉钉 access_token 失败：{dingtalk_error_message(body, str(body))}")
+    token = str(body.get("access_token") or "")
+    if not token:
+        raise RuntimeError(f"获取钉钉 access_token 失败：接口未返回 access_token，返回内容：{body}")
+    return token
 
 
 def multipart_form_data(fields: dict[str, str], files: dict[str, tuple[str, bytes, str]]) -> tuple[bytes, str]:
@@ -2811,12 +2847,22 @@ def multipart_form_data(fields: dict[str, str], files: dict[str, tuple[str, byte
     return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
+def dingtalk_upload_filename(file_path: Path) -> str:
+    suffix = file_path.suffix if file_path.suffix.lower() == ".xlsx" else ".xlsx"
+    timestamp = re.search(r"\d{8}_\d{6}", file_path.name)
+    if timestamp:
+        return f"recommendation_{timestamp.group(0)}{suffix}"
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", file_path.stem).strip("._-")
+    return f"{(stem or 'recommendation')[:80]}{suffix}"
+
+
 def upload_dingtalk_file(access_token: str, file_path: Path) -> str:
+    upload_name = dingtalk_upload_filename(file_path)
     data, content_type = multipart_form_data(
         {},
         {
             "media": (
-                file_path.name,
+                upload_name,
                 file_path.read_bytes(),
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
@@ -2830,9 +2876,10 @@ def upload_dingtalk_file(access_token: str, file_path: Path) -> str:
         timeout=45,
         retries=2,
     )
-    if body.get("errcode") != 0:
-        raise RuntimeError(f"上传钉钉文件失败：{body.get('errmsg') or body}")
-    return str(body.get("media_id") or "")
+    media_id = str(body.get("media_id") or body.get("mediaId") or "")
+    if not dingtalk_response_success(body) or not media_id:
+        raise RuntimeError(f"上传钉钉文件失败：{dingtalk_error_message(body, str(body))}")
+    return media_id
 
 
 def send_dingtalk_file(file_path: Path) -> dict[str, Any]:
@@ -2870,7 +2917,7 @@ def send_dingtalk_file(file_path: Path) -> dict[str, Any]:
             )
         except RuntimeError as exc:
             return {"success": False, "message": str(exc), "mediaId": media_id, "target": "openConversationId"}
-        success = not body.get("code") and body.get("processQueryKey") is not None
+        success = dingtalk_response_success(body)
         return {"success": success, "body": body, "mediaId": media_id, "target": "openConversationId"}
 
     chat_id = str(settings.get("dingtalkChatId") or "").strip()
@@ -2894,7 +2941,80 @@ def send_dingtalk_file(file_path: Path) -> dict[str, Any]:
         )
     except RuntimeError as exc:
         return {"success": False, "message": str(exc), "mediaId": media_id}
-    return {"success": body.get("errcode") == 0, "body": body, "mediaId": media_id}
+    return {"success": dingtalk_response_success(body), "body": body, "mediaId": media_id, "target": "chatId"}
+
+
+def summarize_dingtalk_delivery_failure(result: dict[str, Any]) -> str:
+    if not isinstance(result, dict):
+        return "未知错误"
+    message = result.get("message")
+    if not message and isinstance(result.get("body"), dict):
+        message = dingtalk_error_message(result["body"], "")
+    if not message:
+        message = result.get("body") or "未知错误"
+    return str(message).replace("\n", " ")[:220]
+
+
+def build_excel_fallback_markdown(
+    excel_path: Path,
+    dataset: dict[str, Any],
+    direct_result: dict[str, Any],
+    base_url: str | None = None,
+) -> str:
+    excel_link = export_url(excel_path, base_url)
+    if is_public_http_url(excel_link):
+        file_line = f"- 文件：[{excel_path.name}]({excel_link})"
+    else:
+        file_line = f"- 文件：{excel_path.name}"
+    reason = summarize_dingtalk_delivery_failure(direct_result)
+    return "\n".join([
+        "### Excel 推荐表下载",
+        file_line,
+        f"- 范围：{dataset['label']}（{dataset['start']:%Y-%m-%d %H:%M} 至 {dataset['end']:%Y-%m-%d %H:%M}）",
+        "- 说明：文件直发未完成，已自动补发下载入口。",
+        f"- 直发状态：{reason}",
+    ])
+
+
+def deliver_dingtalk_excel(
+    excel_path: Path,
+    dataset: dict[str, Any],
+    base_url: str | None = None,
+) -> dict[str, Any]:
+    file_result = send_dingtalk_file(excel_path)
+    excel_url = export_url(excel_path, base_url)
+    if file_result.get("success"):
+        return {
+            "success": True,
+            "excelDelivery": "dingtalkFile",
+            "excelUrl": excel_url,
+            "excelFile": file_result,
+        }
+
+    if not is_public_http_url(excel_url):
+        return {
+            "success": False,
+            "excelDelivery": "failed",
+            "excelUrl": excel_url,
+            "excelFile": file_result,
+            "message": f"Excel 文件未发送：{summarize_dingtalk_delivery_failure(file_result)}",
+        }
+
+    fallback_markdown = build_excel_fallback_markdown(excel_path, dataset, file_result, base_url)
+    fallback_result = send_dingtalk_markdown("招聘助手 Excel 推荐表下载", fallback_markdown)
+    success = bool(fallback_result.get("success"))
+    return {
+        "success": success,
+        "excelDelivery": "downloadLinkFallback" if success else "failed",
+        "excelUrl": excel_url,
+        "excelFile": file_result,
+        "excelFallback": fallback_result,
+        "message": (
+            "Excel 文件直发失败，已补发可下载链接到钉钉群"
+            if success
+            else f"Excel 文件直发失败，下载链接补发也失败：{fallback_result.get('message') or summarize_dingtalk_delivery_failure(file_result)}"
+        ),
+    }
 
 
 def parse_dingtalk_message(payload: dict[str, Any]) -> dict[str, Any]:
@@ -3658,21 +3778,32 @@ class Handler(SimpleHTTPRequestHandler):
                     query.get("account", [""])[0] or None,
                 )
                 markdown = build_push_markdown(scope, dataset, output_path, base_url)
-                result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
-                file_result = send_dingtalk_file(output_path)
+                summary_result = send_dingtalk_markdown("招聘助手候选人简历汇总", markdown)
+                delivery_result = deliver_dingtalk_excel(output_path, dataset, base_url)
                 excel_url = export_url(output_path, base_url)
-                if not file_result.get("success") and not is_public_http_url(excel_url):
-                    result["success"] = False
-                    result["message"] = f"正文已发送，但 Excel 文件未发送：{file_result.get('message') or file_result.get('body') or '未知错误'}"
-                elif not file_result.get("success"):
-                    result["excelDelivery"] = "downloadLink"
-                    result["message"] = f"Excel 已通过群消息下载链接发送；直发文件待捕获群会话后自动启用：{file_result.get('message') or file_result.get('body') or '未知错误'}"
+                result = dict(summary_result)
+                summary_ok = bool(summary_result.get("success"))
+                delivery_ok = bool(delivery_result.get("success"))
+                result["success"] = summary_ok and delivery_ok
+                result["excelDelivery"] = delivery_result.get("excelDelivery")
+                if result["success"] and delivery_result.get("excelDelivery") == "dingtalkFile":
+                    result["message"] = "汇总正文和 Excel 文件已同步至钉钉。"
+                elif result["success"]:
+                    result["message"] = delivery_result.get("message") or "汇总正文已发送，Excel 下载入口已同步至钉钉。"
+                elif summary_ok:
+                    result["message"] = delivery_result.get("message") or "正文已发送，但 Excel 文件未同步至钉钉。"
+                elif delivery_ok:
+                    result["message"] = f"Excel 已同步至钉钉，但正文发送失败：{summary_result.get('message') or summary_result.get('body') or '未知错误'}"
                 else:
-                    result["excelDelivery"] = "dingtalkFile"
+                    result["message"] = (
+                        f"正文发送失败：{summary_result.get('message') or summary_result.get('body') or '未知错误'}；"
+                        f"Excel 同步失败：{delivery_result.get('message') or delivery_result.get('excelFile') or '未知错误'}"
+                    )
                 result.update({
                     "excel": output_path.name,
                     "excelUrl": excel_url,
-                    "excelFile": file_result,
+                    "excelFile": delivery_result.get("excelFile"),
+                    "excelFallback": delivery_result.get("excelFallback"),
                     "range": {
                         "label": dataset["label"],
                         "start": dataset["start"].isoformat(timespec="seconds"),

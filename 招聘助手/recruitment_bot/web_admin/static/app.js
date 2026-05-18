@@ -950,8 +950,12 @@ async function testDingTalk() {
 async function pushYesterday() {
   await saveSettings(false);
   const result = await api(`/api/summary/push${buildSummaryQuery()}`, { method: 'POST', body: '{}' });
-  const fileText = result.excelFile?.success ? 'Excel 文件已发送' : (result.excelFile?.message || 'Excel 文件未发送');
-  toast(result.success ? `汇总已推送，${fileText}` : result.message, result.success ? 'success' : 'warning');
+  const deliveryText = ({
+    dingtalkFile: 'Excel 文件已直发',
+    downloadLinkFallback: 'Excel 下载入口已补发',
+    failed: result.excelFile?.message || result.excelFallback?.message || 'Excel 文件未发送',
+  })[result.excelDelivery] || (result.excelFile?.success ? 'Excel 文件已发送' : 'Excel 文件未发送');
+  toast(result.success ? `汇总已推送，${deliveryText}` : result.message, result.success ? 'success' : 'warning');
 }
 
 function pushRangeLabel(mode) {
