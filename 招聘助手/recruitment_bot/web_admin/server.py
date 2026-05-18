@@ -672,6 +672,19 @@ def text_response(
     handler.wfile.write(data)
 
 
+def head_response(
+    handler: SimpleHTTPRequestHandler,
+    content_type: str,
+    filename: str | None = None,
+) -> None:
+    handler.send_response(200)
+    handler.send_header("Content-Type", content_type)
+    write_common_headers(handler)
+    if filename:
+        handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+    handler.end_headers()
+
+
 def binary_response(
     handler: SimpleHTTPRequestHandler,
     data: bytes,
@@ -3412,6 +3425,49 @@ def attachment_resume_label(row: dict[str, Any]) -> str:
     return "有附件简历" if has_attachment_resume(row) else "无附件简历"
 
 
+def resume_type_label(row: dict[str, Any]) -> str:
+    raw = raw_payload(row)
+    if has_attachment_resume(row):
+        return "有附件简历"
+    if raw.get("hasResume") or raw.get("resumeEvidence") == "onlineResumeOpened":
+        return "无附件简历"
+    return "未获取简历"
+
+
+def resume_request_status(row: dict[str, Any]) -> str:
+    raw = raw_payload(row)
+    value = raw.get("resumeRequestStatus") or ""
+    if value:
+        return str(value)
+    try:
+        score = int(row.get("score") or 0)
+    except (TypeError, ValueError):
+        score = 0
+    return "待索要/待复核" if score >= 40 else "未达到阈值"
+
+
+def workflow_status_label(row: dict[str, Any]) -> str:
+    raw = raw_payload(row)
+    if raw.get("workflowStatus") == "processed" or raw.get("workflowProcessedAt"):
+        return "已处理"
+    return "未记录"
+
+
+def enrich_candidate_export_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        raw = raw_payload(item)
+        item["resume_type"] = resume_type_label(item)
+        item["resume_request_status"] = resume_request_status(item)
+        item["resume_request_method"] = raw.get("resumeRequestMethod") or ""
+        item["workflow_status"] = workflow_status_label(item)
+        item["workflow_processed_at"] = raw.get("workflowProcessedAt") or ""
+        item["candidate_summary"] = raw.get("topLevelText") or raw.get("summary") or raw.get("rawText") or ""
+        enriched.append(item)
+    return enriched
+
+
 def load_export_manifest() -> dict[str, Any]:
     if not EXPORT_MANIFEST.exists():
         return {}
@@ -3700,6 +3756,12 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path.startswith("/exports/"):
             self.serve_export(parsed.path, head_only=True)
             return
+        if parsed.path == "/api/export/candidates.csv":
+            head_response(self, "text/csv; charset=utf-8", "candidates.csv")
+            return
+        if parsed.path == "/api/export/recommendations.csv":
+            head_response(self, "text/csv; charset=utf-8", "recommendations.csv")
+            return
         super().do_HEAD()
 
     def do_GET(self) -> None:
@@ -3818,12 +3880,12 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path.startswith("/exports/"):
                 self.serve_export(parsed.path)
             elif parsed.path == "/api/export/candidates.csv":
-                rows = list_rows("candidates", 10000, filters={
+                rows = enrich_candidate_export_rows(list_rows("candidates", 10000, filters={
                     "q": query.get("q", [""])[0],
                     "source": query.get("source", [""])[0],
                     "account": query.get("account", [""])[0],
                     "accountExact": query.get("accountExact", [""])[0],
-                })
+                }))
                 text_response(self, rows_to_csv(rows, [
                     ("received_date", "日期"),
                     ("name", "姓名"),
@@ -3833,8 +3895,14 @@ class Handler(SimpleHTTPRequestHandler):
                     ("expected_salary", "薪资"),
                     ("score", "匹配度"),
                     ("recommendation", "推荐意见"),
+                    ("resume_type", "简历类型"),
+                    ("resume_request_status", "求简历状态"),
+                    ("resume_request_method", "求简历方式"),
+                    ("workflow_status", "处理状态"),
+                    ("workflow_processed_at", "处理时间"),
                     ("source", "数据来源"),
                     ("account_name", "账号信息"),
+                    ("candidate_summary", "候选人详情摘要"),
                     ("created_at", "创建时间"),
                 ]), content_type="text/csv; charset=utf-8", filename="candidates.csv")
             elif parsed.path == "/api/export/recommendations.csv":
