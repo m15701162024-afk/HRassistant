@@ -1146,13 +1146,41 @@ function findExistingResumeRequestStatus(scopeText = '') {
 }
 
 async function closeResumeOverlayIfPresent() {
-  const before = normalizeText(document.body.textContent || '').slice(0, 700);
-  const closeTarget = Array.from(document.querySelectorAll('button, a, [role="button"], span, div')).find((element) => {
+  const before = normalizeText(document.body.textContent || '').slice(0, 1000);
+  const roots = [
+    findOnlineResumeContainer(),
+    ...Array.from(document.querySelectorAll('[role="dialog"], [class*="dialog"], [class*="modal"], [class*="drawer"], [class*="resume"]')),
+    document.body,
+  ].filter(Boolean);
+  const closeLabels = [
+    ['继续沟通'],
+    ['打招呼'],
+    ['×', 'x', '关闭'],
+    ['返回', '收起', '取消'],
+  ];
+  let closeTarget = null;
+  for (const labels of closeLabels) {
+    const candidates = roots.flatMap(root => Array.from(root.querySelectorAll?.('button, a, [role="button"], span, div') || []))
+      .filter((element) => {
+        if (!isActionableElement(element)) return false;
+        const text = getClickableText(element);
+        if (!text || text.length > 40) return false;
+        return labels.some(label => text === label || text.includes(label));
+      })
+      .sort((a, b) => getClickableText(a).length - getClickableText(b).length);
+    if (candidates.length) {
+      closeTarget = candidates[0];
+      break;
+    }
+  }
+  if (!closeTarget) {
+    closeTarget = Array.from(document.querySelectorAll('button, a, [role="button"], span, div')).find((element) => {
     if (!isActionableElement(element)) return false;
     const text = getClickableText(element);
     if (!text || text.length > 20) return false;
     return /^(关闭|返回|收起|取消|×|x)$/i.test(text);
-  });
+    });
+  }
   if (closeTarget) {
     await simulateMouseMove(closeTarget);
     await sleep(400 + Math.random() * 600);
@@ -1162,7 +1190,7 @@ async function closeResumeOverlayIfPresent() {
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
   document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
   await sleep(700 + Math.random() * 900);
-  return normalizeText(document.body.textContent || '').slice(0, 700) !== before;
+  return normalizeText(document.body.textContent || '').slice(0, 1000) !== before;
 }
 
 async function prepareCommunicationActionsForRequest() {
@@ -2641,6 +2669,15 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
 
       const accepted = await acceptAttachmentResumeIfPresent(`候选人${index + 1}`);
       if (accepted.executed > 0) summary.accepted += accepted.executed;
+      const workflowActions = [];
+      if (accepted.executed > 0) {
+        workflowActions.push({
+          type: 'acceptAttachmentResume',
+          status: 'success',
+          at: new Date().toISOString(),
+          text: accepted.targetText || '同意/接收附件简历',
+        });
+      }
 
       await openCurrentCandidateDetailFromSummary();
       const candidate = await scrapeChatCandidateInfo();
@@ -2657,10 +2694,19 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
 
       const acceptedResume = accepted.executed > 0;
       const openedOnlineResume = await openOnlineResumeIfPresent();
+      if (openedOnlineResume) {
+        workflowActions.push({
+          type: 'openOnlineResume',
+          status: 'success',
+          at: new Date().toISOString(),
+          text: '在线简历',
+        });
+      }
       const refreshed = openedOnlineResume
         ? await scrapeVisibleOnlineResumeInfo(candidate)
         : await scrapeChatCandidateInfo();
       const finalCandidate = refreshed || candidate;
+      let resumeDetailClosed = false;
       if (acceptedResume) {
         finalCandidate.hasResume = true;
         finalCandidate.hasAttachmentResume = true;
@@ -2683,7 +2729,13 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
       finalCandidate.resumeRequestRequired = needsResumeRequest;
       if (needsResumeRequest) {
         if (openedOnlineResume) {
-          await closeResumeOverlayIfPresent();
+          resumeDetailClosed = await closeResumeOverlayIfPresent();
+          workflowActions.push({
+            type: 'closeOnlineResume',
+            status: resumeDetailClosed ? 'success' : 'unknown',
+            at: new Date().toISOString(),
+            text: '继续沟通/打招呼/关闭',
+          });
           await prepareCommunicationActionsForRequest();
         }
         const requestContextKey = getCurrentWorkflowKey(finalCandidate);
@@ -2703,6 +2755,13 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
         finalCandidate.resumeRequestFallbackReason = requestResult.viaMessage ? requestResult.reason || '' : '';
         finalCandidate.resumeRequestError = requestResult.executed > 0 ? '' : (requestResult.reason || '未找到或未能点击求简历按钮');
         finalCandidate.resumeRequestAvailableActions = requestResult.availableActions || [];
+        workflowActions.push({
+          type: 'requestResume',
+          status: requestResult.executed > 0 ? 'success' : 'failed',
+          at: new Date().toISOString(),
+          text: requestResult.targetText || requestResult.reason || '求简历',
+          method: finalCandidate.resumeRequestMethod || '',
+        });
         summary.requested += requestResult.executed;
         if (!requestResult.executed) summary.skipped++;
       } else {
@@ -2711,7 +2770,19 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
         finalCandidate.resumeRequestError = '';
         summary.skipped++;
       }
-      await saveResumeData(finalCandidate);
+      if (openedOnlineResume && !resumeDetailClosed) {
+        resumeDetailClosed = await closeResumeOverlayIfPresent();
+        workflowActions.push({
+          type: 'closeOnlineResume',
+          status: resumeDetailClosed ? 'success' : 'unknown',
+          at: new Date().toISOString(),
+          text: '继续沟通/打招呼/关闭',
+        });
+      }
+      finalCandidate.workflowStatus = 'processed';
+      finalCandidate.workflowProcessedAt = new Date().toISOString();
+      finalCandidate.workflowActions = workflowActions;
+      const saveResult = await saveResumeData(finalCandidate);
 
       summary.processed++;
       summary.details.push({
@@ -2722,6 +2793,8 @@ async function startRecruitmentWorkflow({ maxCandidates = 20 } = {}) {
         requestStatus: finalCandidate.resumeRequestStatus,
         requestError: finalCandidate.resumeRequestError,
         resumeType: finalCandidate.hasAttachmentResume ? '有附件简历' : '无附件简历',
+        saved: !saveResult?.invalid,
+        saveReason: saveResult?.reason || '',
       });
       workflowProcessedKeys.add(target?.key || getCurrentWorkflowKey(finalCandidate));
       await maybeTakeLongBreak(summary.processed);

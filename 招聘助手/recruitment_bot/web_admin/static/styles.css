@@ -592,6 +592,103 @@ th {
 }
 
 .reports { display: grid; gap: 10px; }
+.insight-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: 14px;
+  margin-top: 16px;
+}
+.subpanel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcf7;
+  padding: 14px;
+}
+.section-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.section-title h3 { margin: 0; font-size: 15px; }
+.section-title span { color: var(--muted); font-size: 12px; }
+.kanban-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+}
+.kanban-column {
+  min-height: 150px;
+  border: 1px solid #e4e8dd;
+  border-radius: 7px;
+  background: #fff;
+  padding: 10px;
+}
+.kanban-column header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 9px;
+}
+.kanban-column header span {
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: 999px;
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 750;
+  font-size: 12px;
+}
+.mini-candidate {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  padding: 8px 0;
+  border-top: 1px solid #eef1e8;
+}
+.mini-candidate b { font-size: 13px; }
+.mini-candidate span {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+}
+.mini-candidate em {
+  grid-row: 1;
+  grid-column: 2;
+  color: var(--accent);
+  font-style: normal;
+  font-weight: 750;
+}
+.small-empty { font-size: 12px; }
+.role-view { display: grid; gap: 10px; }
+.role-group {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #e4e8dd;
+  border-radius: 7px;
+  background: #fff;
+}
+.role-group h4 { margin: 0 0 5px; font-size: 14px; }
+.role-group p { margin: 0; color: var(--muted); font-size: 12px; }
+.role-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-content: flex-start;
+}
+.role-candidates span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #fbfcf7;
+  font-size: 12px;
+}
 .conversation-list { display: grid; gap: 10px; }
 .conversation {
   border: 1px solid #e4e8dd;
@@ -690,6 +787,8 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.42); }
   .account-grid, .dingtalk-grid, .schedule-grid { grid-template-columns: 1fr; }
   .security-grid, .security-summary { grid-template-columns: 1fr; }
   .llm-connection-grid, .llm-model-grid, .plugin-install { grid-template-columns: 1fr; }
+  .insight-grid { grid-template-columns: 1fr; }
+  .kanban-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
   .connection-row { grid-template-columns: 1fr; }
   .search-box { grid-template-columns: 1fr; }
   .toolbar-actions, .actions { flex-wrap: wrap; }
@@ -699,6 +798,7 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.42); }
   .app-header { align-items: flex-start; flex-direction: column; }
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
   .qa { grid-template-columns: 1fr; }
+  .kanban-grid, .role-group { grid-template-columns: 1fr; }
   .top-item { grid-template-columns: 1fr 52px; }
   .top-item span, .top-item em { grid-column: 1 / -1; }
 }

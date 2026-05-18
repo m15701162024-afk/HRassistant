@@ -533,11 +533,30 @@
                 <th>推荐</th>
                 <th>来源</th>
                 <th>账号</th>
+                <th>简历类型</th>
+                <th>求简历状态</th>
+                <th>处理状态</th>
                 <th>详情</th>
               </tr>
             </thead>
             <tbody id="candidateRows"></tbody>
           </table>
+        </div>
+        <div class="insight-grid">
+          <section class="subpanel">
+            <div class="section-title">
+              <h3>推荐看板</h3>
+              <span>按匹配度自动分组</span>
+            </div>
+            <div id="candidateKanban" class="kanban-grid"></div>
+          </section>
+          <section class="subpanel">
+            <div class="section-title">
+              <h3>岗位视图</h3>
+              <span>按岗位聚合候选人</span>
+            </div>
+            <div id="candidateRoleView" class="role-view"></div>
+          </section>
         </div>
       </div>
 

@@ -732,6 +732,44 @@ function renderBreakdown(items) {
   }).join('') || '<p class="empty">暂无数据</p>';
 }
 
+function parseCandidateRaw(item = {}) {
+  try {
+    return JSON.parse(item.raw_json || '{}');
+  } catch (err) {
+    return {};
+  }
+}
+
+function candidateResumeType(item = {}) {
+  const raw = parseCandidateRaw(item);
+  if (raw.hasAttachmentResume || raw.resumeAttachmentType === 'attachment' || raw.resumeEvidence === 'attachmentAccepted') {
+    return '有附件简历';
+  }
+  if (raw.hasResume || raw.resumeEvidence === 'onlineResumeOpened') {
+    return '无附件简历';
+  }
+  return '未获取简历';
+}
+
+function candidateRequestStatus(item = {}) {
+  const raw = parseCandidateRaw(item);
+  return raw.resumeRequestStatus || (Number(item.score || 0) >= 40 ? '待索要/待复核' : '未达到阈值');
+}
+
+function candidateWorkflowStatus(item = {}) {
+  const raw = parseCandidateRaw(item);
+  if (raw.workflowStatus === 'processed' || raw.workflowProcessedAt) return '已处理';
+  return '未记录';
+}
+
+function recommendationGroup(item = {}) {
+  const score = Number(item.score || 0);
+  if (score >= 80) return '强烈推荐';
+  if (score >= 60) return '非常推荐';
+  if (score >= 40) return '推荐';
+  return '暂不推荐';
+}
+
 function renderTables() {
   $('candidateRows').innerHTML = state.candidates.map((item, index) => `
     <tr>
@@ -745,12 +783,17 @@ function renderTables() {
       <td>${escapeHtml(item.recommendation)}</td>
       <td>${escapeHtml(item.source)}</td>
       <td>${escapeHtml(item.account_name)}</td>
+      <td>${escapeHtml(candidateResumeType(item))}</td>
+      <td>${escapeHtml(candidateRequestStatus(item))}</td>
+      <td>${escapeHtml(candidateWorkflowStatus(item))}</td>
       <td>
         <button class="secondary small" data-candidate-index="${index}">查看</button>
         <button class="secondary small" data-candidate-job-index="${index}">岗位库</button>
       </td>
     </tr>
-  `).join('') || row(['-', '暂无数据', '-', '-', '-', '-', '-', '-', '-', '-', '-']);
+  `).join('') || row(['-', '暂无数据', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-']);
+
+  renderCandidateInsights();
 
   $('recommendationRows').innerHTML = state.recommendations.map(item => row([
     item.name,
@@ -834,6 +877,63 @@ function renderTables() {
   });
 }
 
+function renderCandidateInsights() {
+  const kanban = $('candidateKanban');
+  const roleView = $('candidateRoleView');
+  if (!kanban || !roleView) return;
+
+  const groups = ['强烈推荐', '非常推荐', '推荐', '暂不推荐'].map(label => {
+    const items = state.candidates
+      .filter(item => recommendationGroup(item) === label)
+      .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+    return { label, items };
+  });
+  kanban.innerHTML = groups.map(group => `
+    <article class="kanban-column">
+      <header>
+        <strong>${escapeHtml(group.label)}</strong>
+        <span>${group.items.length}</span>
+      </header>
+      ${group.items.slice(0, 8).map(item => `
+        <div class="mini-candidate">
+          <b>${escapeHtml(item.name || '未识别')}</b>
+          <span>${escapeHtml(item.role || '待确认岗位')}</span>
+          <em>${escapeHtml(item.score || 0)}%</em>
+        </div>
+      `).join('') || '<p class="empty small-empty">暂无</p>'}
+    </article>
+  `).join('');
+
+  const byRole = new Map();
+  state.candidates.forEach(item => {
+    const role = item.role || '待确认岗位';
+    if (!byRole.has(role)) byRole.set(role, []);
+    byRole.get(role).push(item);
+  });
+  const roleGroups = Array.from(byRole.entries())
+    .map(([role, items]) => ({
+      role,
+      items: items.sort((a, b) => Number(b.score || 0) - Number(a.score || 0)),
+      avgScore: Math.round(items.reduce((sum, item) => sum + Number(item.score || 0), 0) / Math.max(1, items.length)),
+      requested: items.filter(item => /已点击求简历|已索要简历|已发送求简历消息|无需索要/.test(candidateRequestStatus(item))).length,
+    }))
+    .sort((a, b) => b.items.length - a.items.length || b.avgScore - a.avgScore)
+    .slice(0, 12);
+  roleView.innerHTML = roleGroups.map(group => `
+    <article class="role-group">
+      <div>
+        <h4>${escapeHtml(group.role)}</h4>
+        <p>${group.items.length} 人｜平均 ${group.avgScore}%｜已推进 ${group.requested} 人</p>
+      </div>
+      <div class="role-candidates">
+        ${group.items.slice(0, 5).map(item => `
+          <span>${escapeHtml(item.name || '未识别')} ${escapeHtml(item.score || 0)}%</span>
+        `).join('')}
+      </div>
+    </article>
+  `).join('') || '<p class="empty">暂无候选人数据</p>';
+}
+
 function fillJobEditor(item = {}) {
   showModule('jobs');
   $('jobRoleInput').value = item.role || '';
@@ -864,15 +964,11 @@ function openJobEditorForRole(role = '', account = '') {
 }
 
 function buildCandidateDetail(item) {
-  let raw = {};
-  try {
-    raw = JSON.parse(item.raw_json || '{}');
-  } catch (err) {
-    raw = {};
-  }
+  const raw = parseCandidateRaw(item);
   const evaluation = raw.evaluation || {};
   const dimensions = evaluation.dimensions || {};
   const rejectionReasons = evaluation.rejectionReasons || [];
+  const workflowActions = Array.isArray(raw.workflowActions) ? raw.workflowActions : [];
   const topLevelText = cleanCandidateSnapshot(raw.topLevelText || raw.rawText || raw.summary || '');
   const resumeType = raw.hasAttachmentResume || raw.resumeAttachmentType === 'attachment' || raw.resumeEvidence === 'attachmentAccepted'
     ? '有附件简历'
@@ -885,6 +981,7 @@ function buildCandidateDetail(item) {
     `求简历状态：${raw.resumeRequestStatus || '未记录'}${raw.resumeRequestError ? `｜${raw.resumeRequestError}` : ''}`,
     raw.resumeRequestMethod ? `求简历方式：${raw.resumeRequestMethod === 'message' ? '发送消息' : '点击按钮'}` : '',
     raw.resumeRequestMessage ? `求简历话术：${raw.resumeRequestMessage}` : '',
+    `插件处理：${raw.workflowStatus === 'processed' || raw.workflowProcessedAt ? '已处理' : '未记录'}${raw.workflowProcessedAt ? `｜${raw.workflowProcessedAt}` : ''}`,
     `学历：${item.education || raw.education || '未识别'}`,
     `经验：${item.experience || raw.experience || '未识别'}`,
     `薪资：${item.expected_salary || raw.expectedSalary || '未识别'}`,
@@ -894,6 +991,11 @@ function buildCandidateDetail(item) {
     '',
     '候选人顶层信息：',
     topLevelText || '未采集到候选人顶层简历信息',
+    '',
+    '插件动作证据：',
+    ...(workflowActions.length
+      ? workflowActions.map(action => `- ${action.at || ''}｜${action.type || 'action'}｜${action.status || ''}｜${action.text || ''}`)
+      : ['- 暂无动作证据']),
     '',
     '不推荐/风险依据：',
     ...(rejectionReasons.length ? rejectionReasons.map(item => `- ${item}`) : (evaluation.risks || []).map(item => `- ${item}`)),
