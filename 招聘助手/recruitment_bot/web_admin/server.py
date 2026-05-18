@@ -22,12 +22,15 @@ import os
 import re
 import socket
 import sqlite3
+import ssl
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 import zipfile
 import threading
+import http.client
 from datetime import datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2646,6 +2649,111 @@ def dingtalk_signed_url(webhook: str, secret: str = "") -> str:
     return f"{webhook}{separator}timestamp={timestamp}&sign={sign}"
 
 
+def dingtalk_ssl_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    if hasattr(ssl, "TLSVersion"):
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+def is_transient_dingtalk_network_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout, ssl.SSLError, ConnectionResetError, http.client.RemoteDisconnected)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        return is_transient_dingtalk_network_error(exc.reason)
+    text = str(exc)
+    return any(marker in text for marker in (
+        "UNEXPECTED_EOF_WHILE_READING",
+        "EOF occurred in violation of protocol",
+        "Connection reset",
+        "Remote end closed connection",
+        "read operation timed out",
+    ))
+
+
+def dingtalk_request_json(
+    url: str,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 15,
+    retries: int = 2,
+    method: str | None = None,
+) -> dict[str, Any]:
+    data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request_method = method or ("POST" if data is not None else "GET")
+    base_headers = {
+        "User-Agent": "RecruitmentBot/1.0",
+        "Accept": "application/json",
+        "Connection": "close",
+        **(headers or {}),
+    }
+    if data is not None and "Content-Type" not in base_headers:
+        base_headers["Content-Type"] = "application/json;charset=utf-8"
+
+    last_error: BaseException | None = None
+    for attempt in range(retries + 1):
+        request = urllib.request.Request(url, data=data, headers=base_headers, method=request_method)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout, context=dingtalk_ssl_context()) as response:
+                return json.loads(response.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="ignore")
+            try:
+                parsed = json.loads(body or "{}")
+            except json.JSONDecodeError:
+                parsed = {"message": body or str(exc)}
+            parsed.setdefault("httpStatus", exc.code)
+            return parsed
+        except Exception as exc:
+            last_error = exc
+            if attempt >= retries or not is_transient_dingtalk_network_error(exc):
+                break
+            time.sleep(min(6, 1.2 * (attempt + 1)))
+
+    raise RuntimeError(
+        "钉钉 HTTPS 连接被部署环境中断："
+        f"{last_error}. 请检查服务器到 oapi.dingtalk.com/api.dingtalk.com 的 443 出站访问、HTTPS 代理和 CA 证书。"
+    )
+
+
+def dingtalk_request_bytes(
+    url: str,
+    data: bytes,
+    headers: dict[str, str],
+    timeout: int = 30,
+    retries: int = 2,
+) -> dict[str, Any]:
+    base_headers = {
+        "User-Agent": "RecruitmentBot/1.0",
+        "Accept": "application/json",
+        "Connection": "close",
+        **headers,
+    }
+    last_error: BaseException | None = None
+    for attempt in range(retries + 1):
+        request = urllib.request.Request(url, data=data, headers=base_headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout, context=dingtalk_ssl_context()) as response:
+                return json.loads(response.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="ignore")
+            try:
+                parsed = json.loads(body or "{}")
+            except json.JSONDecodeError:
+                parsed = {"message": body or str(exc)}
+            parsed.setdefault("httpStatus", exc.code)
+            return parsed
+        except Exception as exc:
+            last_error = exc
+            if attempt >= retries or not is_transient_dingtalk_network_error(exc):
+                break
+            time.sleep(min(6, 1.2 * (attempt + 1)))
+    raise RuntimeError(
+        "钉钉 HTTPS 文件请求被部署环境中断："
+        f"{last_error}. 请检查服务器出站网络、HTTPS 代理和 CA 证书。"
+    )
+
+
 def send_dingtalk_markdown(title: str, text: str) -> dict[str, Any]:
     settings = get_settings()
     webhook = str(settings.get("dingtalkWebhook") or "")
@@ -2657,10 +2765,10 @@ def send_dingtalk_markdown(title: str, text: str) -> dict[str, Any]:
 
 def send_dingtalk_markdown_to_webhook(webhook: str, title: str, text: str, secret: str = "") -> dict[str, Any]:
     url = dingtalk_signed_url(webhook, secret)
-    data = json.dumps({"msgtype": "markdown", "markdown": {"title": title, "text": text}}, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json;charset=utf-8"}, method="POST")
-    with urllib.request.urlopen(request, timeout=10) as response:
-        body = json.loads(response.read().decode("utf-8") or "{}")
+    try:
+        body = dingtalk_request_json(url, {"msgtype": "markdown", "markdown": {"title": title, "text": text}}, timeout=15, retries=2)
+    except RuntimeError as exc:
+        return {"success": False, "message": str(exc)}
     if body.get("errcode") not in (None, 0):
         return {"success": False, "message": body.get("errmsg", "钉钉推送失败"), "body": body}
     return {"success": True, "body": body}
@@ -2675,8 +2783,7 @@ def get_dingtalk_access_token(settings: dict[str, Any]) -> str:
         "appkey": app_key,
         "appsecret": app_secret,
     })
-    with urllib.request.urlopen(url, timeout=15) as response:
-        body = json.loads(response.read().decode("utf-8") or "{}")
+    body = dingtalk_request_json(url, timeout=20, retries=2, method="GET")
     if body.get("errcode") != 0:
         raise RuntimeError(f"获取钉钉 access_token 失败：{body.get('errmsg') or body}")
     return str(body.get("access_token") or "")
@@ -2716,10 +2823,13 @@ def upload_dingtalk_file(access_token: str, file_path: Path) -> str:
         },
     )
     url = f"https://oapi.dingtalk.com/media/upload?access_token={urllib.parse.quote(access_token)}&type=file"
-    request = urllib.request.Request(url, data=data, method="POST")
-    request.add_header("Content-Type", content_type)
-    with urllib.request.urlopen(request, timeout=30) as response:
-        body = json.loads(response.read().decode("utf-8") or "{}")
+    body = dingtalk_request_bytes(
+        url,
+        data,
+        {"Content-Type": content_type},
+        timeout=45,
+        retries=2,
+    )
     if body.get("errcode") != 0:
         raise RuntimeError(f"上传钉钉文件失败：{body.get('errmsg') or body}")
     return str(body.get("media_id") or "")
@@ -2727,10 +2837,13 @@ def upload_dingtalk_file(access_token: str, file_path: Path) -> str:
 
 def send_dingtalk_file(file_path: Path) -> dict[str, Any]:
     settings = get_settings()
-    access_token = get_dingtalk_access_token(settings)
-    if not access_token:
-        return {"success": False, "skipped": True, "message": "未配置钉钉 AppKey/AppSecret，无法直接发送文件"}
-    media_id = upload_dingtalk_file(access_token, file_path)
+    try:
+        access_token = get_dingtalk_access_token(settings)
+        if not access_token:
+            return {"success": False, "skipped": True, "message": "未配置钉钉 AppKey/AppSecret，无法直接发送文件"}
+        media_id = upload_dingtalk_file(access_token, file_path)
+    except RuntimeError as exc:
+        return {"success": False, "message": str(exc)}
     open_conversation_id = str(settings.get("dingtalkOpenConversationId") or "").strip()
     robot_code = str(settings.get("dingtalkRobotCode") or settings.get("dingtalkAppKey") or "").strip()
     if open_conversation_id and robot_code:
@@ -2744,17 +2857,19 @@ def send_dingtalk_file(file_path: Path) -> dict[str, Any]:
                 "fileType": "xlsx",
             }, ensure_ascii=False),
         }
-        request = urllib.request.Request(
-            "https://api.dingtalk.com/v1.0/robot/groupMessages/send",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "x-acs-dingtalk-access-token": access_token,
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=15) as response:
-            body = json.loads(response.read().decode("utf-8") or "{}")
+        try:
+            body = dingtalk_request_json(
+                "https://api.dingtalk.com/v1.0/robot/groupMessages/send",
+                payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-acs-dingtalk-access-token": access_token,
+                },
+                timeout=20,
+                retries=2,
+            )
+        except RuntimeError as exc:
+            return {"success": False, "message": str(exc), "mediaId": media_id, "target": "openConversationId"}
         success = not body.get("code") and body.get("processQueryKey") is not None
         return {"success": success, "body": body, "mediaId": media_id, "target": "openConversationId"}
 
@@ -2769,14 +2884,16 @@ def send_dingtalk_file(file_path: Path) -> dict[str, Any]:
         },
     }
     url = f"https://oapi.dingtalk.com/chat/send?access_token={urllib.parse.quote(access_token)}"
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        body = json.loads(response.read().decode("utf-8") or "{}")
+    try:
+        body = dingtalk_request_json(
+            url,
+            payload,
+            headers={"Content-Type": "application/json"},
+            timeout=20,
+            retries=2,
+        )
+    except RuntimeError as exc:
+        return {"success": False, "message": str(exc), "mediaId": media_id}
     return {"success": body.get("errcode") == 0, "body": body, "mediaId": media_id}
 
 
